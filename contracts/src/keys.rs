@@ -131,19 +131,11 @@ pub fn account_balance_key(env: &Env, market_id: u32) -> BytesN<32> {
     market_scoped_key(env, b"acct_bal", market_id)
 }
 
-pub fn claimable_fee_amount_key(env: &Env, market_id: u32) -> BytesN<32> {
-    market_scoped_key(env, b"clmfee_a", market_id)
-}
-
-pub fn market_order_expiry_ledgers_key(env: &Env) -> BytesN<32> {
+/// Returns the data-store key for the maximum number of markets allowed in a
+/// swap path.
+pub fn max_swap_path_length_key(env: &Env) -> BytesN<32> {
     let mut buf = [0u8; 32];
-    buf[..16].copy_from_slice(b"mkt_ord_exp_legd");
-    BytesN::from_array(env, &buf)
-}
-
-pub fn limit_order_expiry_ledgers_key(env: &Env) -> BytesN<32> {
-    let mut buf = [0u8; 32];
-    buf[..16].copy_from_slice(b"lmt_ord_exp_legd");
+    buf[..8].copy_from_slice(b"maxswpth");
     BytesN::from_array(env, &buf)
 }
 
