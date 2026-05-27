@@ -57,3 +57,43 @@ pub fn market_count_key(env: &Env) -> BytesN<32> {
     buf[..9].copy_from_slice(b"mkt_count");
     BytesN::from_array(env, &buf)
 }
+
+// ---------------------------------------------------------------------------
+// Liquidity key generators (pools, fees) — issues #17, #20
+// ---------------------------------------------------------------------------
+
+/// Builds a 32-byte key from an 8-byte ASCII `prefix` and `market_id`.
+fn market_scoped_key(env: &Env, prefix: &[u8; 8], market_id: u32) -> BytesN<32> {
+    let mut buf = [0u8; 32];
+    buf[..8].copy_from_slice(prefix);
+    buf[8..12].copy_from_slice(&market_id.to_be_bytes());
+    BytesN::from_array(env, &buf)
+}
+
+/// Returns the data-store key for the long-token pool amount of `market_id`.
+pub fn pool_long_amount_key(env: &Env, market_id: u32) -> BytesN<32> {
+    market_scoped_key(env, b"plong_am", market_id)
+}
+
+/// Returns the data-store key for the short-token pool amount of `market_id`.
+pub fn pool_short_amount_key(env: &Env, market_id: u32) -> BytesN<32> {
+    market_scoped_key(env, b"pshrt_am", market_id)
+}
+
+/// Returns the data-store key for the claimable long-token fee of `market_id`.
+/// Fees accrue here and are claimable by the `fee_handler`.
+pub fn claimable_fee_long_key(env: &Env, market_id: u32) -> BytesN<32> {
+    market_scoped_key(env, b"clmfee_l", market_id)
+}
+
+/// Returns the data-store key for the claimable short-token fee of `market_id`.
+pub fn claimable_fee_short_key(env: &Env, market_id: u32) -> BytesN<32> {
+    market_scoped_key(env, b"clmfee_s", market_id)
+}
+
+/// Returns the data-store key holding the optional withdrawal fee factor for
+/// `market_id`. When unset (or zero) no fee is charged. The factor is expressed
+/// against [`crate::liquidity_handler::FEE_FACTOR_DENOMINATOR`].
+pub fn withdrawal_fee_factor_key(env: &Env, market_id: u32) -> BytesN<32> {
+    market_scoped_key(env, b"wfeefact", market_id)
+}
