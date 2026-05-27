@@ -227,7 +227,6 @@ pub enum RouterAction {
     ClaimFundingFees(u32, Address),
 }
 
-
 // ---------------------------------------------------------------------------
 // Order / position types (issues #43, #44, #45, #46)
 // ---------------------------------------------------------------------------
@@ -301,4 +300,25 @@ pub struct Order {
     pub collateral_delta: u128,
     /// Trigger price (0 for market orders).
     pub trigger_price: u128,
+}
+
+// ---------------------------------------------------------------------------
+// Config handler errors
+// ---------------------------------------------------------------------------
+
+/// Errors returned by the `config_handler` contract.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ConfigError {
+    /// Caller does not hold the required role.
+    Unauthorized = 20,
+    /// The requested market does not exist.
+    MarketNotFound = 21,
+}
+
+impl From<ConfigError> for soroban_sdk::Error {
+    fn from(e: ConfigError) -> Self {
+        soroban_sdk::Error::from_contract_error(e as u32)
+    }
 }
