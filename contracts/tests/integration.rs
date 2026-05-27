@@ -17,7 +17,10 @@
 
 use contracts::{
     data_store::{apply_delta_to_u128, DataStore, DataStoreClient, TtlEstimate},
-    keys::market_maintenance_margin_factor_key,
+    keys::{
+        market_maintenance_margin_factor_key, max_pnl_factor_for_adl_key, pool_long_amount_key,
+        pool_short_amount_key, should_enable_adl_key,
+    },
     liquidity_handler::{LiquidityHandler, LiquidityHandlerClient},
     position_handler::{PositionHandler, PositionHandlerClient},
     market_factory::{market_keeper_role, MarketFactory, MarketFactoryClient},
@@ -149,6 +152,69 @@ fn test_position_handler_is_liquidatable_uses_worst_case_pricing() {
 // ---------------------------------------------------------------------------
 // Issue #1 — role metadata
 // ---------------------------------------------------------------------------
+
+#[test]
+fn test_update_adl_state_toggles_signal_from_pnl_factor() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let rs_id = env.register(RoleStore, ());
+    let rs = RoleStoreClient::new(&env, &rs_id);
+    let admin = Address::generate(&env);
+    rs.initialize(&admin);
+
+    let ds_id = env.register(DataStore, ());
+    let ds = DataStoreClient::new(&env, &ds_id);
+    ds.initialize(&admin);
+
+    let lh_id = env.register(LiquidityHandler, ());
+    let lhc = LiquidityHandlerClient::new(&env, &lh_id);
+    lhc.initialize(&rs_id, &ds_id);
+
+    let ph_id = env.register(PositionHandler, ());
+    let phc = PositionHandlerClient::new(&env, &ph_id);
+    phc.initialize(&ds_id, &lh_id);
+
+    let market_id = 61u32;
+    let is_long = true;
+    let user = Address::generate(&env);
+    let position_key = make_key(&env, 61);
+    let position = PositionProps {
+        position_key: position_key.clone(),
+        account: user,
+        market_id,
+        quantity: 1_000u128,
+        collateral_amount: 100u128,
+        average_price: 100u128,
+        is_long,
+        is_open: true,
+    };
+    ds.set_position_props(&admin, &position_key, &position);
+    ds.add_position_to_oi_list(&admin, &market_id, &is_long, &position_key);
+    ds.set_u128(&admin, &pool_long_amount_key(&env, market_id), &10u128);
+    ds.set_u128(&admin, &pool_short_amount_key(&env, market_id), &0u128);
+    ds.set_u128(
+        &admin,
+        &max_pnl_factor_for_adl_key(&env, market_id, is_long),
+        &200_000u128,
+    );
+
+    lhc.set_oracle_prices(&admin, &market_id, &150u128, &1u128);
+    assert!(phc.update_adl_state(&market_id, &is_long));
+    assert_eq!(
+        ds.get_u128(&should_enable_adl_key(&env, market_id, is_long))
+            .unwrap_or(0),
+        1u128
+    );
+
+    lhc.set_oracle_prices(&admin, &market_id, &110u128, &1u128);
+    assert!(!phc.update_adl_state(&market_id, &is_long));
+    assert_eq!(
+        ds.get_u128(&should_enable_adl_key(&env, market_id, is_long))
+            .unwrap_or(1),
+        0u128
+    );
+}
 
 #[test]
 fn test_set_and_get_role_metadata() {

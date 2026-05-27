@@ -2,10 +2,13 @@ use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Addres
 
 use crate::{
     data_store::DataStoreClient,
+    keys::{
+        market_maintenance_margin_factor_key, max_pnl_factor_for_adl_key, pool_long_amount_key,
+        pool_short_amount_key, should_enable_adl_key,
+    },
     liquidity_handler::LiquidityHandlerClient,
-    keys::market_maintenance_margin_factor_key,
-    types::{PositionError, PositionProps},
     position_utils,
+    types::{PositionError, PositionProps},
 };
 
 #[contract]
@@ -61,6 +64,57 @@ impl PositionHandler {
         };
 
         position_utils::is_liquidatable(&pos, price, margin_factor)
+    }
+
+    /// Computes the current PnL factor for a market side and stores the ADL
+    /// keeper signal in data_store.
+    pub fn update_adl_state(env: Env, market_id: u32, is_long: bool) -> bool {
+        let ds = Self::data_store(&env);
+        let lh = Self::liquidity_handler(&env);
+        let prices = lh.oracle_prices(&market_id);
+        let price = if is_long {
+            prices.long_price
+        } else {
+            prices.short_price
+        };
+
+        let positions = ds.get_all_positions_for_market(&market_id, &is_long, &0u32, &u32::MAX);
+        let mut total_pnl: u128 = 0;
+        for pos in positions.iter() {
+            let pnl = position_utils::calculate_pnl(&pos, price);
+            if pnl > 0 {
+                total_pnl = total_pnl.saturating_add(pnl as u128);
+            }
+        }
+
+        let pool_long = ds
+            .get_u128(&pool_long_amount_key(&env, market_id))
+            .unwrap_or(0);
+        let pool_short = ds
+            .get_u128(&pool_short_amount_key(&env, market_id))
+            .unwrap_or(0);
+        let pool_value = pool_long
+            .saturating_mul(prices.long_price)
+            .saturating_add(pool_short.saturating_mul(prices.short_price));
+
+        let pnl_factor = if pool_value == 0 {
+            0
+        } else {
+            total_pnl.saturating_mul(position_utils::PRECISION) / pool_value
+        };
+        let max_pnl_factor = ds
+            .get_u128(&max_pnl_factor_for_adl_key(&env, market_id, is_long))
+            .unwrap_or(u128::MAX);
+        let should_enable_adl = pnl_factor > max_pnl_factor;
+        let flag = if should_enable_adl { 1u128 } else { 0u128 };
+
+        ds.set_u128(
+            &env.current_contract_address(),
+            &should_enable_adl_key(&env, market_id, is_long),
+            &flag,
+        );
+
+        should_enable_adl
     }
 
     // -----------------------------------------------------------------------

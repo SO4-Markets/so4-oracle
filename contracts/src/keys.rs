@@ -150,6 +150,26 @@ pub fn account_balance_key(env: &Env, market_id: u32) -> BytesN<32> {
     market_scoped_key(env, b"acct_bal", market_id)
 }
 
+/// Returns the data-store key for the max PnL factor that allows a side to
+/// avoid ADL. Values use [`crate::position_utils::PRECISION`].
+pub fn max_pnl_factor_for_adl_key(env: &Env, market_id: u32, is_long: bool) -> BytesN<32> {
+    let mut buf = [0u8; 32];
+    buf[..8].copy_from_slice(b"adlmxfac");
+    buf[8..12].copy_from_slice(&market_id.to_be_bytes());
+    buf[12] = if is_long { 1 } else { 0 };
+    BytesN::from_array(env, &buf)
+}
+
+/// Returns the data-store key for the keeper ADL signal flag.
+/// Stores 1 when ADL should be enabled, otherwise 0.
+pub fn should_enable_adl_key(env: &Env, market_id: u32, is_long: bool) -> BytesN<32> {
+    let mut buf = [0u8; 32];
+    buf[..8].copy_from_slice(b"adlenabl");
+    buf[8..12].copy_from_slice(&market_id.to_be_bytes());
+    buf[12] = if is_long { 1 } else { 0 };
+    BytesN::from_array(env, &buf)
+}
+
 // ---------------------------------------------------------------------------
 // Config handler key generators (issue #30)
 // ---------------------------------------------------------------------------
