@@ -4,7 +4,7 @@ use soroban_sdk::{
     Address, BytesN, Env, Vec,
 };
 
-use crate::types::PositionProps;
+use crate::types::{Order, PositionProps};
 
 // ---------------------------------------------------------------------------
 // Error codes
@@ -72,6 +72,8 @@ pub enum DataPersistentKey {
 #[derive(Clone)]
 pub enum DataKey {
     PositionProps(BytesN<32>),
+    Order(BytesN<32>),
+    ExecutionFee(Address),
     AccountPositionList(Address),
     PositionList,
     PositionOiList(BytesN<32>),
@@ -384,6 +386,38 @@ impl DataStore {
         env.storage()
             .persistent()
             .get(&DataKey::PositionProps(position_key))
+    }
+
+    pub fn set_order(env: Env, caller: Address, order_key: BytesN<32>, order: Order) {
+        caller.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Order(order_key), &order);
+    }
+
+    pub fn get_order(env: Env, order_key: BytesN<32>) -> Option<Order> {
+        env.storage().persistent().get(&DataKey::Order(order_key))
+    }
+
+    pub fn remove_order(env: Env, caller: Address, order_key: BytesN<32>) {
+        caller.require_auth();
+        env.storage().persistent().remove(&DataKey::Order(order_key));
+    }
+
+    pub fn credit_execution_fee(env: Env, caller: Address, keeper: Address, amount: u128) {
+        caller.require_auth();
+        let key = DataKey::ExecutionFee(keeper);
+        let current: u128 = env.storage().persistent().get(&key).unwrap_or(0u128);
+        env.storage()
+            .persistent()
+            .set(&key, &current.saturating_add(amount));
+    }
+
+    pub fn get_execution_fee_balance(env: Env, keeper: Address) -> u128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ExecutionFee(keeper))
+            .unwrap_or(0u128)
     }
 
     pub fn add_account_position(

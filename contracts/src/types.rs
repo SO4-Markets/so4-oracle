@@ -242,6 +242,8 @@ pub enum OrderError {
     OrderNotFound = 41,
     /// The swap output is below the caller-specified minimum.
     InsufficientOutput = 42,
+    /// The execution price is outside the order's acceptable price bound.
+    UnacceptablePrice = 43,
 }
 
 impl From<OrderError> for soroban_sdk::Error {

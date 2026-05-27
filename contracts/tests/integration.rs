@@ -19,11 +19,11 @@ use contracts::{
     data_store::{apply_delta_to_u128, DataStore, DataStoreClient, TtlEstimate},
     keys::market_maintenance_margin_factor_key,
     liquidity_handler::{LiquidityHandler, LiquidityHandlerClient},
-    position_handler::{PositionHandler, PositionHandlerClient},
     market_factory::{market_keeper_role, MarketFactory, MarketFactoryClient},
-    role_store::{RoleMetadata, RoleStore, RoleStoreClient},
-    types::{MarketConfig, PositionProps},
     order_handler::{OrderHandler, OrderHandlerClient},
+    position_handler::{PositionHandler, PositionHandlerClient},
+    role_store::{RoleMetadata, RoleStore, RoleStoreClient},
+    types::{MarketConfig, Order, OrderType, PositionProps},
 };
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _},
@@ -1343,6 +1343,97 @@ fn setup_order_handler<'a>(env: &'a Env, data_store: &'a Address) -> OrderHandle
     let client = OrderHandlerClient::new(env, &contract_id);
     client.initialize(data_store);
     client
+}
+
+#[test]
+fn test_execute_market_increase_order_opens_long_position() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let ds = setup_data_store(&env);
+    let admin = Address::generate(&env);
+    ds.initialize(&admin);
+
+    let oh = setup_order_handler(&env, &ds.address);
+    let user = Address::generate(&env);
+    let keeper = Address::generate(&env);
+    let order_key = make_key(&env, 111);
+    let position_key = make_key(&env, 112);
+    let market_id = 33u32;
+
+    let order = Order {
+        account: user.clone(),
+        market_id,
+        order_type: OrderType::MarketIncrease,
+        is_long: true,
+        size_delta_usd: 10_000u128,
+        collateral_delta: 1_000u128,
+        trigger_price: 0u128,
+    };
+    ds.set_order(&admin, &order_key, &order);
+
+    let props = oh.execute_order(
+        &keeper,
+        &order_key,
+        &position_key,
+        &100u128,
+        &105u128,
+        &25u128,
+    );
+
+    assert_eq!(props.position_key, position_key);
+    assert_eq!(props.account, user);
+    assert_eq!(props.market_id, market_id);
+    assert_eq!(props.quantity, 10_000u128);
+    assert_eq!(props.collateral_amount, 1_000u128);
+    assert_eq!(props.average_price, 100u128);
+    assert!(props.is_long);
+    assert!(props.is_open);
+
+    let stored = ds.get_position_props(&position_key).unwrap();
+    assert_eq!(stored, props);
+    assert!(ds.get_order(&order_key).is_none());
+    assert_eq!(ds.get_execution_fee_balance(&keeper), 25u128);
+    assert_eq!(ds.get_position_count(), 1u32);
+    assert_eq!(ds.get_account_position_count(&user), 1u32);
+    assert_eq!(ds.get_position_oi_list_count(&market_id, &true), 1u32);
+}
+
+#[test]
+#[should_panic]
+fn test_execute_market_increase_long_reverts_above_acceptable_price() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let ds = setup_data_store(&env);
+    let admin = Address::generate(&env);
+    ds.initialize(&admin);
+
+    let oh = setup_order_handler(&env, &ds.address);
+    let user = Address::generate(&env);
+    let keeper = Address::generate(&env);
+    let order_key = make_key(&env, 113);
+    let position_key = make_key(&env, 114);
+
+    let order = Order {
+        account: user,
+        market_id: 34u32,
+        order_type: OrderType::MarketIncrease,
+        is_long: true,
+        size_delta_usd: 10_000u128,
+        collateral_delta: 1_000u128,
+        trigger_price: 0u128,
+    };
+    ds.set_order(&admin, &order_key, &order);
+
+    oh.execute_market_increase_order(
+        &keeper,
+        &order_key,
+        &position_key,
+        &106u128,
+        &105u128,
+        &25u128,
+    );
 }
 
 #[test]
