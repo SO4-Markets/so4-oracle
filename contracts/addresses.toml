@@ -1,0 +1,23 @@
+# SO4 Oracle — Contract Address Registry
+# Format: [network.contract_name]
+# address = "C..." (Stellar contract ID)
+# deployed_at = "YYYY-MM-DD"
+
+[testnet]
+# Core oracle contract
+oracle = { address = "", deployed_at = "" }
+
+# Market contracts
+market_registry = { address = "", deployed_at = "" }
+
+# Order handler
+order_handler = { address = "", deployed_at = "" }
+
+# Price feed
+price_feed = { address = "", deployed_at = "" }
+
+[mainnet]
+oracle = { address = "", deployed_at = "" }
+market_registry = { address = "", deployed_at = "" }
+order_handler = { address = "", deployed_at = "" }
+price_feed = { address = "", deployed_at = "" }
