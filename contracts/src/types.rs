@@ -330,3 +330,28 @@ impl From<ConfigError> for soroban_sdk::Error {
         soroban_sdk::Error::from_contract_error(e as u32)
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADL handler errors (issue #59)
+// ---------------------------------------------------------------------------
+
+/// Errors returned by the `adl_handler` contract.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum AdlError {
+    /// The PnL factor is below the max threshold; ADL is not required.
+    AdlNotRequired = 50,
+    /// The target position has negative PnL; it cannot be ADLed.
+    NotProfitable = 51,
+    /// Caller does not hold the required role.
+    Unauthorized = 52,
+    /// The requested position does not exist or is already closed.
+    PositionNotFound = 53,
+}
+
+impl From<AdlError> for soroban_sdk::Error {
+    fn from(e: AdlError) -> Self {
+        soroban_sdk::Error::from_contract_error(e as u32)
+    }
+}

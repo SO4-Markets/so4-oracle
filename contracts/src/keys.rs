@@ -189,3 +189,14 @@ pub fn max_leverage_key(env: &Env, market_id: u32) -> BytesN<32> {
     market_scoped_key(env, b"cfgmxlev", market_id)
 }
 
+// ---------------------------------------------------------------------------
+// ADL key generators (issue #59)
+// ---------------------------------------------------------------------------
+
+/// Returns the data-store key for the max PnL factor of `market_id`.
+/// When the PnL factor (`total_pnl * PRECISION / pool_value`) exceeds this
+/// threshold, ADL is triggered. The factor is scaled by 1,000,000.
+pub fn max_pnl_factor_key(env: &Env, market_id: u32) -> BytesN<32> {
+    market_scoped_key(env, b"maxpnlfc", market_id)
+}
+

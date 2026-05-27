@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod adl_handler;
 pub mod config_handler;
 pub mod router;
 pub mod data_store;
