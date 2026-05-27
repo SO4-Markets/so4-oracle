@@ -25,6 +25,7 @@ struct Setup {
     long: Address,
     short: Address,
     ds_addr: Address,
+    lh_addr: Address,
     oh_addr: Address,
 }
 
@@ -75,6 +76,7 @@ fn setup() -> Setup {
         long,
         short,
         ds_addr: ds_addr.clone(),
+        lh_addr: lh_addr.clone(),
         oh_addr: oh_addr.clone(),
     }
 }
@@ -85,6 +87,10 @@ fn ds<'a>(s: &'a Setup) -> DataStoreClient<'a> {
 
 fn oh<'a>(s: &'a Setup) -> OrderHandlerClient<'a> {
     OrderHandlerClient::new(&s.env, &s.oh_addr)
+}
+
+fn lh<'a>(s: &'a Setup) -> LiquidityHandlerClient<'a> {
+    LiquidityHandlerClient::new(&s.env, &s.lh_addr)
 }
 
 fn mint(env: &Env, token: &Address, to: &Address, amount: i128) {
@@ -285,4 +291,128 @@ fn test_market_swap_round_trip_applies_fee_and_price_impact() {
         expected_fee
     );
     assert_eq!(oh(&s).get_order(&order_key), None);
+}
+
+#[test]
+fn test_stop_loss_decrease_executes_below_trigger() {
+    let s = setup();
+    let long_token = TokenClient::new(&s.env, &s.long);
+
+    mint(&s.env, &s.long, &s.oh_addr, 1_000);
+    oh(&s).set_position(
+        &s.admin,
+        &Position {
+            account: s.user.clone(),
+            market_id: MARKET,
+            is_long: true,
+            size_in_usd: 1_000,
+            size_in_tokens: 10,
+            collateral_amount: 1_000,
+        },
+    );
+
+    let order_key = oh(&s).create_order(
+        &s.user,
+        &MARKET,
+        &OrderType::StopLossDecrease,
+        &s.long,
+        &true,
+        &1_000u128,
+        &0u128,
+        &70u128,
+        &0u128,
+        &0u128,
+    );
+
+    lh(&s).set_oracle_prices(&s.admin, &MARKET, &60u128, &1u128);
+    oh(&s).execute_order(&s.keeper, &order_key);
+
+    assert_eq!(oh(&s).get_position(&s.user, &MARKET, &true), None);
+    assert_eq!(oh(&s).get_order(&order_key), None);
+    assert_eq!(long_token.balance(&s.user), 1_000);
+}
+
+#[test]
+fn test_stop_loss_decrease_rejects_above_trigger() {
+    let s = setup();
+
+    mint(&s.env, &s.long, &s.oh_addr, 1_000);
+    oh(&s).set_position(
+        &s.admin,
+        &Position {
+            account: s.user.clone(),
+            market_id: MARKET,
+            is_long: true,
+            size_in_usd: 1_000,
+            size_in_tokens: 10,
+            collateral_amount: 1_000,
+        },
+    );
+
+    let order_key = oh(&s).create_order(
+        &s.user,
+        &MARKET,
+        &OrderType::StopLossDecrease,
+        &s.long,
+        &true,
+        &1_000u128,
+        &0u128,
+        &70u128,
+        &0u128,
+        &0u128,
+    );
+
+    lh(&s).set_oracle_prices(&s.admin, &MARKET, &80u128, &1u128);
+    let err = s.env.try_invoke_contract::<(), soroban_sdk::Error>(
+        &s.oh_addr,
+        &soroban_sdk::Symbol::new(&s.env, "execute_order"),
+        soroban_sdk::vec![
+            &s.env,
+            s.keeper.clone().into_val(&s.env),
+            order_key.into_val(&s.env),
+        ],
+    );
+
+    assert!(err.is_err(), "stop loss should stay pending above trigger");
+    assert!(oh(&s).get_position(&s.user, &MARKET, &true).is_some());
+    assert!(oh(&s).get_order(&order_key).is_some());
+}
+
+#[test]
+fn test_short_limit_decrease_executes_below_trigger() {
+    let s = setup();
+    let short_token = TokenClient::new(&s.env, &s.short);
+
+    mint(&s.env, &s.short, &s.oh_addr, 1_000);
+    oh(&s).set_position(
+        &s.admin,
+        &Position {
+            account: s.user.clone(),
+            market_id: MARKET,
+            is_long: false,
+            size_in_usd: 1_000,
+            size_in_tokens: 10,
+            collateral_amount: 1_000,
+        },
+    );
+
+    let order_key = oh(&s).create_order(
+        &s.user,
+        &MARKET,
+        &OrderType::LimitDecrease,
+        &s.short,
+        &false,
+        &1_000u128,
+        &0u128,
+        &70u128,
+        &0u128,
+        &0u128,
+    );
+
+    lh(&s).set_oracle_prices(&s.admin, &MARKET, &2u128, &60u128);
+    oh(&s).execute_order(&s.keeper, &order_key);
+
+    assert_eq!(oh(&s).get_position(&s.user, &MARKET, &false), None);
+    assert_eq!(oh(&s).get_order(&order_key), None);
+    assert_eq!(short_token.balance(&s.user), 1_000);
 }

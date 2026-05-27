@@ -161,6 +161,7 @@ pub enum OrderType {
     MarketIncrease,
     MarketDecrease,
     LimitIncrease,
+    LimitDecrease,
     StopIncrease,
     StopLossDecrease,
     LimitSwap,

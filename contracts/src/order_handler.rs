@@ -246,6 +246,7 @@ impl OrderHandler {
 
         match order.order_type {
             OrderType::MarketSwap => Self::execute_market_swap(&env, &order),
+            OrderType::LimitDecrease | OrderType::StopLossDecrease => Self::execute_triggered_decrease(&env, &order),
             _ => panic_with_error!(&env, OrderError::InvalidOrderType),
         }
     }
@@ -426,6 +427,66 @@ impl OrderHandler {
             ("swap_exec",),
             (order.key, order.market_id, order.amount_in, output_amount, fee, price_impact),
         );
+    }
+
+    fn execute_triggered_decrease(env: &Env, order: &Order) {
+        let prices = Self::liquidity_handler(env).oracle_prices(&order.market_id);
+        let index_price = if order.is_long {
+            prices.long_price
+        } else {
+            prices.short_price
+        };
+
+        if !Self::is_decrease_trigger_satisfied(order, index_price) {
+            panic_with_error!(env, OrderError::UnsatisfiedTrigger);
+        }
+
+        let mut position = Self::get_position_internal(env, &order.account, order.market_id, order.is_long);
+        let ds = Self::data_store(env);
+        let writer = env.current_contract_address();
+        let released_collateral = decrease_position(
+            env,
+            &ds,
+            &writer,
+            &mut position,
+            order.size_delta_usd,
+            index_price,
+        );
+
+        if released_collateral > 0 {
+            token::TokenClient::new(env, &order.collateral_token).transfer(
+                &env.current_contract_address(),
+                &order.account,
+                &(released_collateral as i128),
+            );
+        }
+
+        let position_key = OrderHandlerKey::Position(order.market_id, order.account.clone(), order.is_long);
+        if position.size_in_usd == 0 {
+            env.storage().persistent().remove(&position_key);
+        } else {
+            env.storage().persistent().set(&position_key, &position);
+        }
+
+        env.storage().persistent().remove(&OrderHandlerKey::Order(order.key));
+        env.events().publish(
+            ("decrease_exec",),
+            (order.key, order.account.clone(), order.market_id, released_collateral),
+        );
+    }
+
+    fn is_decrease_trigger_satisfied(order: &Order, index_price: u128) -> bool {
+        match order.order_type {
+            OrderType::LimitDecrease => {
+                (order.is_long && index_price >= order.trigger_price)
+                    || (!order.is_long && index_price <= order.trigger_price)
+            }
+            OrderType::StopLossDecrease => {
+                (order.is_long && index_price <= order.trigger_price)
+                    || (!order.is_long && index_price >= order.trigger_price)
+            }
+            _ => false,
+        }
     }
 
     fn fully_close_position(env: &Env, caller: &Address, position_key: &BytesN<32>, path: &'static str) {
