@@ -17,13 +17,14 @@
 
 use contracts::{
     data_store::{apply_delta_to_u128, DataStore, DataStoreClient, TtlEstimate},
-    keys::market_maintenance_margin_factor_key,
+    keys::{market_maintenance_margin_factor_key, pool_long_amount_key, pool_short_amount_key},
     liquidity_handler::{LiquidityHandler, LiquidityHandlerClient},
-    position_handler::{PositionHandler, PositionHandlerClient},
     market_factory::{market_keeper_role, MarketFactory, MarketFactoryClient},
-    role_store::{RoleMetadata, RoleStore, RoleStoreClient},
-    types::{MarketConfig, PositionProps},
     order_handler::{OrderHandler, OrderHandlerClient},
+    position_handler::{PositionHandler, PositionHandlerClient},
+    role_store::{RoleMetadata, RoleStore, RoleStoreClient},
+    swap_utils,
+    types::{MarketConfig, PositionProps},
 };
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _},
@@ -84,6 +85,49 @@ fn setup_market_factory<'a>(
     mf.initialize(&rs_id, &ds_id);
 
     (mf, rs, ds, admin)
+}
+
+#[test]
+fn test_two_hop_swap_through_two_markets() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let ds = setup_data_store(&env);
+    let admin = Address::generate(&env);
+    let market_a = 48u32;
+    let market_b = 49u32;
+
+    ds.set_u128(&admin, &pool_long_amount_key(&env, market_a), &10_000u128);
+    ds.set_u128(&admin, &pool_short_amount_key(&env, market_a), &1_000u128);
+    ds.set_u128(&admin, &pool_long_amount_key(&env, market_b), &500u128);
+    ds.set_u128(&admin, &pool_short_amount_key(&env, market_b), &10_000u128);
+
+    let path = [(market_a, true), (market_b, false)];
+    let output = swap_utils::swap_with_path(
+        &env, &ds, &admin, &path, 2_000u128, 2_000u128, 100u128,
+    )
+    .unwrap();
+
+    assert_eq!(output, 2_000u128);
+    assert_eq!(
+        ds.get_u128(&pool_long_amount_key(&env, market_a))
+            .unwrap_or(0),
+        8_000u128
+    );
+    assert_eq!(
+        ds.get_u128(&pool_short_amount_key(&env, market_a))
+            .unwrap_or(0),
+        3_000u128
+    );
+    assert_eq!(
+        ds.get_u128(&pool_short_amount_key(&env, market_b))
+            .unwrap_or(0),
+        8_000u128
+    );
+    assert_eq!(
+        ds.get_u128(&pool_long_amount_key(&env, market_b))
+            .unwrap_or(0),
+        2_500u128
+    );
 }
 
 #[test]

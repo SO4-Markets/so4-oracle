@@ -1,4 +1,4 @@
-//! Tests for order handler logic.
+3//! Tests for order handler logic.
 //!
 //! Issue #43 — full increase + decrease position lifecycle:
 //!   Open a long via MarketIncrease, simulate price movement, close via
@@ -25,7 +25,7 @@ use contracts::{
     increase_position_utils::increase_position,
     keys::{
         account_balance_key, max_open_interest_long_key, open_interest_long_key,
-        pool_long_amount_key, pool_short_amount_key,
+        max_swap_path_length_key, pool_long_amount_key, pool_short_amount_key,
     },
     role_store::{RoleStore, RoleStoreClient},
     swap_utils::{check_limit_swap_trigger, swap},
@@ -742,5 +742,93 @@ fn test_market_swap_insufficient_output_reverts() {
     assert!(
         matches!(result, Err(OrderError::InsufficientOutput)),
         "should return InsufficientOutput"
+    );
+}
+
+/// MarketSwap executes a two-hop path and feeds output into the next market.
+#[test]
+fn test_market_swap_two_hop_path_executes() {
+    let env = Env::default();
+    let (ds, admin) = setup(&env);
+    let first_market: u32 = 32;
+    let second_market: u32 = 33;
+
+    ds.set_u128(&admin, &pool_long_amount_key(&env, first_market), &10_000u128);
+    ds.set_u128(&admin, &pool_short_amount_key(&env, first_market), &1_000u128);
+    ds.set_u128(&admin, &pool_long_amount_key(&env, second_market), &500u128);
+    ds.set_u128(&admin, &pool_short_amount_key(&env, second_market), &10_000u128);
+
+    let path = [(first_market, true), (second_market, false)];
+    let result = contracts::swap_utils::swap_with_path(
+        &env, &ds, &admin, &path, 2_000u128, 2_000u128, 100u128,
+    );
+
+    assert_eq!(result.unwrap(), 2_000u128);
+    assert_eq!(ds.get_u128(&pool_long_amount_key(&env, first_market)).unwrap_or(0), 8_000);
+    assert_eq!(ds.get_u128(&pool_short_amount_key(&env, first_market)).unwrap_or(0), 3_000);
+    assert_eq!(ds.get_u128(&pool_short_amount_key(&env, second_market)).unwrap_or(0), 8_000);
+    assert_eq!(ds.get_u128(&pool_long_amount_key(&env, second_market)).unwrap_or(0), 2_500);
+}
+
+/// MarketSwap executes a three-hop path.
+#[test]
+fn test_market_swap_three_hop_path_executes() {
+    let env = Env::default();
+    let (ds, admin) = setup(&env);
+    let market_a: u32 = 34;
+    let market_b: u32 = 35;
+    let market_c: u32 = 36;
+
+    ds.set_u128(&admin, &pool_long_amount_key(&env, market_a), &10_000u128);
+    ds.set_u128(&admin, &pool_short_amount_key(&env, market_a), &0u128);
+    ds.set_u128(&admin, &pool_long_amount_key(&env, market_b), &0u128);
+    ds.set_u128(&admin, &pool_short_amount_key(&env, market_b), &10_000u128);
+    ds.set_u128(&admin, &pool_long_amount_key(&env, market_c), &10_000u128);
+    ds.set_u128(&admin, &pool_short_amount_key(&env, market_c), &0u128);
+
+    let path = [(market_a, true), (market_b, false), (market_c, true)];
+    let result = contracts::swap_utils::swap_with_path(
+        &env, &ds, &admin, &path, 1_500u128, 1_500u128, 100u128,
+    );
+
+    assert_eq!(result.unwrap(), 1_500u128);
+    assert_eq!(ds.get_u128(&pool_long_amount_key(&env, market_a)).unwrap_or(0), 8_500);
+    assert_eq!(ds.get_u128(&pool_short_amount_key(&env, market_b)).unwrap_or(0), 8_500);
+    assert_eq!(ds.get_u128(&pool_long_amount_key(&env, market_c)).unwrap_or(0), 8_500);
+}
+
+/// MarketSwap rejects paths that contain a duplicate market.
+#[test]
+fn test_market_swap_duplicate_market_in_path_reverts() {
+    let env = Env::default();
+    let (ds, admin) = setup(&env);
+    let market_id: u32 = 37;
+    let path = [(market_id, true), (38u32, true), (market_id, false)];
+
+    let result = contracts::swap_utils::swap_with_path(
+        &env, &ds, &admin, &path, 1_000u128, 1u128, 100u128,
+    );
+
+    assert!(
+        matches!(result, Err(OrderError::DuplicateMarketInPath)),
+        "should reject duplicate markets"
+    );
+}
+
+/// MarketSwap rejects paths above the configured max path length.
+#[test]
+fn test_market_swap_path_too_long_reverts() {
+    let env = Env::default();
+    let (ds, admin) = setup(&env);
+    ds.set_u128(&admin, &max_swap_path_length_key(&env), &2u128);
+    let path = [(39u32, true), (40u32, true), (41u32, true)];
+
+    let result = contracts::swap_utils::swap_with_path(
+        &env, &ds, &admin, &path, 1_000u128, 1u128, 100u128,
+    );
+
+    assert!(
+        matches!(result, Err(OrderError::SwapPathTooLong)),
+        "should reject paths longer than max_swap_path_length"
     );
 }

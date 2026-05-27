@@ -8,7 +8,7 @@ use soroban_sdk::Env;
 
 use crate::{
     data_store::DataStoreClient,
-    keys::{pool_long_amount_key, pool_short_amount_key},
+    keys::{max_swap_path_length_key, pool_long_amount_key, pool_short_amount_key},
     types::OrderError,
 };
 
@@ -102,6 +102,21 @@ pub fn swap_with_path(
     min_output_amount: u128,
     execution_price: u128,
 ) -> Result<u128, OrderError> {
+    let max_path_length = ds
+        .get_u128(&max_swap_path_length_key(env))
+        .unwrap_or(u128::MAX);
+    if path.len() as u128 > max_path_length {
+        return Err(OrderError::SwapPathTooLong);
+    }
+
+    for i in 0..path.len() {
+        for j in (i + 1)..path.len() {
+            if path[i].0 == path[j].0 {
+                return Err(OrderError::DuplicateMarketInPath);
+            }
+        }
+    }
+
     let mut amount = amount_in;
 
     for &(market_id, is_sell) in path {

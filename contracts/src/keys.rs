@@ -150,6 +150,14 @@ pub fn account_balance_key(env: &Env, market_id: u32) -> BytesN<32> {
     market_scoped_key(env, b"acct_bal", market_id)
 }
 
+/// Returns the data-store key for the maximum number of markets allowed in a
+/// swap path.
+pub fn max_swap_path_length_key(env: &Env) -> BytesN<32> {
+    let mut buf = [0u8; 32];
+    buf[..8].copy_from_slice(b"maxswpth");
+    BytesN::from_array(env, &buf)
+}
+
 // ---------------------------------------------------------------------------
 // Config handler key generators (issue #30)
 // ---------------------------------------------------------------------------

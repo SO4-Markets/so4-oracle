@@ -242,6 +242,10 @@ pub enum OrderError {
     OrderNotFound = 41,
     /// The swap output is below the caller-specified minimum.
     InsufficientOutput = 42,
+    /// The same market appears more than once in a swap path.
+    DuplicateMarketInPath = 43,
+    /// The swap path exceeds the configured maximum length.
+    SwapPathTooLong = 44,
 }
 
 impl From<OrderError> for soroban_sdk::Error {
