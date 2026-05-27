@@ -11,8 +11,30 @@ use crate::{
     data_store::DataStoreClient,
     keys::{max_open_interest_long_key, max_open_interest_short_key,
            open_interest_long_key, open_interest_short_key},
-    types::{Position, PositionError},
+    types::{Order, OrderError, OrderType, Position, PositionError},
 };
+
+/// Check whether an increase order's trigger condition is satisfied.
+pub fn check_increase_order_trigger(order: &Order, index_price: u128) -> Result<(), OrderError> {
+    let is_satisfied = match order.order_type {
+        OrderType::MarketIncrease => true,
+        OrderType::LimitIncrease => {
+            (order.is_long && index_price <= order.trigger_price)
+                || (!order.is_long && index_price >= order.trigger_price)
+        }
+        OrderType::StopIncrease => {
+            (order.is_long && index_price >= order.trigger_price)
+                || (!order.is_long && index_price <= order.trigger_price)
+        }
+        _ => false,
+    };
+
+    if is_satisfied {
+        Ok(())
+    } else {
+        Err(OrderError::UnsatisfiedTrigger)
+    }
+}
 
 /// Apply a size increase to `position`, updating the data-store OI counters.
 ///

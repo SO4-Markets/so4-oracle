@@ -16,6 +16,7 @@
 #![cfg(test)]
 
 use contracts::{
+    adl_handler::{AdlHandler, AdlHandlerClient},
     data_store::{apply_delta_to_u128, DataStore, DataStoreClient, TtlEstimate},
     keys::{market_maintenance_margin_factor_key, pool_long_amount_key, pool_short_amount_key},
     liquidity_handler::{LiquidityHandler, LiquidityHandlerClient},

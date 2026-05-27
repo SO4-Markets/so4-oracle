@@ -40,6 +40,20 @@ pub fn is_liquidatable(
     remaining_collateral < maintenance_margin
 }
 
+/// Returns whether the pool's total PnL exposure has reached `max_pnl_factor`.
+///
+/// ADL is triggered when: `total_pnl / pool_value >= max_pnl_factor / PRECISION`
+/// i.e. `total_pnl * PRECISION >= pool_value * max_pnl_factor`
+///
+/// Returns `false` when `pool_value` is zero to avoid division by zero.
+pub fn is_adl_triggered(total_pnl: i128, pool_value: u128, max_pnl_factor: u128) -> bool {
+    if pool_value == 0 || total_pnl <= 0 {
+        return false;
+    }
+    let pnl = total_pnl as u128;
+    pnl * PRECISION >= pool_value * max_pnl_factor
+}
+
 /// Calculates PnL for a position.
 /// PnL = Notional * (CurrentPrice / AveragePrice - 1) for Long
 /// PnL = Notional * (1 - CurrentPrice / AveragePrice) for Short

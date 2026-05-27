@@ -1,6 +1,4 @@
-use soroban_sdk::{
-    contract, contractimpl, contracttype, panic_with_error, Address, Env,
-};
+use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Address, Env};
 
 use crate::{
     data_store::DataStoreClient,
@@ -76,7 +74,10 @@ impl LiquidityHandler {
         Self::require_admin_or_keeper(&env, &caller);
         env.storage().persistent().set(
             &LhKey::Market(market_id),
-            &MarketTokens { long_token, short_token },
+            &MarketTokens {
+                long_token,
+                short_token,
+            },
         );
     }
 
@@ -93,7 +94,10 @@ impl LiquidityHandler {
         Self::require_admin_or_keeper(&env, &caller);
         env.storage().persistent().set(
             &LhKey::Price(market_id),
-            &OraclePrices { long_price, short_price },
+            &OraclePrices {
+                long_price,
+                short_price,
+            },
         );
     }
 
@@ -132,7 +136,7 @@ impl LiquidityHandler {
             panic_with_error!(&env, LiquidityError::ZeroAmount);
         }
 
-        let tokens = Self::market_tokens(&env, market_id);
+        let tokens = Self::market_tokens_internal(&env, market_id);
         let prices = Self::oracle_prices_internal(&env, market_id);
         let ds = Self::data_store(&env);
         let writer = env.current_contract_address();
@@ -141,8 +145,12 @@ impl LiquidityHandler {
         market_token::deposit_to_pool(&env, &tokens.long_token, &caller, long_amount);
         market_token::deposit_to_pool(&env, &tokens.short_token, &caller, short_amount);
 
-        let pool_long = ds.get_u128(&pool_long_amount_key(&env, market_id)).unwrap_or(0);
-        let pool_short = ds.get_u128(&pool_short_amount_key(&env, market_id)).unwrap_or(0);
+        let pool_long = ds
+            .get_u128(&pool_long_amount_key(&env, market_id))
+            .unwrap_or(0);
+        let pool_short = ds
+            .get_u128(&pool_short_amount_key(&env, market_id))
+            .unwrap_or(0);
         let supply = Self::lp_supply(env.clone(), market_id);
 
         let deposit_value = long_amount * prices.long_price + short_amount * prices.short_price;
@@ -159,8 +167,16 @@ impl LiquidityHandler {
         };
 
         // Update pool amounts in the shared data_store.
-        ds.set_u128(&writer, &pool_long_amount_key(&env, market_id), &(pool_long + long_amount));
-        ds.set_u128(&writer, &pool_short_amount_key(&env, market_id), &(pool_short + short_amount));
+        ds.set_u128(
+            &writer,
+            &pool_long_amount_key(&env, market_id),
+            &(pool_long + long_amount),
+        );
+        ds.set_u128(
+            &writer,
+            &pool_short_amount_key(&env, market_id),
+            &(pool_short + short_amount),
+        );
 
         // Mint LP shares to the receiver.
         Self::credit_lp(&env, market_id, &receiver, lp_minted);
@@ -188,7 +204,7 @@ impl LiquidityHandler {
     ) -> u32 {
         caller.require_auth();
         // Ensure the market is registered.
-        let _ = Self::market_tokens(&env, market_id);
+        let _ = Self::market_tokens_internal(&env, market_id);
         if lp_amount == 0 {
             panic_with_error!(&env, LiquidityError::ZeroAmount);
         }
@@ -210,7 +226,9 @@ impl LiquidityHandler {
             min_long_out,
             min_short_out,
         };
-        env.storage().persistent().set(&LhKey::Withdrawal(id), &record);
+        env.storage()
+            .persistent()
+            .set(&LhKey::Withdrawal(id), &record);
 
         env.events()
             .publish(("with_create",), (id, market_id, lp_amount));
@@ -223,12 +241,16 @@ impl LiquidityHandler {
     pub fn execute_withdrawal(env: Env, caller: Address, withdrawal_id: u32) {
         caller.require_auth();
 
-        let w: Withdrawal = match env.storage().persistent().get(&LhKey::Withdrawal(withdrawal_id)) {
+        let w: Withdrawal = match env
+            .storage()
+            .persistent()
+            .get(&LhKey::Withdrawal(withdrawal_id))
+        {
             Some(w) => w,
             None => panic_with_error!(&env, LiquidityError::WithdrawalNotFound),
         };
 
-        let tokens = Self::market_tokens(&env, w.market_id);
+        let tokens = Self::market_tokens_internal(&env, w.market_id);
         // Oracle prices must be set for the market (they may have moved since
         // the deposit — withdrawal uses current pool value).
         let _ = Self::oracle_prices_internal(&env, w.market_id);
@@ -236,8 +258,12 @@ impl LiquidityHandler {
         let ds = Self::data_store(&env);
         let writer = env.current_contract_address();
 
-        let pool_long = ds.get_u128(&pool_long_amount_key(&env, w.market_id)).unwrap_or(0);
-        let pool_short = ds.get_u128(&pool_short_amount_key(&env, w.market_id)).unwrap_or(0);
+        let pool_long = ds
+            .get_u128(&pool_long_amount_key(&env, w.market_id))
+            .unwrap_or(0);
+        let pool_short = ds
+            .get_u128(&pool_short_amount_key(&env, w.market_id))
+            .unwrap_or(0);
         let supply = Self::lp_supply(env.clone(), w.market_id);
         if supply == 0 {
             panic_with_error!(&env, LiquidityError::InsufficientLp);
@@ -269,8 +295,16 @@ impl LiquidityHandler {
 
         // Decrement pool amounts by the gross (the fee portion stays in the
         // vault, earmarked as claimable).
-        ds.set_u128(&writer, &pool_long_amount_key(&env, w.market_id), &checked_sub_u128(pool_long, long_gross));
-        ds.set_u128(&writer, &pool_short_amount_key(&env, w.market_id), &checked_sub_u128(pool_short, short_gross));
+        ds.set_u128(
+            &writer,
+            &pool_long_amount_key(&env, w.market_id),
+            &checked_sub_u128(pool_long, long_gross),
+        );
+        ds.set_u128(
+            &writer,
+            &pool_short_amount_key(&env, w.market_id),
+            &checked_sub_u128(pool_short, short_gross),
+        );
 
         // Accrue claimable fees to data_store for the fee_handler.
         if long_fee > 0 {
@@ -289,7 +323,9 @@ impl LiquidityHandler {
         market_token::withdraw_from_pool(&env, &tokens.short_token, &w.receiver, short_out);
 
         // Delete the withdrawal record.
-        env.storage().persistent().remove(&LhKey::Withdrawal(withdrawal_id));
+        env.storage()
+            .persistent()
+            .remove(&LhKey::Withdrawal(withdrawal_id));
 
         env.events().publish(
             ("with_exec",),
@@ -319,8 +355,10 @@ impl LiquidityHandler {
     pub fn pool_amounts(env: Env, market_id: u32) -> (u128, u128) {
         let ds = Self::data_store(&env);
         (
-            ds.get_u128(&pool_long_amount_key(&env, market_id)).unwrap_or(0),
-            ds.get_u128(&pool_short_amount_key(&env, market_id)).unwrap_or(0),
+            ds.get_u128(&pool_long_amount_key(&env, market_id))
+                .unwrap_or(0),
+            ds.get_u128(&pool_short_amount_key(&env, market_id))
+                .unwrap_or(0),
         )
     }
 
@@ -328,13 +366,21 @@ impl LiquidityHandler {
     pub fn claimable_fees(env: Env, market_id: u32) -> (u128, u128) {
         let ds = Self::data_store(&env);
         (
-            ds.get_u128(&claimable_fee_long_key(&env, market_id)).unwrap_or(0),
-            ds.get_u128(&claimable_fee_short_key(&env, market_id)).unwrap_or(0),
+            ds.get_u128(&claimable_fee_long_key(&env, market_id))
+                .unwrap_or(0),
+            ds.get_u128(&claimable_fee_short_key(&env, market_id))
+                .unwrap_or(0),
         )
     }
 
     pub fn get_withdrawal(env: Env, withdrawal_id: u32) -> Option<Withdrawal> {
-        env.storage().persistent().get(&LhKey::Withdrawal(withdrawal_id))
+        env.storage()
+            .persistent()
+            .get(&LhKey::Withdrawal(withdrawal_id))
+    }
+
+    pub fn market_tokens(env: Env, market_id: u32) -> MarketTokens {
+        Self::market_tokens_internal(&env, market_id)
     }
 
     // -----------------------------------------------------------------------
@@ -366,7 +412,7 @@ impl LiquidityHandler {
         }
     }
 
-    fn market_tokens(env: &Env, market_id: u32) -> MarketTokens {
+    fn market_tokens_internal(env: &Env, market_id: u32) -> MarketTokens {
         match env.storage().persistent().get(&LhKey::Market(market_id)) {
             Some(t) => t,
             None => panic_with_error!(env, LiquidityError::MarketNotRegistered),
@@ -410,7 +456,9 @@ impl LiquidityHandler {
             .instance()
             .get(&LhKey::WithdrawalCount)
             .unwrap_or(0);
-        env.storage().instance().set(&LhKey::WithdrawalCount, &(id + 1));
+        env.storage()
+            .instance()
+            .set(&LhKey::WithdrawalCount, &(id + 1));
         id
     }
 }

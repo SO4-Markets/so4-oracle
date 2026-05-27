@@ -22,7 +22,7 @@
 use contracts::{
     data_store::{DataStore, DataStoreClient},
     decrease_position_utils::decrease_position,
-    increase_position_utils::increase_position,
+    increase_position_utils::{check_increase_order_trigger, increase_position},
     keys::{
         account_balance_key, max_open_interest_long_key, open_interest_long_key,
         max_swap_path_length_key, pool_long_amount_key, pool_short_amount_key,
@@ -103,19 +103,6 @@ fn execute_market_decrease(
     decrease_position(env, ds, caller, position, order.size_delta_usd, index_price)
 }
 
-/// Check trigger condition for a LimitIncrease (long): executes only when
-/// `current_price <= trigger_price`.
-///
-/// Returns `Ok(())` if the condition is met, `Err(OrderError::UnsatisfiedTrigger)`
-/// otherwise.
-fn check_limit_increase_long(order: &Order, current_price: u128) -> Result<(), OrderError> {
-    if current_price <= order.trigger_price {
-        Ok(())
-    } else {
-        Err(OrderError::UnsatisfiedTrigger)
-    }
-}
-
 /// Check trigger condition for a StopLossDecrease: executes only when
 /// `current_price <= trigger_price`.
 fn check_stop_loss(order: &Order, current_price: u128) -> Result<(), OrderError> {
@@ -150,13 +137,20 @@ fn test_full_lifecycle_profit() {
 
     // --- Open: MarketIncrease at price 100 ---
     let open_order = Order {
+        key: 0,
         account: pos.account.clone(),
         market_id,
         order_type: OrderType::MarketIncrease,
         is_long: true,
-        size_delta_usd: 10_000u128, // $10,000 notional
+        size_delta_usd: 10_000u128,  // $10,000 notional
         collateral_delta: 1_000u128, // $1,000 collateral
         trigger_price: 0,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
     };
     let open_price: u128 = 100;
     execute_market_increase(&env, &ds, &admin, &mut pos, &open_order, open_price);
@@ -168,7 +162,8 @@ fn test_full_lifecycle_profit() {
 
     // OI should be updated.
     assert_eq!(
-        ds.get_u128(&open_interest_long_key(&env, market_id)).unwrap_or(0),
+        ds.get_u128(&open_interest_long_key(&env, market_id))
+            .unwrap_or(0),
         10_000
     );
 
@@ -176,11 +171,11 @@ fn test_full_lifecycle_profit() {
     // PnL = (exit_price - entry_price) * size_in_tokens
     //     = (150 - 100) * 100 = 5_000
     let close_price: u128 = 150;
-    let pnl: i128 = (close_price as i128 - open_price as i128)
-        * pos.size_in_tokens as i128;
+    let pnl: i128 = (close_price as i128 - open_price as i128) * pos.size_in_tokens as i128;
     assert_eq!(pnl, 5_000, "expected profit of 5000");
 
     let close_order = Order {
+        key: 1,
         account: pos.account.clone(),
         market_id,
         order_type: OrderType::MarketDecrease,
@@ -188,6 +183,12 @@ fn test_full_lifecycle_profit() {
         size_delta_usd: 10_000u128, // full close
         collateral_delta: 0,
         trigger_price: 0,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
     };
     let released = execute_market_decrease(&env, &ds, &admin, &mut pos, &close_order, close_price);
 
@@ -214,7 +215,8 @@ fn test_full_lifecycle_profit() {
 
     // OI back to zero.
     assert_eq!(
-        ds.get_u128(&open_interest_long_key(&env, market_id)).unwrap_or(0),
+        ds.get_u128(&open_interest_long_key(&env, market_id))
+            .unwrap_or(0),
         0
     );
 }
@@ -241,6 +243,7 @@ fn test_full_lifecycle_loss() {
 
     let open_price: u128 = 100;
     let open_order = Order {
+        key: 0,
         account: pos.account.clone(),
         market_id,
         order_type: OrderType::MarketIncrease,
@@ -248,6 +251,12 @@ fn test_full_lifecycle_loss() {
         size_delta_usd: 10_000u128,
         collateral_delta: 2_000u128, // larger collateral to absorb loss
         trigger_price: 0,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
     };
     execute_market_increase(&env, &ds, &admin, &mut pos, &open_order, open_price);
 
@@ -257,11 +266,11 @@ fn test_full_lifecycle_loss() {
 
     // Close at price 80 (loss).
     let close_price: u128 = 80;
-    let pnl: i128 = (close_price as i128 - open_price as i128)
-        * pos.size_in_tokens as i128;
+    let pnl: i128 = (close_price as i128 - open_price as i128) * pos.size_in_tokens as i128;
     assert_eq!(pnl, -2_000, "expected loss of 2000");
 
     let close_order = Order {
+        key: 1,
         account: pos.account.clone(),
         market_id,
         order_type: OrderType::MarketDecrease,
@@ -269,6 +278,12 @@ fn test_full_lifecycle_loss() {
         size_delta_usd: 10_000u128,
         collateral_delta: 0,
         trigger_price: 0,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
     };
     let released = execute_market_decrease(&env, &ds, &admin, &mut pos, &close_order, close_price);
     assert_eq!(released, 2_000, "collateral released on full close");
@@ -283,7 +298,8 @@ fn test_full_lifecycle_loss() {
 
     // Pool amounts unchanged (balanced OI case — pool is the counterparty).
     assert_eq!(
-        ds.get_u128(&pool_long_amount_key(&env, market_id)).unwrap_or(0),
+        ds.get_u128(&pool_long_amount_key(&env, market_id))
+            .unwrap_or(0),
         50_000,
         "pool long unchanged"
     );
@@ -306,6 +322,7 @@ fn test_partial_close_50_percent() {
 
     let open_price: u128 = 100;
     let open_order = Order {
+        key: 0,
         account: pos.account.clone(),
         market_id,
         order_type: OrderType::MarketIncrease,
@@ -313,11 +330,18 @@ fn test_partial_close_50_percent() {
         size_delta_usd: 10_000u128,
         collateral_delta: 1_000u128,
         trigger_price: 0,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
     };
     execute_market_increase(&env, &ds, &admin, &mut pos, &open_order, open_price);
 
     // 50% partial close.
     let close_order = Order {
+        key: 1,
         account: pos.account.clone(),
         market_id,
         order_type: OrderType::MarketDecrease,
@@ -325,6 +349,12 @@ fn test_partial_close_50_percent() {
         size_delta_usd: 5_000u128, // half
         collateral_delta: 0,
         trigger_price: 0,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
     };
     let released = execute_market_decrease(&env, &ds, &admin, &mut pos, &close_order, open_price);
 
@@ -338,7 +368,8 @@ fn test_partial_close_50_percent() {
 
     // OI halved.
     assert_eq!(
-        ds.get_u128(&open_interest_long_key(&env, market_id)).unwrap_or(0),
+        ds.get_u128(&open_interest_long_key(&env, market_id))
+            .unwrap_or(0),
         5_000
     );
 }
@@ -361,6 +392,7 @@ fn test_limit_increase_long_above_trigger_not_executed() {
     );
 
     let order = Order {
+        key: 0,
         account: Address::generate(&env),
         market_id,
         order_type: OrderType::LimitIncrease,
@@ -368,11 +400,17 @@ fn test_limit_increase_long_above_trigger_not_executed() {
         size_delta_usd: 5_000u128,
         collateral_delta: 500u128,
         trigger_price: 90u128, // want to buy at 90 or below
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
     };
 
     // Current price is 100 (above trigger) → should NOT execute.
     let current_price: u128 = 100;
-    let result = check_limit_increase_long(&order, current_price);
+    let result = check_increase_order_trigger(&order, current_price);
     assert!(
         matches!(result, Err(OrderError::UnsatisfiedTrigger)),
         "should return UnsatisfiedTrigger when price > trigger"
@@ -393,6 +431,7 @@ fn test_limit_increase_long_at_trigger_executes() {
     );
 
     let order = Order {
+        key: 0,
         account: Address::generate(&env),
         market_id,
         order_type: OrderType::LimitIncrease,
@@ -400,11 +439,17 @@ fn test_limit_increase_long_at_trigger_executes() {
         size_delta_usd: 5_000u128,
         collateral_delta: 500u128,
         trigger_price: 90u128,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
     };
 
     // Price drops exactly to trigger → should execute.
     let current_price: u128 = 90;
-    let result = check_limit_increase_long(&order, current_price);
+    let result = check_increase_order_trigger(&order, current_price);
     assert!(result.is_ok(), "should execute when price == trigger");
 
     // Actually execute the increase.
@@ -432,6 +477,180 @@ fn test_limit_increase_long_at_trigger_executes() {
     assert_eq!(pos.size_in_tokens, 55);
 }
 
+/// LimitIncrease for a short does NOT execute when price is BELOW trigger.
+#[test]
+fn test_limit_increase_short_below_trigger_not_executed() {
+    let env = Env::default();
+
+    let order = Order {
+        key: 0,
+        account: Address::generate(&env),
+        market_id: 41,
+        order_type: OrderType::LimitIncrease,
+        is_long: false,
+        size_delta_usd: 5_000u128,
+        collateral_delta: 500u128,
+        trigger_price: 110u128,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
+    };
+
+    let result = check_increase_order_trigger(&order, 100u128);
+    assert!(
+        matches!(result, Err(OrderError::UnsatisfiedTrigger)),
+        "short limit increase should not execute when price < trigger"
+    );
+}
+
+/// LimitIncrease for a short EXECUTES when price rises to trigger.
+#[test]
+fn test_limit_increase_short_at_trigger_executes() {
+    let env = Env::default();
+
+    let order = Order {
+        key: 0,
+        account: Address::generate(&env),
+        market_id: 42,
+        order_type: OrderType::LimitIncrease,
+        is_long: false,
+        size_delta_usd: 5_000u128,
+        collateral_delta: 500u128,
+        trigger_price: 110u128,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
+    };
+
+    let result = check_increase_order_trigger(&order, 110u128);
+    assert!(
+        result.is_ok(),
+        "short limit increase should execute when price >= trigger"
+    );
+}
+
+/// StopIncrease for a long does NOT execute when price is BELOW trigger.
+#[test]
+fn test_stop_increase_long_below_trigger_not_executed() {
+    let env = Env::default();
+
+    let order = Order {
+        key: 0,
+        account: Address::generate(&env),
+        market_id: 43,
+        order_type: OrderType::StopIncrease,
+        is_long: true,
+        size_delta_usd: 5_000u128,
+        collateral_delta: 500u128,
+        trigger_price: 110u128,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
+    };
+
+    let result = check_increase_order_trigger(&order, 100u128);
+    assert!(
+        matches!(result, Err(OrderError::UnsatisfiedTrigger)),
+        "long stop increase should not execute when price < trigger"
+    );
+}
+
+/// StopIncrease for a long EXECUTES when price rises to trigger.
+#[test]
+fn test_stop_increase_long_at_trigger_executes() {
+    let env = Env::default();
+
+    let order = Order {
+        key: 0,
+        account: Address::generate(&env),
+        market_id: 44,
+        order_type: OrderType::StopIncrease,
+        is_long: true,
+        size_delta_usd: 5_000u128,
+        collateral_delta: 500u128,
+        trigger_price: 110u128,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
+    };
+
+    let result = check_increase_order_trigger(&order, 110u128);
+    assert!(
+        result.is_ok(),
+        "long stop increase should execute when price >= trigger"
+    );
+}
+
+/// StopIncrease for a short does NOT execute when price is ABOVE trigger.
+#[test]
+fn test_stop_increase_short_above_trigger_not_executed() {
+    let env = Env::default();
+
+    let order = Order {
+        key: 0,
+        account: Address::generate(&env),
+        market_id: 45,
+        order_type: OrderType::StopIncrease,
+        is_long: false,
+        size_delta_usd: 5_000u128,
+        collateral_delta: 500u128,
+        trigger_price: 90u128,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
+    };
+
+    let result = check_increase_order_trigger(&order, 100u128);
+    assert!(
+        matches!(result, Err(OrderError::UnsatisfiedTrigger)),
+        "short stop increase should not execute when price > trigger"
+    );
+}
+
+/// StopIncrease for a short EXECUTES when price drops to trigger.
+#[test]
+fn test_stop_increase_short_at_trigger_executes() {
+    let env = Env::default();
+
+    let order = Order {
+        key: 0,
+        account: Address::generate(&env),
+        market_id: 46,
+        order_type: OrderType::StopIncrease,
+        is_long: false,
+        size_delta_usd: 5_000u128,
+        collateral_delta: 500u128,
+        trigger_price: 90u128,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
+    };
+
+    let result = check_increase_order_trigger(&order, 90u128);
+    assert!(
+        result.is_ok(),
+        "short stop increase should execute when price <= trigger"
+    );
+}
+
 /// (3) StopLossDecrease does NOT trigger when price is ABOVE stop level.
 #[test]
 fn test_stop_loss_above_stop_not_triggered() {
@@ -446,6 +665,7 @@ fn test_stop_loss_above_stop_not_triggered() {
     );
 
     let order = Order {
+        key: 0,
         account: Address::generate(&env),
         market_id,
         order_type: OrderType::StopLossDecrease,
@@ -453,6 +673,12 @@ fn test_stop_loss_above_stop_not_triggered() {
         size_delta_usd: 5_000u128,
         collateral_delta: 0,
         trigger_price: 70u128, // stop loss at 70
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
     };
 
     // Current price is 80 (above stop) → should NOT trigger.
@@ -480,6 +706,7 @@ fn test_stop_loss_below_stop_triggers() {
     // First open a position.
     let mut pos = make_long_position(&env, market_id);
     let open_order = Order {
+        key: 0,
         account: pos.account.clone(),
         market_id,
         order_type: OrderType::MarketIncrease,
@@ -487,10 +714,17 @@ fn test_stop_loss_below_stop_triggers() {
         size_delta_usd: 5_000u128,
         collateral_delta: 1_000u128,
         trigger_price: 0,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
     };
     execute_market_increase(&env, &ds, &admin, &mut pos, &open_order, 100u128);
 
     let stop_order = Order {
+        key: 1,
         account: pos.account.clone(),
         market_id,
         order_type: OrderType::StopLossDecrease,
@@ -498,22 +732,24 @@ fn test_stop_loss_below_stop_triggers() {
         size_delta_usd: 5_000u128,
         collateral_delta: 0,
         trigger_price: 70u128,
+        acceptable_price: 0,
+        min_output_amount: 0,
+        collateral_token: Address::generate(&env),
+        amount_in: 0,
+        created_at: 0,
+        is_frozen: false,
     };
 
     // Price drops to 65 (below stop) → should trigger.
     let current_price: u128 = 65;
     let result = check_stop_loss(&stop_order, current_price);
-    assert!(result.is_ok(), "stop loss should trigger when price <= stop level");
+    assert!(
+        result.is_ok(),
+        "stop loss should trigger when price <= stop level"
+    );
 
     // Execute the stop loss decrease.
-    let released = execute_market_decrease(
-        &env,
-        &ds,
-        &admin,
-        &mut pos,
-        &stop_order,
-        current_price,
-    );
+    let released = execute_market_decrease(&env, &ds, &admin, &mut pos, &stop_order, current_price);
 
     // Full close: all collateral released.
     assert_eq!(released, 1_000);
@@ -562,11 +798,7 @@ fn test_increase_position_one_below_cap_accepted() {
         &max_open_interest_long_key(&env, market_id),
         &10_000u128,
     );
-    ds.set_u128(
-        &admin,
-        &open_interest_long_key(&env, market_id),
-        &9_999u128,
-    );
+    ds.set_u128(&admin, &open_interest_long_key(&env, market_id), &9_999u128);
 
     let mut pos = make_long_position(&env, market_id);
     // Adding 1 should succeed (9_999 + 1 == 10_000 == cap, not exceeding).
@@ -574,7 +806,8 @@ fn test_increase_position_one_below_cap_accepted() {
 
     assert_eq!(pos.size_in_usd, 1);
     assert_eq!(
-        ds.get_u128(&open_interest_long_key(&env, market_id)).unwrap_or(0),
+        ds.get_u128(&open_interest_long_key(&env, market_id))
+            .unwrap_or(0),
         10_000
     );
 }
