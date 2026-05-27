@@ -103,3 +103,32 @@ pub fn withdrawal_fee_factor_key(env: &Env, market_id: u32) -> BytesN<32> {
 pub fn market_maintenance_margin_factor_key(env: &Env, market_id: u32) -> BytesN<32> {
     market_scoped_key(env, b"mm_factr", market_id)
 }
+
+// ---------------------------------------------------------------------------
+// Position / open-interest key generators (issues #43, #45, #46)
+// ---------------------------------------------------------------------------
+
+/// Returns the data-store key for the current long open interest of `market_id`.
+pub fn open_interest_long_key(env: &Env, market_id: u32) -> BytesN<32> {
+    market_scoped_key(env, b"oi_long_", market_id)
+}
+
+/// Returns the data-store key for the current short open interest of `market_id`.
+pub fn open_interest_short_key(env: &Env, market_id: u32) -> BytesN<32> {
+    market_scoped_key(env, b"oi_shrt_", market_id)
+}
+
+/// Returns the data-store key for the max open interest cap on the long side.
+pub fn max_open_interest_long_key(env: &Env, market_id: u32) -> BytesN<32> {
+    market_scoped_key(env, b"maxoi_lo", market_id)
+}
+
+/// Returns the data-store key for the max open interest cap on the short side.
+pub fn max_open_interest_short_key(env: &Env, market_id: u32) -> BytesN<32> {
+    market_scoped_key(env, b"maxoi_sh", market_id)
+}
+
+/// Returns the data-store key for the account balance used in PnL settlement.
+pub fn account_balance_key(env: &Env, market_id: u32) -> BytesN<32> {
+    market_scoped_key(env, b"acct_bal", market_id)
+}

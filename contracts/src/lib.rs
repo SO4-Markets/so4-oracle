@@ -2,6 +2,8 @@
 
 pub mod router;
 pub mod data_store;
+pub mod decrease_position_utils;
+pub mod increase_position_utils;
 pub mod keys;
 pub mod liquidity_handler;
 pub mod market_factory;

@@ -220,3 +220,94 @@ pub enum RouterAction {
     /// Placeholder for claiming accrued funding fees: (market_id, receiver).
     ClaimFundingFees(u32, Address),
 }
+
+// ---------------------------------------------------------------------------
+// Position types (issues #43, #45, #46)
+// ---------------------------------------------------------------------------
+
+/// Errors returned by position utility functions.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum PositionError {
+    /// The resulting position size would exceed the market's max open interest.
+    MaxOpenInterestExceeded = 20,
+    /// The remaining collateral after a partial close is below the minimum
+    /// collateral factor.
+    InsufficientCollateral = 21,
+    /// The position does not exist.
+    PositionNotFound = 22,
+}
+
+impl From<PositionError> for soroban_sdk::Error {
+    fn from(e: PositionError) -> Self {
+        soroban_sdk::Error::from_contract_error(e as u32)
+    }
+}
+
+/// Errors returned by order handler functions.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum OrderError {
+    /// The trigger price condition for the order is not yet satisfied.
+    UnsatisfiedTrigger = 30,
+    /// The order does not exist.
+    OrderNotFound = 31,
+}
+
+impl From<OrderError> for soroban_sdk::Error {
+    fn from(e: OrderError) -> Self {
+        soroban_sdk::Error::from_contract_error(e as u32)
+    }
+}
+
+/// An open trading position.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Position {
+    /// Account that owns the position.
+    pub account: Address,
+    /// Market this position belongs to.
+    pub market_id: u32,
+    /// Whether this is a long (true) or short (false) position.
+    pub is_long: bool,
+    /// Notional size of the position in USD (scaled integer).
+    pub size_in_usd: u128,
+    /// Size expressed in index tokens.
+    pub size_in_tokens: u128,
+    /// Collateral amount deposited (in collateral token units).
+    pub collateral_amount: u128,
+}
+
+/// The type of an order.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum OrderType {
+    /// Open or increase a position at the current market price.
+    MarketIncrease,
+    /// Close or decrease a position at the current market price.
+    MarketDecrease,
+    /// Open or increase a position when price drops to / below trigger_price
+    /// (for longs) or rises to / above trigger_price (for shorts).
+    LimitIncrease,
+    /// Close or decrease a position when price drops to / below trigger_price.
+    StopLossDecrease,
+}
+
+/// A pending order.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Order {
+    /// Account that placed the order.
+    pub account: Address,
+    pub market_id: u32,
+    pub order_type: OrderType,
+    pub is_long: bool,
+    /// USD size delta for the order.
+    pub size_delta_usd: u128,
+    /// Collateral delta (used for increase orders).
+    pub collateral_delta: u128,
+    /// Trigger price (0 for market orders).
+    pub trigger_price: u128,
+}
