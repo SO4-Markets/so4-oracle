@@ -14,6 +14,8 @@ use crate::{
     types::{LiquidityError, MarketTokens, OraclePrices, Withdrawal},
 };
 
+use crate::libs::math::checked_sub_u128;
+
 /// Denominator for the withdrawal fee factor. A factor of `50_000` against this
 /// denominator (`1_000_000`) therefore charges a 5% fee.
 pub const FEE_FACTOR_DENOMINATOR: u128 = 1_000_000;
@@ -197,7 +199,7 @@ impl LiquidityHandler {
         }
         // Escrow: debit the caller's LP now; supply is reduced when burned at
         // execution time.
-        Self::set_lp_balance(&env, market_id, &caller, balance - lp_amount);
+        Self::set_lp_balance(&env, market_id, &caller, checked_sub_u128(balance, lp_amount));
 
         let id = Self::next_withdrawal_id(&env);
         let record = Withdrawal {
@@ -251,8 +253,8 @@ impl LiquidityHandler {
             .unwrap_or(0);
         let long_fee = long_gross * fee_factor / FEE_FACTOR_DENOMINATOR;
         let short_fee = short_gross * fee_factor / FEE_FACTOR_DENOMINATOR;
-        let long_out = long_gross - long_fee;
-        let short_out = short_gross - short_fee;
+        let long_out = checked_sub_u128(long_gross, long_fee);
+        let short_out = checked_sub_u128(short_gross, short_fee);
 
         // Slippage guards.
         if long_out < w.min_long_out {
@@ -263,12 +265,12 @@ impl LiquidityHandler {
         }
 
         // Burn the escrowed LP from the vault (supply was not reduced at create).
-        Self::set_lp_supply(&env, w.market_id, supply - w.lp_amount);
+        Self::set_lp_supply(&env, w.market_id, checked_sub_u128(supply, w.lp_amount));
 
         // Decrement pool amounts by the gross (the fee portion stays in the
         // vault, earmarked as claimable).
-        ds.set_u128(&writer, &pool_long_amount_key(&env, w.market_id), &(pool_long - long_gross));
-        ds.set_u128(&writer, &pool_short_amount_key(&env, w.market_id), &(pool_short - short_gross));
+        ds.set_u128(&writer, &pool_long_amount_key(&env, w.market_id), &checked_sub_u128(pool_long, long_gross));
+        ds.set_u128(&writer, &pool_short_amount_key(&env, w.market_id), &checked_sub_u128(pool_short, short_gross));
 
         // Accrue claimable fees to data_store for the fee_handler.
         if long_fee > 0 {

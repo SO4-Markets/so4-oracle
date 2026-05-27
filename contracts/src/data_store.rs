@@ -73,6 +73,8 @@ pub enum DataPersistentKey {
 pub enum DataKey {
     PositionProps(BytesN<32>),
     AccountPositionList(Address),
+    PositionList,
+    PositionOiList(BytesN<32>),
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +404,176 @@ impl DataStore {
                 .persistent()
                 .set(&DataKey::AccountPositionList(account), &list);
         }
+    }
+
+    pub fn remove_account_position(
+        env: Env,
+        caller: Address,
+        account: Address,
+        position_key: BytesN<32>,
+    ) {
+        caller.require_auth();
+        let mut list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AccountPositionList(account.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        if let Some(idx) = list.iter().position(|k| k == position_key) {
+            list.remove(idx as u32);
+            env.storage()
+                .persistent()
+                .set(&DataKey::AccountPositionList(account), &list);
+        }
+    }
+
+    pub fn add_position(
+        env: Env,
+        caller: Address,
+        position_key: BytesN<32>,
+    ) {
+        caller.require_auth();
+        let mut list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PositionList)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !list.contains(&position_key) {
+            list.push_back(position_key.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::PositionList, &list);
+        }
+    }
+
+    pub fn remove_position(
+        env: Env,
+        caller: Address,
+        position_key: BytesN<32>,
+    ) {
+        caller.require_auth();
+        let mut list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PositionList)
+            .unwrap_or_else(|| Vec::new(&env));
+        if let Some(idx) = list.iter().position(|k| k == position_key) {
+            list.remove(idx as u32);
+            env.storage()
+                .persistent()
+                .set(&DataKey::PositionList, &list);
+        }
+    }
+
+    pub fn get_position_count(env: Env) -> u32 {
+        let list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PositionList)
+            .unwrap_or_else(|| Vec::new(&env));
+        list.len()
+    }
+
+    pub fn get_account_position_count(env: Env, account: Address) -> u32 {
+        let list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AccountPositionList(account))
+            .unwrap_or_else(|| Vec::new(&env));
+        list.len()
+    }
+
+    pub fn add_position_to_oi_list(
+        env: Env,
+        caller: Address,
+        market_id: u32,
+        is_long: bool,
+        position_key: BytesN<32>,
+    ) {
+        caller.require_auth();
+        let key = crate::keys::position_oi_list_key(&env, market_id, is_long);
+        let mut list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PositionOiList(key.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        if !list.contains(&position_key) {
+            list.push_back(position_key.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::PositionOiList(key), &list);
+        }
+    }
+
+    pub fn remove_position_from_oi_list(
+        env: Env,
+        caller: Address,
+        market_id: u32,
+        is_long: bool,
+        position_key: BytesN<32>,
+    ) {
+        caller.require_auth();
+        let key = crate::keys::position_oi_list_key(&env, market_id, is_long);
+        let mut list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PositionOiList(key.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        if let Some(idx) = list.iter().position(|k| k == position_key) {
+            list.remove(idx as u32);
+            env.storage()
+                .persistent()
+                .set(&DataKey::PositionOiList(key), &list);
+        }
+    }
+
+    pub fn get_position_oi_list_count(
+        env: Env,
+        market_id: u32,
+        is_long: bool,
+    ) -> u32 {
+        let key = crate::keys::position_oi_list_key(&env, market_id, is_long);
+        let list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PositionOiList(key))
+            .unwrap_or_else(|| Vec::new(&env));
+        list.len()
+    }
+
+    pub fn get_all_positions_for_market(
+        env: Env,
+        market_id: u32,
+        is_long: bool,
+        start: u32,
+        end: u32,
+    ) -> Vec<PositionProps> {
+        let key = crate::keys::position_oi_list_key(&env, market_id, is_long);
+        let list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PositionOiList(key))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let len = list.len();
+        if start >= len || start >= end {
+            return Vec::new(&env);
+        }
+        let end = if end > len { len } else { end };
+
+        let mut results: Vec<PositionProps> = Vec::new(&env);
+        for idx in start..end {
+            let key = list.get(idx).unwrap();
+            if let Some(props) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, PositionProps>(&DataKey::PositionProps(key.clone()))
+            {
+                if props.is_open {
+                    results.push_back(props);
+                }
+            }
+        }
+        results
     }
 
     pub fn get_account_positions(

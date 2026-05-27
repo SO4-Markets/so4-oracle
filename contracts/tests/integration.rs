@@ -23,6 +23,7 @@ use contracts::{
     market_factory::{market_keeper_role, MarketFactory, MarketFactoryClient},
     role_store::{RoleMetadata, RoleStore, RoleStoreClient},
     types::{MarketConfig, PositionProps},
+    order_handler::{OrderHandler, OrderHandlerClient},
 };
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _},
@@ -1335,4 +1336,80 @@ fn test_get_market_by_tokens_returns_none_for_unregistered_combination() {
 
     let result = mf.get_market_by_tokens(&index_token, &long_token, &short_token);
     assert!(result.is_none(), "expected None for unregistered token combination");
+}
+
+fn setup_order_handler<'a>(env: &'a Env, data_store: &'a Address) -> OrderHandlerClient<'a> {
+    let contract_id = env.register(OrderHandler, ());
+    let client = OrderHandlerClient::new(env, &contract_id);
+    client.initialize(data_store);
+    client
+}
+
+#[test]
+fn test_order_handler_position_and_oi_lists() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let ds = setup_data_store(&env);
+    let admin = Address::generate(&env);
+    ds.initialize(&admin);
+
+    let oh = setup_order_handler(&env, &ds.address);
+
+    let user = Address::generate(&env);
+    let market_id = 1u32;
+    let is_long = true;
+
+    let pos_key1 = make_key(&env, 101);
+    let pos_key2 = make_key(&env, 102);
+
+    // 1. Open two long positions in the same market
+    oh.increase_position(
+        &user,
+        &pos_key1,
+        &user,
+        &market_id,
+        &1000u128,
+        &100u128,
+        &10u128,
+        &is_long,
+    );
+
+    oh.increase_position(
+        &user,
+        &pos_key2,
+        &user,
+        &market_id,
+        &2000u128,
+        &200u128,
+        &10u128,
+        &is_long,
+    );
+
+    // Verify global counts and lists
+    assert_eq!(ds.get_position_count(), 2);
+    assert_eq!(ds.get_account_position_count(&user), 2);
+    assert_eq!(ds.get_position_oi_list_count(&market_id, &is_long), 2);
+
+    // Verify we can retrieve all positions for market/side
+    let market_positions = ds.get_all_positions_for_market(&market_id, &is_long, &0u32, &10u32);
+    assert_eq!(market_positions.len(), 2);
+    assert_eq!(market_positions.get(0).unwrap().position_key, pos_key1);
+    assert_eq!(market_positions.get(1).unwrap().position_key, pos_key2);
+
+    // 2. Close first position using market decrease
+    oh.execute_market_decrease(&user, &pos_key1);
+
+    // Verify decrement
+    assert_eq!(ds.get_position_count(), 1);
+    assert_eq!(ds.get_account_position_count(&user), 1);
+    assert_eq!(ds.get_position_oi_list_count(&market_id, &is_long), 1);
+
+    // 3. Close second position using liquidation
+    oh.execute_liquidation(&user, &pos_key2);
+
+    // Verify all counts are now 0
+    assert_eq!(ds.get_position_count(), 0);
+    assert_eq!(ds.get_account_position_count(&user), 0);
+    assert_eq!(ds.get_position_oi_list_count(&market_id, &is_long), 0);
 }

@@ -103,3 +103,21 @@ pub fn withdrawal_fee_factor_key(env: &Env, market_id: u32) -> BytesN<32> {
 pub fn market_maintenance_margin_factor_key(env: &Env, market_id: u32) -> BytesN<32> {
     market_scoped_key(env, b"mm_factr", market_id)
 }
+
+/// Returns the data-store key holding the list of position keys for a given market and side.
+pub fn position_oi_list_key(env: &Env, market_id: u32, is_long: bool) -> BytesN<32> {
+    let mut buf = [0u8; 32];
+    buf[..7].copy_from_slice(b"poilist");
+    let id_bytes = market_id.to_be_bytes();
+    buf[7..11].copy_from_slice(&id_bytes);
+    buf[11] = if is_long { 1 } else { 0 };
+    BytesN::from_array(env, &buf)
+}
+
+/// Returns the data-store key holding the global list of all position keys.
+pub fn position_list_key(env: &Env) -> BytesN<32> {
+    let mut buf = [0u8; 32];
+    buf[..8].copy_from_slice(b"pos_list");
+    BytesN::from_array(env, &buf)
+}
+
