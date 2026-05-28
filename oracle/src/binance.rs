@@ -17,6 +17,24 @@ pub struct BinanceTickerEntry {
     pub price: String,
 }
 
+pub fn parse_ticker_response_body(
+    body: &str,
+    symbols: &[String],
+) -> Result<Vec<(String, i128)>, BinancePriceError> {
+    let entries: Vec<BinanceTickerEntry> = serde_json::from_str(body)
+        .map_err(|err| BinancePriceError::JsonError(err.to_string()))?;
+
+    let mut results = Vec::new();
+    for symbol in symbols {
+        let maybe = entries.iter().find(|entry| entry.symbol == *symbol);
+        if let Some(found) = maybe {
+            let scaled = parse_price_to_precision(&found.price)?;
+            results.push((found.symbol.clone(), scaled));
+        }
+    }
+    Ok(results)
+}
+
 pub fn parse_price_to_precision(raw: &str) -> Result<i128, BinancePriceError> {
     let text = raw.trim();
     if text.is_empty() {
@@ -72,7 +90,7 @@ pub fn parse_price_to_precision(raw: &str) -> Result<i128, BinancePriceError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_price_to_precision, FLOAT_PRECISION};
+    use super::{parse_price_to_precision, parse_ticker_response_body, FLOAT_PRECISION};
 
     #[test]
     fn parse_price_integer() {
@@ -90,5 +108,15 @@ mod tests {
     #[test]
     fn parse_price_invalid() {
         assert!(parse_price_to_precision("abc").is_err());
+    }
+
+    #[test]
+    fn parse_ticker_response_filters_symbols() {
+        let body = r#"[{"symbol":"BTCUSDT","price":"100.25"},{"symbol":"ETHUSDT","price":"10.5"}]"#;
+        let symbols = vec!["ETHUSDT".to_string()];
+        let parsed = parse_ticker_response_body(body, &symbols).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, "ETHUSDT".to_string());
+        assert_eq!(parsed[0].1, 10 * FLOAT_PRECISION + (FLOAT_PRECISION / 2));
     }
 }
