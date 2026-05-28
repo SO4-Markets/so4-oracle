@@ -14,6 +14,8 @@ pub fn is_liquidatable(
     pos: &PositionProps,
     current_price: u128,
     maintenance_margin_factor: u128,
+    funding_factor: u128,
+    borrowing_factor: u128,
 ) -> bool {
     if !pos.is_open {
         return false;
@@ -21,7 +23,7 @@ pub fn is_liquidatable(
 
     let pnl = calculate_pnl(pos, current_price);
     
-    // Remaining Collateral = Collateral + PnL
+    // Remaining Collateral = Collateral + PnL - fees
     // If PnL is negative and exceeds collateral, remaining is 0.
     let remaining_collateral = if pnl >= 0 {
         pos.collateral_amount + (pnl as u128)
@@ -34,10 +36,19 @@ pub fn is_liquidatable(
         }
     };
 
+    let fee_amount = calculate_total_fees(pos.quantity, funding_factor, borrowing_factor);
+    let collateral_after_fees = remaining_collateral.saturating_sub(fee_amount);
+
     // Maintenance Margin = Notional * Factor
     let maintenance_margin = pos.quantity * maintenance_margin_factor / PRECISION;
 
-    remaining_collateral < maintenance_margin
+    collateral_after_fees < maintenance_margin
+}
+
+fn calculate_total_fees(quantity: u128, funding_factor: u128, borrowing_factor: u128) -> u128 {
+    let funding_fee = quantity.saturating_mul(funding_factor) / PRECISION;
+    let borrowing_fee = quantity.saturating_mul(borrowing_factor) / PRECISION;
+    funding_fee.saturating_add(borrowing_fee)
 }
 
 /// Returns whether the pool's total PnL exposure has reached `max_pnl_factor`.
