@@ -10,6 +10,10 @@ pub const PRECISION: u128 = 1_000_000;
 /// `RemainingCollateral < MaintenanceMargin`
 /// where `RemainingCollateral = Collateral + PnL`
 /// and `MaintenanceMargin = Notional * MaintenanceMarginFactor`
+///
+/// Callers that perform liquidation checks (e.g. `PositionHandler::is_liquidatable`)
+/// must supply the **worst-case** price (`maximize = true`) — the lower price for
+/// longs and the higher price for shorts — so the check is conservative.
 pub fn is_liquidatable(
     pos: &PositionProps,
     current_price: u128,
@@ -81,6 +85,54 @@ pub fn calculate_pnl(pos: &PositionProps, current_price: u128) -> i128 {
             let diff = checked_sub_u128(current_price, pos.average_price);
             -((pos.quantity * diff / pos.average_price) as i128)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::PositionProps;
+    use soroban_sdk::{testutils::Address as _, BytesN, Env};
+
+    fn borderline_long(env: &Env) -> PositionProps {
+        // quantity=1000, collateral=50, entry=100, margin_factor=10% (100_000/1_000_000)
+        // maintenance_margin = 1000 * 100_000 / 1_000_000 = 100
+        //
+        // maximize=true  (long_price=90):
+        //   PnL = 1000*(90-100)/100 = -100 → remaining = max(50-100,0) = 0 < 100 → liquidatable
+        //
+        // maximize=false (short_price=110):
+        //   PnL = 1000*(110-100)/100 = +100 → remaining = 50+100 = 150 >= 100 → NOT liquidatable
+        PositionProps {
+            position_key: BytesN::from_array(env, &[1u8; 32]),
+            account: soroban_sdk::Address::generate(env),
+            market_id: 0,
+            quantity: 1_000,
+            collateral_amount: 50,
+            average_price: 100,
+            is_long: true,
+            is_open: true,
+            referral_code: BytesN::from_array(env, &[0u8; 32]),
+        }
+    }
+
+    #[test]
+    fn test_maximize_true_flags_borderline_long_as_liquidatable() {
+        let env = Env::default();
+        let pos = borderline_long(&env);
+        let margin_factor = 100_000; // 10 %
+        // maximize = true: worst-case price for a long is the lower price.
+        assert!(is_liquidatable(&pos, 90, margin_factor));
+    }
+
+    #[test]
+    fn test_maximize_false_does_not_flag_borderline_long() {
+        let env = Env::default();
+        let pos = borderline_long(&env);
+        let margin_factor = 100_000;
+        // maximize = false: optimistic price for a long is the higher price.
+        // The same position that is liquidatable at 90 is healthy at 110.
+        assert!(!is_liquidatable(&pos, 110, margin_factor));
     }
 }
 

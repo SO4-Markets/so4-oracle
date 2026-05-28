@@ -30,11 +30,22 @@ impl PositionHandler {
 
     /// Returns whether the position at `position_key` is liquidatable.
     ///
-    /// Loads the position from `data_store`, fetches oracle prices from
-    /// `liquidity_handler`, and uses `position_utils::is_liquidatable`.
+    /// **Pricing — `maximize = true` (worst-case for the position):**
+    ///
+    /// To be conservative, this function always selects the price that
+    /// *maximises* the position's unrealised loss:
+    ///
+    /// | direction | price used       | why                                      |
+    /// |-----------|------------------|------------------------------------------|
+    /// | long      | `long_price`     | lower price → larger unrealised loss     |
+    /// | short     | `short_price`    | higher price → larger unrealised loss    |
+    ///
+    /// Using `maximize = false` (the opposite choice — `short_price` for longs,
+    /// `long_price` for shorts) would understate the risk and could allow a
+    /// genuinely under-collateralised position to pass the check.
     pub fn is_liquidatable(env: Env, position_key: BytesN<32>) -> bool {
         let ds = Self::data_store(&env);
-        
+
         let pos: PositionProps = match ds.get_position_props(&position_key) {
             Some(p) => p,
             None => panic_with_error!(&env, PositionError::PositionNotFound),
@@ -47,13 +58,11 @@ impl PositionHandler {
         let lh = Self::liquidity_handler(&env);
         let prices = lh.oracle_prices(&pos.market_id);
 
-        // Fetch maintenance margin factor from data_store.
-        let margin_factor = ds.get_u128(&market_maintenance_margin_factor_key(&env, pos.market_id))
+        let margin_factor = ds
+            .get_u128(&market_maintenance_margin_factor_key(&env, pos.market_id))
             .unwrap_or(0);
 
-        // Use maximize = true pricing: choose the worst-case price for this position.
-        // For long positions, the worst price is the long token price.
-        // For short positions, the worst price is the short token price.
+        // maximize = true: use the worst-case price for this position's direction.
         let price = if pos.is_long {
             prices.long_price
         } else {
