@@ -20,3 +20,8 @@ thiserror = "1.0"
 once_cell = "1.17"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde", "clock"] }
+tower = "0.5"
+http = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
