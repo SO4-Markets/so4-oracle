@@ -5,6 +5,7 @@ use tower_service::Service;
 use worker::*;
 
 pub mod binance;
+pub mod coinbase;
 pub mod config;
 pub mod keeper;
 pub mod kv_store;
@@ -13,6 +14,7 @@ pub mod network_config;
 pub mod prices;
 pub mod pyth;
 pub mod retry;
+pub mod signing;
 pub mod stellar_rpc;
 pub mod submit;
 
@@ -218,6 +220,29 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) -> R
                         }
                     }
                 }
+                "coinbase" => {
+                    match retry::retry_with_backoff(
+                        || {
+                            let sym = token.symbol.clone();
+                            async move { coinbase::fetch_spot_price(&sym).await }
+                        },
+                        3,
+                        200,
+                    )
+                    .await
+                    {
+                        Ok(price) => {
+                            token_prices.push(price);
+                            sources_used.push("coinbase".to_string());
+                        }
+                        Err(e) => {
+                            log::error(
+                                "coinbase_fetch_error",
+                                json!({"token": token.symbol.clone(), "error": format!("{:?}", e)}),
+                            );
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -253,19 +278,36 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) -> R
                 continue;
             }
 
-            let aggregated = prices::compute_confidence_interval(&token_prices.prices);
+            if token_prices.prices.len() < 2 {
+                log::warn(
+                    "insufficient_sources",
+                    json!({"token": token.symbol.clone(), "sources_count": token_prices.prices.len()}),
+                );
+                continue;
+            }
+
+            // 6a. Filter outliers > 3σ from median
+            let filter_result = prices::filter_outliers(&token_prices.prices, &token_prices.sources);
+            
+            for (src, price, dev) in &filter_result.rejected {
+                log::error(
+                    "outlier_rejected",
+                    json!({"token": token.symbol.clone(), "source": src, "price": price, "deviation": dev}),
+                );
+            }
+
+            if filter_result.filtered_prices.is_empty() {
+                log::error("all_sources_rejected_as_outliers", json!({"token": token.symbol.clone()}));
+                continue;
+            }
+
+            let aggregated = prices::compute_confidence_interval(&filter_result.filtered_prices);
             let (min, max) = match aggregated {
                 Some(props) => (props.min, props.max),
                 None => continue,
             };
 
-            let median = if token_prices.prices.len() % 2 == 0 {
-                (token_prices.prices[token_prices.prices.len() / 2 - 1]
-                    + token_prices.prices[token_prices.prices.len() / 2])
-                    / 2
-            } else {
-                token_prices.prices[token_prices.prices.len() / 2]
-            };
+            let median = prices::compute_median(&filter_result.filtered_prices).unwrap();
 
             let last_price = kv_store::get_last_submitted_price(&env, &token.symbol)
                 .await
@@ -297,7 +339,7 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) -> R
                     min,
                     max,
                     timestamp,
-                    sources_used: token_prices.sources.clone(),
+                    sources_used: filter_result.filtered_sources.clone(),
                 });
             }
         }

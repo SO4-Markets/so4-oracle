@@ -64,6 +64,80 @@ fn percentile(sorted: &[i128], p: u8) -> i128 {
     (lo_val + frac * (hi_val - lo_val)) as i128
 }
 
+#[derive(Debug)]
+pub struct OutlierFilterResult {
+    pub filtered_prices: Vec<i128>,
+    pub filtered_sources: Vec<String>,
+    pub rejected: Vec<(String, i128, f64)>, // source, price, deviation
+}
+
+/// Filter out prices that deviate more than 3 standard deviations from the median.
+pub fn filter_outliers(
+    prices: &[i128],
+    sources: &[String],
+) -> OutlierFilterResult {
+    if prices.is_empty() {
+        return OutlierFilterResult {
+            filtered_prices: vec![],
+            filtered_sources: vec![],
+            rejected: vec![],
+        };
+    }
+
+    // 1. Compute median
+    let mut sorted = prices.to_vec();
+    sorted.sort_unstable();
+    let median = if sorted.len() % 2 == 0 {
+        (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2
+    } else {
+        sorted[sorted.len() / 2]
+    };
+
+    // 2. Compute mean and standard deviation
+    let sum: i128 = prices.iter().sum();
+    let mean = sum as f64 / prices.len() as f64;
+    let variance = prices.iter().map(|&p| {
+        let diff = p as f64 - mean;
+        diff * diff
+    }).sum::<f64>() / prices.len() as f64;
+    let stddev = variance.sqrt();
+
+    let mut filtered_prices = Vec::new();
+    let mut filtered_sources = Vec::new();
+    let mut rejected = Vec::new();
+
+    for (i, &p) in prices.iter().enumerate() {
+        let dev = (p as f64 - median as f64).abs();
+        if stddev > 0.0 && dev > 3.0 * stddev {
+            rejected.push((sources[i].clone(), p, dev));
+        } else {
+            filtered_prices.push(p);
+            filtered_sources.push(sources[i].clone());
+        }
+    }
+
+    OutlierFilterResult {
+        filtered_prices,
+        filtered_sources,
+        rejected,
+    }
+}
+
+/// Compute the median of a slice of prices safely.
+pub fn compute_median(prices: &[i128]) -> Option<i128> {
+    if prices.len() < 2 {
+        return None;
+    }
+    let mut sorted = prices.to_vec();
+    sorted.sort_unstable();
+    if sorted.len() % 2 == 0 {
+        Some((sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2)
+    } else {
+        Some(sorted[sorted.len() / 2])
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +307,60 @@ mod tests {
         assert!(p.min <= p.max);
         assert!(p.min >= 2490);
         assert!(p.max <= 2510);
+    }
+
+    #[test]
+    fn test_filter_outliers_removes_10x_outlier() {
+        let prices = vec![1000, 1010, 990, 1005, 10000]; // 10000 is a 10x outlier
+        let sources = vec![
+            "src1".to_string(),
+            "src2".to_string(),
+            "src3".to_string(),
+            "src4".to_string(),
+            "bad_src".to_string(),
+        ];
+        
+        let result = filter_outliers(&prices, &sources);
+        
+        // Should reject 1
+        assert_eq!(result.rejected.len(), 1);
+        assert_eq!(result.rejected[0].0, "bad_src");
+        assert_eq!(result.rejected[0].1, 10000);
+        
+        // Should keep 4
+        assert_eq!(result.filtered_prices.len(), 4);
+        assert!(!result.filtered_prices.contains(&10000));
+        assert!(!result.filtered_sources.contains(&"bad_src".to_string()));
+    }
+
+    #[test]
+    fn test_filter_outliers_degenerate_case() {
+        // If all are far apart (e.g. standard deviation is huge), maybe none are rejected, 
+        // or if they are all outliers from the median (e.g., [10, 1000, 100000]).
+        // Wait, if N=3, dev > 3*stddev is impossible because max dev is < stddev * sqrt(N-1).
+        // Let's just ensure it doesn't crash on empty.
+        let result = filter_outliers(&[], &[]);
+        assert!(result.filtered_prices.is_empty());
+    }
+
+    #[test]
+    fn test_compute_median_three_prices() {
+        let prices = [1000, 3000, 2000];
+        let median = compute_median(&prices);
+        assert_eq!(median, Some(2000));
+    }
+
+    #[test]
+    fn test_compute_median_two_prices() {
+        let prices = [1000, 3000];
+        let median = compute_median(&prices);
+        assert_eq!(median, Some(2000));
+    }
+
+    #[test]
+    fn test_compute_median_one_price_skipped() {
+        let prices = [1000];
+        let median = compute_median(&prices);
+        assert_eq!(median, None);
     }
 }

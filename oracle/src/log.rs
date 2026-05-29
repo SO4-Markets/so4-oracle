@@ -45,5 +45,12 @@ macro_rules! error {
     };
 }
 
+macro_rules! warn {
+    ($msg:expr, $ctx:expr) => {
+        crate::log::log_json("WARN", $msg, $ctx)
+    };
+}
+
 pub use error;
 pub use info;
+pub use warn;
