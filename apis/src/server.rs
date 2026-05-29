@@ -46,6 +46,32 @@ struct HealthDoc {
     status: String,
 }
 
+/// Construct the full `Router` the production server runs, wired with
+/// CORS (#105), tracing (#106), the OpenAPI/Swagger surface (#108), and
+/// the shared `AppState` extension. Exposed so integration tests can
+/// exercise the same router without binding a TCP listener.
+pub fn build_app(state: AppState) -> Router {
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/prices/:token", get(get_price))
+        .route("/prices/:token/history", get(get_price_history))
+        .route("/markets", get(get_markets))
+        .route("/markets/:market_id", get(get_market))
+        .route("/positions/:account", get(get_positions));
+
+    // OpenAPI (issue #108): mount `/openapi.json` and the Swagger UI at
+    // `/docs`. Done before applying layers so the static-asset routes
+    // inherit the same trace and CORS configuration.
+    let app = mount_openapi_routes(app);
+
+    // CORS (issue #105), tracing middleware (issue #106), and shared
+    // state are layered after the routes so they apply to every endpoint
+    // including the OpenAPI surface.
+    app.layer(build_cors_layer())
+        .layer(TraceLayer::new_for_http())
+        .layer(Extension(Arc::new(state)))
+}
+
 pub async fn run() -> Result<(), anyhow::Error> {
     let cache = Cache::new();
     let reader = Arc::new(crate::client::RpcClient) as Arc<dyn Reader + Send + Sync>;
@@ -69,27 +95,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
     });
 
     let state = AppState { cache, reader, history };
-
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/prices/:token", get(get_price))
-        .route("/prices/:token/history", get(get_price_history))
-        .route("/markets", get(get_markets))
-        .route("/markets/:market_id", get(get_market))
-        .route("/positions/:account", get(get_positions));
-
-    // OpenAPI (issue #108): mount `/openapi.json` and the Swagger UI at
-    // `/docs`. Done before applying layers so the static-asset routes
-    // inherit the same trace and CORS configuration.
-    let app = mount_openapi_routes(app);
-
-    // CORS (issue #105), tracing middleware (issue #106), and shared
-    // state are layered after the routes so they apply to every endpoint
-    // including the OpenAPI surface.
-    let app = app
-        .layer(build_cors_layer())
-        .layer(TraceLayer::new_for_http())
-        .layer(Extension(Arc::new(state)));
+    let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     info!("listening on {}", listener.local_addr()?);
