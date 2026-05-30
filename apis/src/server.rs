@@ -53,11 +53,11 @@ struct HealthDoc {
 pub fn build_app(state: AppState) -> Router {
     let app = Router::new()
         .route("/health", get(health))
-        .route("/prices/:token", get(get_price))
-        .route("/prices/:token/history", get(get_price_history))
+        .route("/prices/{token}", get(get_price))
+        .route("/prices/{token}/history", get(get_price_history))
         .route("/markets", get(get_markets))
-        .route("/markets/:market_id", get(get_market))
-        .route("/positions/:account", get(get_positions));
+        .route("/markets/{market_id}", get(get_market))
+        .route("/positions/{account}", get(get_positions));
 
     // OpenAPI (issue #108): mount `/openapi.json` and the Swagger UI at
     // `/docs`. Done before applying layers so the static-asset routes
@@ -88,7 +88,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
             if let Some(tokens) = crate::config::all_tokens() {
                 for entry in tokens {
                     let mid = (entry.min + entry.max) / 2.0;
-                    history_bg.record(&entry.token, ts, mid);
+                    history_bg.record(&entry.lookup_key(), ts, mid);
                 }
             }
         }
@@ -273,7 +273,7 @@ async fn health() -> Json<serde_json::Value> {
 // ── GET /prices/:token/history ───────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct HistoryQuery {
+pub struct HistoryQuery {
     /// Candle interval: "1m", "5m", or "1h" (default: "1m").
     interval: Option<String>,
     /// Unix timestamp (seconds) — start of range (default: now − 24 h).
@@ -374,7 +374,7 @@ pub async fn get_price(
     let key = token.to_lowercase();
     if let Some(entry) = lookup_token(&key) {
         let resp = PriceResp {
-            token: entry.token.clone(),
+            token: entry.lookup_key(),
             symbol: entry.symbol,
             min: entry.min,
             max: entry.max,
@@ -394,7 +394,7 @@ pub async fn get_markets(Extension(state): Extension<Arc<AppState>>) -> impl Int
     // cache key
     let cache_key = "markets_list";
     if let Some(cached) = state.cache.get::<Vec<MarketSummary>>(cache_key).await {
-        return (StatusCode::OK, Json(cached));
+        return (StatusCode::OK, Json(serde_json::to_value(cached).unwrap_or_default()));
     }
 
     let markets = match state.reader.get_markets().await {
@@ -423,7 +423,7 @@ pub async fn get_markets(Extension(state): Extension<Arc<AppState>>) -> impl Int
     let ttl = Duration::from_secs(30);
     state.cache.set(cache_key, &out, ttl).await;
 
-    (StatusCode::OK, Json(out))
+    (StatusCode::OK, Json(serde_json::to_value(out).unwrap_or_default()))
 }
 
 async fn get_market(
@@ -538,5 +538,5 @@ async fn get_positions(
         }
     }
 
-    (StatusCode::OK, Json(out))
+    (StatusCode::OK, Json(serde_json::Value::Array(out)))
 }

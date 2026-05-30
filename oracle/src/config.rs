@@ -1,48 +1,15 @@
-use serde::Deserialize;
+use shared_config::{ConfigError, TokenConfig};
 
 pub const ENV_KEY: &str = "PRICE_FEED_CONFIG";
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct TokenFeedConfig {
-    pub symbol: String,
-    pub stellar_address: String,
-    pub sources: Vec<String>,
-    #[serde(default)]
-    pub binance_symbol: Option<String>,
-    #[serde(default)]
-    pub pyth_feed_id: Option<String>,
-}
+/// Oracle-specific view of a token feed config.
+/// Re-exports fields from `TokenConfig` for backward compatibility with
+/// the rest of the oracle crate.
+pub type TokenFeedConfig = TokenConfig;
 
 #[derive(Debug, Clone)]
 pub struct PriceFeedConfig {
     pub tokens: Vec<TokenFeedConfig>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum ConfigError {
-    MissingEnvVar,
-    MalformedJson(String),
-    EmptyTokenList,
-    InvalidToken { symbol: String, reason: String },
-}
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConfigError::MissingEnvVar => {
-                write!(f, "required env var '{ENV_KEY}' is not set")
-            }
-            ConfigError::MalformedJson(msg) => {
-                write!(f, "PRICE_FEED_CONFIG is not valid JSON: {msg}")
-            }
-            ConfigError::EmptyTokenList => {
-                write!(f, "PRICE_FEED_CONFIG must contain at least one token")
-            }
-            ConfigError::InvalidToken { symbol, reason } => {
-                write!(f, "invalid token config for '{symbol}': {reason}")
-            }
-        }
-    }
 }
 
 /// Parse and validate the `PRICE_FEED_CONFIG` JSON string.
@@ -52,20 +19,10 @@ impl std::fmt::Display for ConfigError {
 /// [{"symbol":"BTC","stellar_address":"C...","sources":["binance","coinbase"]}]
 /// ```
 pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError> {
-    let tokens: Vec<TokenFeedConfig> =
-        serde_json::from_str(raw).map_err(|e| ConfigError::MalformedJson(e.to_string()))?;
+    let tokens = shared_config::parse_token_configs(raw)?;
 
-    if tokens.is_empty() {
-        return Err(ConfigError::EmptyTokenList);
-    }
-
+    // Oracle-specific validation: stellar_address and sources are required.
     for token in &tokens {
-        if token.symbol.is_empty() {
-            return Err(ConfigError::InvalidToken {
-                symbol: "(empty)".to_string(),
-                reason: "symbol must not be empty".to_string(),
-            });
-        }
         if token.stellar_address.is_empty() {
             return Err(ConfigError::InvalidToken {
                 symbol: token.symbol.clone(),
@@ -128,7 +85,7 @@ mod tests {
     #[test]
     fn reject_empty_token_list() {
         let err = parse_price_feed_config("[]").unwrap_err();
-        assert_eq!(err, ConfigError::EmptyTokenList);
+        assert!(matches!(err, ConfigError::EmptyTokenList));
     }
 
     #[test]

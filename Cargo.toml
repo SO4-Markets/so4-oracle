@@ -1,5 +1,5 @@
 [workspace]
-members = ["oracle", "apis", "contracts"]
+members = ["oracle", "apis", "contracts", "shared/config"]
 resolver = "2"
 
 [workspace.lints.clippy]

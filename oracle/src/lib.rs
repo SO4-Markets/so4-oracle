@@ -1,5 +1,3 @@
-#![allow(unused_must_use)]
-
 use axum::{routing::get, Router};
 use tower_service::Service;
 use worker::*;
@@ -365,7 +363,12 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) -> R
             };
 
             if !blocked {
-                let _ = kv_store::store_last_submitted_price(&env, &token.symbol, median).await;
+                if let Err(e) = kv_store::store_last_submitted_price(&env, &token.symbol, median).await {
+                    log::warn(
+                        "kv_write_failed",
+                        serde_json::json!({"key": "last_price", "token": token.symbol, "error": e}),
+                    );
+                }
                 let timestamp = current_timestamp_secs();
                 cached_prices.push(CachedPrice {
                     token: token.stellar_address.clone(),
@@ -381,7 +384,12 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) -> R
 
     // 7. Cache the prices.
     if !cached_prices.is_empty() {
-        let _ = kv_store::store_cached_prices(&env, &cached_prices).await;
+        if let Err(e) = kv_store::store_cached_prices(&env, &cached_prices).await {
+            log::warn(
+                "kv_write_failed",
+                serde_json::json!({"key": "cached_prices", "error": e}),
+            );
+        }
         log::info(
             "prices_cached",
             json!({"count": cached_prices.len(), "timestamp": current_timestamp_secs()}),

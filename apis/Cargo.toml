@@ -29,6 +29,8 @@ tower-http = { version = "0.6.11", features = ["cors", "trace", "timeout"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "fmt"] }
 utoipa = "5.5.0"
+shared-config = { path = "../shared/config" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+hyper = "1"

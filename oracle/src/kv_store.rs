@@ -212,6 +212,30 @@ fn current_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+/// Convenience wrapper: logs a warning on failure instead of propagating.
+/// Use for non-critical KV writes (e.g. caching) where the pipeline should
+/// continue even if the write fails.
+pub async fn set_or_log(env: &Env, key: &str, value: &str) {
+    if let Err(e) = set_kv(env, key, value).await {
+        worker::console_log!("[oracle] KV write failed for key '{key}': {e}");
+    }
+}
+
+/// Low-level KV put — returns `Result` so callers can choose to propagate.
+async fn set_kv(env: &Env, key: &str, value: &str) -> Result<(), String> {
+    let kv = env
+        .kv("ORACLE_KV")
+        .map_err(|e| format!("failed to get KV namespace: {}", e))?;
+
+    kv.put(key, value)
+        .map_err(|e| format!("failed to put in KV: {}", e))?
+        .execute()
+        .await
+        .map_err(|e| format!("failed to execute KV put: {}", e))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -46,39 +46,45 @@ Runs with `cargo run -p apis`.
 ### Oracle Worker (`oracle/`)
 
 - [x] Cloudflare Worker scaffolding (Axum + worker-build)
-- [ ] Fetch prices from Binance
-- [ ] Fetch prices from Coinbase
-- [ ] Fetch prices from Pyth Network
-- [ ] Multi-source median price aggregation
-- [ ] Outlier rejection (> 3σ from median)
-- [ ] Confidence interval calculation
-- [ ] Ed25519 keeper key signing (on-chain oracle message format)
-- [ ] Stellar RPC client — submit signed prices to on-chain oracle
-- [ ] Cloudflare Cron Trigger — scheduled price updates (every ~30s)
-- [ ] Multi-token feed configuration (token list + per-token source mapping)
-- [ ] Retry logic with exponential backoff
-- [ ] Network selection via env vars (testnet / mainnet)
-- [ ] Keeper wallet balance monitoring
-- [ ] Dead-letter queue for failed submissions
+- [x] Fetch prices from Binance
+- [x] Fetch prices from Coinbase
+- [x] Fetch prices from Pyth Network
+- [x] Multi-source median price aggregation
+- [x] Outlier rejection (> 3σ from median)
+- [x] Confidence interval calculation
+- [x] Ed25519 keeper key signing (on-chain oracle message format)
+- [x] Stellar RPC client — submit signed prices to on-chain oracle
+- [x] Cloudflare Cron Trigger — scheduled price updates (every 60 seconds)
+- [x] Multi-token feed configuration (token list + per-token source mapping)
+- [x] Retry logic with exponential backoff
+- [x] Network selection via env vars (testnet / mainnet)
+- [x] Keeper wallet balance monitoring
+- [x] Dead-letter queue for failed submissions
+- [x] Circuit breaker for large price movements
+- [x] KV-backed price caching
 
 ### APIs Server (`apis/`)
 
 - [x] `GET /health` — `{"status":"ok"}`
-- [ ] `GET /prices` — latest aggregated prices for all tokens
-- [ ] `GET /prices/:token` — single token price (min/max/timestamp)
-- [ ] `GET /markets` — all active markets with pool stats
-- [ ] `GET /markets/:market_token` — single market detail (pool value, OI, funding rate)
-- [ ] `GET /positions/:account` — account open positions
+- [x] `GET /prices/:token` — single token price (min/max/timestamp)
+- [x] `GET /prices/:token/history` — OHLCV candle history (1m/5m/1h intervals)
+- [x] `GET /markets` — all active markets with pool stats
+- [x] `GET /markets/:market_id` — single market detail (pool value, OI, funding rate)
+- [x] `GET /positions/:account` — account open positions with PnL
+- [x] `GET /openapi.json` — auto-generated OpenAPI 3.1 spec
+- [x] `GET /docs` — Swagger UI
+- [x] In-memory cache layer for oracle prices
+- [x] CORS configuration for frontend integration
+- [x] Structured logging (`tracing` subscriber)
+- [x] Graceful shutdown
+- [x] OpenAPI / Swagger spec generation
+- [x] Admin endpoint authentication
+
+### Planned (not yet implemented)
+
 - [ ] `GET /orders/:account` — account pending orders
-- [ ] `GET /oracle/status` — keeper health, last update time, submission latency
 - [ ] `WS /prices/stream` — real-time price push over WebSocket
-- [ ] Redis / in-memory cache layer for oracle prices
-- [ ] CORS configuration for frontend integration
 - [ ] Rate limiting middleware
-- [ ] Structured logging (`tracing` subscriber)
-- [ ] Graceful shutdown
-- [ ] OpenAPI / Swagger spec generation
-- [ ] Admin endpoint authentication
 
 ---
 
@@ -155,8 +161,11 @@ cargo test -p contracts --test e2e_full_flow  # end-to-end flow (#112)
 | `STELLAR_RPC_URL` | oracle | Stellar RPC endpoint |
 | `ORACLE_CONTRACT_ID` | oracle | On-chain oracle contract address |
 | `NETWORK_PASSPHRASE` | oracle | `"Test SDF Network ; September 2015"` or mainnet |
+| `PRICE_FEED_CONFIG` | oracle | JSON array of token feed configurations |
+| `PRICE_MOVEMENT_THRESHOLD` | oracle | Circuit breaker threshold (default: 10%) |
 | `PORT` | apis | Listen port (default `3000`) |
-| `REDIS_URL` | apis | Redis connection string for price cache |
+| `API_KEY` | apis | Bearer token for admin endpoints |
+| `CORS_ALLOWED_ORIGINS` | apis | Comma-separated allowed origins |
 
 ---
 
