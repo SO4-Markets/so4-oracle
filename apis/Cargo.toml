@@ -29,6 +29,9 @@ tower-http = { version = "0.6.11", features = ["cors", "trace", "timeout"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "fmt"] }
 utoipa = "5.5.0"
+stellar-xdr = { version = "22.1.0", features = ["std", "base64"] }
+stellar-strkey = "0.0.9"
+hex = "0.4"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

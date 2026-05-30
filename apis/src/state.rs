@@ -1,7 +1,7 @@
 use crate::cache::Cache;
 use crate::history::HistoryStore;
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -20,7 +20,7 @@ pub enum ReaderError {
     RpcError,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MarketSummary {
     pub market_token_address: String,
     pub index_token: String,

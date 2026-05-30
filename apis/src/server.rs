@@ -74,7 +74,7 @@ pub fn build_app(state: AppState) -> Router {
 
 pub async fn run() -> Result<(), anyhow::Error> {
     let cache = Cache::new();
-    let reader = Arc::new(crate::client::RpcClient) as Arc<dyn Reader + Send + Sync>;
+    let reader = Arc::new(crate::client::RpcClient::from_env()) as Arc<dyn Reader + Send + Sync>;
     let history = HistoryStore::new();
 
     // Background task: record a price tick every 60 seconds for all known tokens.
@@ -394,7 +394,7 @@ pub async fn get_markets(Extension(state): Extension<Arc<AppState>>) -> impl Int
     // cache key
     let cache_key = "markets_list";
     if let Some(cached) = state.cache.get::<Vec<MarketSummary>>(cache_key).await {
-        return (StatusCode::OK, Json(cached));
+        return (StatusCode::OK, Json(serde_json::to_value(cached).unwrap_or_default()));
     }
 
     let markets = match state.reader.get_markets().await {
@@ -423,7 +423,7 @@ pub async fn get_markets(Extension(state): Extension<Arc<AppState>>) -> impl Int
     let ttl = Duration::from_secs(30);
     state.cache.set(cache_key, &out, ttl).await;
 
-    (StatusCode::OK, Json(out))
+    (StatusCode::OK, Json(serde_json::to_value(out).unwrap_or_default()))
 }
 
 async fn get_market(
@@ -538,5 +538,5 @@ async fn get_positions(
         }
     }
 
-    (StatusCode::OK, Json(out))
+    (StatusCode::OK, Json(serde_json::Value::Array(out)))
 }
