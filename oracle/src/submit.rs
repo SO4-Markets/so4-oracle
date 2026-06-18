@@ -159,17 +159,17 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
         match result.status.as_str() {
             "SUCCESS" => {
                 let ledger = result.ledger.unwrap_or(0);
-                worker::console_log!("[oracle] tx {hash} confirmed at ledger {ledger}");
+                tracing::info!("[oracle] tx {hash} confirmed at ledger {ledger}");
                 return Ok(ledger);
             }
             "FAILED" => {
                 let events = result.diagnostic_events_xdr.unwrap_or_default();
-                worker::console_log!("[oracle] tx {hash} FAILED; diagnostic events: {events:?}");
+                tracing::info!("[oracle] tx {hash} FAILED; diagnostic events: {events:?}");
                 return Err(SubmitError::TransactionFailed { events });
             }
             // "NOT_FOUND" or "PENDING" — keep waiting
             _ => {
-                worker::console_log!(
+                tracing::info!(
                     "[oracle] tx {hash} status={} attempt={attempt}/{MAX_POLL_ATTEMPTS} \
                      next_backoff_ms={backoff_ms}",
                     result.status
@@ -186,7 +186,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
 
 #[cfg(target_arch = "wasm32")]
 async fn sleep_ms(ms: u64) {
-    worker::Delay::from(std::time::Duration::from_millis(ms)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -197,7 +197,7 @@ async fn sleep_ms(_ms: u64) {}
 /// Returns the ledger sequence at which the transaction was confirmed.
 pub async fn submit_and_poll(rpc_url: &str, signed_xdr: &str) -> Result<u32, SubmitError> {
     let hash = send_transaction_xdr(rpc_url, signed_xdr).await?;
-    worker::console_log!("[oracle] tx submitted: {hash}");
+    tracing::info!("[oracle] tx submitted: {hash}");
     poll_until_confirmed(rpc_url, &hash).await
 }
 

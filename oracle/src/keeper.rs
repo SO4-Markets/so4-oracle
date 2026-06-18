@@ -20,23 +20,17 @@ pub struct KeeperBalanceConfig {
 /// - `HORIZON_URL` (optional; defaults based on `network_config::StellarNetwork`)
 /// - `MIN_KEEPER_BALANCE_XLM` (optional; defaults to 10.0)
 pub fn load_keeper_config(
-    env: &worker::Env,
     default_horizon_url: &str,
 ) -> Result<KeeperBalanceConfig, String> {
-    let account_id = env
-        .var("KEEPER_ACCOUNT_ID")
-        .map_err(|_| "KEEPER_ACCOUNT_ID is not set".to_string())?
-        .to_string();
+    let account_id = std::env::var("KEEPER_ACCOUNT_ID")
+        .map_err(|_| "KEEPER_ACCOUNT_ID is not set".to_string())?;
 
-    let horizon_url = env
-        .var("HORIZON_URL")
-        .map(|v| v.to_string())
+    let horizon_url = std::env::var("HORIZON_URL")
         .unwrap_or_else(|_| default_horizon_url.to_string());
 
-    let min_balance_xlm = env
-        .var("MIN_KEEPER_BALANCE_XLM")
+    let min_balance_xlm = std::env::var("MIN_KEEPER_BALANCE_XLM")
         .ok()
-        .and_then(|v| v.to_string().parse::<f64>().ok())
+        .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(DEFAULT_MIN_KEEPER_BALANCE_XLM);
 
     Ok(KeeperBalanceConfig {
@@ -55,14 +49,14 @@ pub async fn check_keeper_balance(cfg: &KeeperBalanceConfig) -> Result<i64, RpcE
 
     let xlm = stroops as f64 / XLM_IN_STROOPS as f64;
     if xlm < cfg.min_balance_xlm {
-        worker::console_error!(
+        tracing::error!(
             "[keeper] CRITICAL: balance {xlm:.7} XLM is below minimum {:.7} XLM — \
              consider topping up account {}",
             cfg.min_balance_xlm,
             cfg.account_id
         );
     } else {
-        worker::console_log!(
+        tracing::info!(
             "[keeper] balance ok: {xlm:.7} XLM (min={:.7})",
             cfg.min_balance_xlm
         );
@@ -107,27 +101,16 @@ pub const FRIENDBOT_URL: &str = "https://friendbot.stellar.org";
 /// `!Send`.
 pub async fn fund_keeper_via_friendbot(account_id: &str) -> Result<(), String> {
     let url = format!("{FRIENDBOT_URL}?addr={account_id}");
-    worker::console_log!("[keeper] calling Friendbot for account {account_id}");
-
-    let request = worker::Request::new(&url, worker::Method::Get)
-        .map_err(|e| format!("failed to build Friendbot request: {e}"))?;
-
-    let mut response = worker::Fetch::Request(request)
-        .send()
+    tracing::info!("[keeper] calling Friendbot for account {account_id}");
+    let response = reqwest::get(&url)
         .await
-        .map_err(|e| format!("Friendbot fetch failed: {e}"))?;
-
-    let status = response.status_code();
-    // 200 = funded; 400 = account already exists (idempotent — treat as success)
+        .map_err(|e| format!("friendbot request failed: {e}"))?;
+    let status = response.status().as_u16();
     if status == 200 || status == 400 {
-        worker::console_log!("[keeper] Friendbot response {status} for {account_id}");
+        tracing::info!("[keeper] Friendbot response {status} for {account_id}");
         return Ok(());
     }
-
-    let body = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "(unreadable body)".to_string());
+    let body = response.text().await.unwrap_or_else(|_| "(unreadable body)".to_string());
     Err(format!(
         "Friendbot returned {status} for {account_id}: {body}"
     ))

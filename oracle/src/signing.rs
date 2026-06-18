@@ -66,11 +66,14 @@ pub fn sign_price(
     Ok(signature)
 }
 
-/// Helper function to read the private key from the worker environment.
-pub fn get_keeper_private_key(env: &worker::Env) -> Result<String, SigningError> {
-    env.var("KEEPER_PRIVATE_KEY")
-        .map(|v| v.to_string())
-        .map_err(|_| SigningError::MissingPrivateKey)
+/// Read the keeper private key from the config (loaded at boot via `Config::from_env()`).
+/// Returns `MissingPrivateKey` if the hex string is empty.
+pub fn get_keeper_private_key(key: &str) -> Result<String, SigningError> {
+    if key.is_empty() {
+        Err(SigningError::MissingPrivateKey)
+    } else {
+        Ok(key.to_string())
+    }
 }
 
 #[cfg(test)]

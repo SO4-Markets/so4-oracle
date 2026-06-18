@@ -1,185 +1,200 @@
-use shared_config::{ConfigError, TokenConfig};
+//! Application configuration — loaded from environment variables at boot.
 
-pub const ENV_KEY: &str = "PRICE_FEED_CONFIG";
+use std::fmt;
+use crate::StellarNetwork;
 
-/// Oracle-specific view of a token feed config.
-/// Re-exports fields from `TokenConfig` for backward compatibility with
-/// the rest of the oracle crate.
-pub type TokenFeedConfig = TokenConfig;
-
-#[derive(Debug, Clone)]
-pub struct PriceFeedConfig {
-    pub tokens: Vec<TokenFeedConfig>,
-}
-
-/// Parse and validate the `PRICE_FEED_CONFIG` JSON string.
+/// Top-level configuration for the so4-oracle service.
 ///
-/// Expected format:
-/// ```json
-/// [{"symbol":"BTC","stellar_address":"C...","sources":["binance","coinbase"]}]
-/// ```
-pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError> {
-    let tokens = shared_config::parse_token_configs(raw)?;
+/// All values are loaded from environment variables and validated at boot.
+/// See `§7` of `plan.md` for the full variable reference.
+#[derive(Debug, Clone)]
+pub struct Config {
+    // ── Network ──────────────────────────────────────────────────────────────
+    pub network: StellarNetwork,
+    pub rpc_url: String,
+    pub horizon_url: String,
+    pub passphrase: String,
 
-    // Oracle-specific validation: stellar_address and sources are required.
-    for token in &tokens {
-        if token.stellar_address.is_empty() {
-            return Err(ConfigError::InvalidToken {
-                symbol: token.symbol.clone(),
-                reason: "stellar_address must not be empty".to_string(),
-            });
-        }
-        if token.sources.is_empty() {
-            return Err(ConfigError::InvalidToken {
-                symbol: token.symbol.clone(),
-                reason: "sources list must not be empty".to_string(),
-            });
-        }
-        for source in &token.sources {
-            if source.is_empty() {
-                return Err(ConfigError::InvalidToken {
-                    symbol: token.symbol.clone(),
-                    reason: "source names must not be empty strings".to_string(),
-                });
-            }
-            match source.as_str() {
-                "binance" if token.binance_symbol.is_none() => {
-                    return Err(ConfigError::InvalidToken {
-                        symbol: token.symbol.clone(),
-                        reason: "binance_symbol is required for binance source".to_string(),
-                    });
-                }
-                "coinbase" if token.coinbase_symbol.is_none() => {
-                    return Err(ConfigError::InvalidToken {
-                        symbol: token.symbol.clone(),
-                        reason: "coinbase_symbol is required for coinbase source".to_string(),
-                    });
-                }
-                "pyth" if token.pyth_feed_id.is_none() => {
-                    return Err(ConfigError::InvalidToken {
-                        symbol: token.symbol.clone(),
-                        reason: "pyth_feed_id is required for pyth source".to_string(),
-                    });
-                }
-                "fixed" if token.fixed_price.is_none() => {
-                    return Err(ConfigError::InvalidToken {
-                        symbol: token.symbol.clone(),
-                        reason: "fixed_price is required for fixed source".to_string(),
-                    });
-                }
-                "binance" | "coinbase" | "pyth" | "fixed" => {}
-                other => {
-                    return Err(ConfigError::InvalidToken {
-                        symbol: token.symbol.clone(),
-                        reason: format!("unsupported source '{other}'"),
-                    });
-                }
-            }
-        }
-        if token.min_sources() == 0 {
-            return Err(ConfigError::InvalidToken {
-                symbol: token.symbol.clone(),
-                reason: "min_sources must be greater than zero".to_string(),
-            });
-        }
-    }
+    // ── Contract IDs ─────────────────────────────────────────────────────────
+    pub oracle_contract_id: String,
+    pub order_handler: String,
+    pub deposit_handler: String,
+    pub withdrawal_handler: String,
+    pub reader: String,
+    pub data_store: String,
+    pub role_store: String,
 
-    Ok(PriceFeedConfig { tokens })
+    // ── Loops & thresholds ───────────────────────────────────────────────────
+    pub price_loop_ms: u64,
+    pub keeper_loop_ms: u64,
+    pub min_keeper_balance_xlm: f64,
+    pub keeper_index: u32,
+    pub bind_addr: String,
+
+    // ── Secrets ──────────────────────────────────────────────────────────────
+    /// ed25519 hex key for signing prices.
+    pub keeper_private_key: String,
+    /// S... seed for transaction signing (distinct from price key per GMX #6).
+    pub keeper_secret_key: String,
+    /// G... public account ID of the keeper.
+    pub keeper_account_id: String,
+    /// Bearer token for admin API endpoints.
+    pub admin_api_token: String,
+
+    // ── Price feed ───────────────────────────────────────────────────────────
+    /// JSON string of token configs (optional; falls back to `config/tokens.json`).
+    pub price_feed_config: Option<String>,
 }
 
-/// Load and validate `PRICE_FEED_CONFIG` from the Worker environment.
-pub fn load_from_env(env: &worker::Env) -> Result<PriceFeedConfig, ConfigError> {
-    let raw = env
-        .var(ENV_KEY)
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| include_str!("../../config/tokens.json").to_string());
-    parse_price_feed_config(&raw)
+// ── Default network constants ────────────────────────────────────────────────
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            network: StellarNetwork::Testnet,
+            rpc_url: "https://soroban-testnet.stellar.org".into(),
+            horizon_url: "https://horizon-testnet.stellar.org".into(),
+            passphrase: "Test SDF Network ; September 2015".into(),
+            oracle_contract_id: Default::default(),
+            order_handler: Default::default(),
+            deposit_handler: Default::default(),
+            withdrawal_handler: Default::default(),
+            reader: Default::default(),
+            data_store: Default::default(),
+            role_store: Default::default(),
+            price_loop_ms: 1000,
+            keeper_loop_ms: 1000,
+            min_keeper_balance_xlm: 5.0,
+            keeper_index: 0,
+            bind_addr: "0.0.0.0:3000".into(),
+            keeper_private_key: Default::default(),
+            keeper_secret_key: Default::default(),
+            keeper_account_id: Default::default(),
+            admin_api_token: Default::default(),
+            price_feed_config: None,
+        }
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl Config {
+    /// Load and validate `Config` from environment variables.
+    ///
+    /// Required vars:
+    /// - `KEEPER_PRIVATE_KEY`, `KEEPER_SECRET_KEY`, `KEEPER_ACCOUNT_ID`, `ADMIN_API_TOKEN`
+    /// - `ORACLE_CONTRACT_ID`, `ORDER_HANDLER`, `DEPOSIT_HANDLER`, `WITHDRAWAL_HANDLER`
+    /// - `READER`, `DATA_STORE`
+    ///
+    /// Optional with defaults:
+    /// - `STELLAR_NETWORK` — `"testnet"` or `"mainnet"` (default: `"testnet"`)
+    /// - `STELLAR_RPC_URL`, `HORIZON_URL`, `NETWORK_PASSPHRASE` (defaults based on network)
+    /// - `PRICE_LOOP_MS` (default: `1000`), `KEEPER_LOOP_MS` (default: `1000`), `MIN_KEEPER_BALANCE_XLM` (default: `5.0`)
+    /// - `KEEPER_INDEX` (default: `0`), `BIND_ADDR` (default: `0.0.0.0:3000`)
+    /// - `PRICE_FEED_CONFIG` (optional JSON string)
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let mut cfg = Config::default();
 
-    const VALID_JSON: &str = r#"[
-        {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance","coinbase"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC"},
-        {"symbol":"ETH","stellar_address":"CETHADDR","sources":["binance"],"binance_symbol":"ETHUSDT"}
-    ]"#;
+        // ── Network selection ────────────────────────────────────────────────
+        let network_str = std::env::var("STELLAR_NETWORK")
+            .unwrap_or_else(|_| "testnet".to_string())
+            .to_lowercase();
 
-    #[test]
-    fn parse_valid_config() {
-        let cfg = parse_price_feed_config(VALID_JSON).unwrap();
-        assert_eq!(cfg.tokens.len(), 2);
-        assert_eq!(cfg.tokens[0].symbol, "BTC");
-        assert_eq!(cfg.tokens[0].sources, vec!["binance", "coinbase"]);
-        assert_eq!(cfg.tokens[1].symbol, "ETH");
-        assert_eq!(cfg.tokens[1].sources, vec!["binance"]);
+        cfg.network = match network_str.as_str() {
+            "testnet" => StellarNetwork::Testnet,
+            "mainnet" => StellarNetwork::Mainnet,
+            other => return Err(ConfigError::InvalidValue {
+                var: "STELLAR_NETWORK".into(),
+                msg: format!("expected 'testnet' or 'mainnet', got '{other}'"),
+            }),
+        };
+
+        // ── RPC / Horizon / passphrase (defaults per network) ────────────────
+        if let Ok(v) = std::env::var("STELLAR_RPC_URL") { cfg.rpc_url = v; }
+        if let Ok(v) = std::env::var("HORIZON_URL") { cfg.horizon_url = v; }
+        if let Ok(v) = std::env::var("NETWORK_PASSPHRASE") { cfg.passphrase = v; }
+
+        // ── Contract IDs ─────────────────────────────────────────────────────
+        cfg.oracle_contract_id = env_required("ORACLE_CONTRACT_ID")?;
+        cfg.order_handler = env_required("ORDER_HANDLER")?;
+        cfg.deposit_handler = env_required("DEPOSIT_HANDLER")?;
+        cfg.withdrawal_handler = env_required("WITHDRAWAL_HANDLER")?;
+        cfg.reader = env_required("READER")?;
+        cfg.data_store = env_required("DATA_STORE")?;
+
+        // role_store is optional (but warn if missing)
+        if let Ok(v) = std::env::var("ROLE_STORE") {
+            cfg.role_store = v;
+        }
+
+        // ── Loop intervals & thresholds ──────────────────────────────────────
+        if let Ok(v) = std::env::var("PRICE_LOOP_MS") {
+            cfg.price_loop_ms = v.parse().map_err(|_| ConfigError::InvalidValue {
+                var: "PRICE_LOOP_MS".into(),
+                msg: format!("expected u64, got '{v}'"),
+            })?;
+        }
+        if let Ok(v) = std::env::var("KEEPER_LOOP_MS") {
+            cfg.keeper_loop_ms = v.parse().map_err(|_| ConfigError::InvalidValue {
+                var: "KEEPER_LOOP_MS".into(),
+                msg: format!("expected u64, got '{v}'"),
+            })?;
+        }
+        if let Ok(v) = std::env::var("MIN_KEEPER_BALANCE_XLM") {
+            cfg.min_keeper_balance_xlm = v.parse().map_err(|_| ConfigError::InvalidValue {
+                var: "MIN_KEEPER_BALANCE_XLM".into(),
+                msg: format!("expected f64, got '{v}'"),
+            })?;
+        }
+        if let Ok(v) = std::env::var("KEEPER_INDEX") {
+            cfg.keeper_index = v.parse().map_err(|_| ConfigError::InvalidValue {
+                var: "KEEPER_INDEX".into(),
+                msg: format!("expected u32, got '{v}'"),
+            })?;
+        }
+        if let Ok(v) = std::env::var("BIND_ADDR") {
+            cfg.bind_addr = v;
+        }
+
+        // ── Secrets ──────────────────────────────────────────────────────────
+        cfg.keeper_private_key = env_required("KEEPER_PRIVATE_KEY")?;
+        cfg.keeper_secret_key = env_required("KEEPER_SECRET_KEY")?;
+        cfg.keeper_account_id = env_required("KEEPER_ACCOUNT_ID")?;
+        cfg.admin_api_token = env_required("ADMIN_API_TOKEN")?;
+
+        // ── Price feed config (optional) ─────────────────────────────────────
+        cfg.price_feed_config = std::env::var("PRICE_FEED_CONFIG").ok();
+        if cfg.price_feed_config.as_deref() == Some("") {
+            cfg.price_feed_config = None;
+        }
+
+        Ok(cfg)
     }
+}
 
-    #[test]
-    fn reject_malformed_json() {
-        let err = parse_price_feed_config("{not json}").unwrap_err();
-        assert!(matches!(err, ConfigError::MalformedJson(_)));
-    }
+// ── Error type ───────────────────────────────────────────────────────────────
 
-    #[test]
-    fn reject_empty_token_list() {
-        let err = parse_price_feed_config("[]").unwrap_err();
-        assert!(matches!(err, ConfigError::EmptyTokenList));
-    }
+#[derive(Debug)]
+pub enum ConfigError {
+    MissingVar { var: String },
+    InvalidValue { var: String, msg: String },
+}
 
-    #[test]
-    fn reject_token_with_empty_symbol() {
-        let json = r#"[{"symbol":"","stellar_address":"CADDR","sources":["binance"],"binance_symbol":"BTCUSDT"}]"#;
-        let err = parse_price_feed_config(json).unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidToken { .. }));
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::MissingVar { var } => {
+                write!(f, "required env var '{var}' is not set")
+            }
+            ConfigError::InvalidValue { var, msg } => {
+                write!(f, "env var '{var}' is invalid: {msg}")
+            }
+        }
     }
+}
 
-    #[test]
-    fn reject_token_with_empty_stellar_address() {
-        let json = r#"[{"symbol":"BTC","stellar_address":"","sources":["binance"],"binance_symbol":"BTCUSDT"}]"#;
-        let err = parse_price_feed_config(json).unwrap_err();
-        assert!(matches!(
-            err,
-            ConfigError::InvalidToken { ref symbol, .. } if symbol == "BTC"
-        ));
-    }
+impl std::error::Error for ConfigError {}
 
-    #[test]
-    fn reject_token_with_empty_sources() {
-        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":[]}]"#;
-        let err = parse_price_feed_config(json).unwrap_err();
-        assert!(matches!(
-            err,
-            ConfigError::InvalidToken { ref symbol, .. } if symbol == "BTC"
-        ));
-    }
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn per_token_source_list_preserved() {
-        let json = r#"[
-            {"symbol":"BTC","stellar_address":"CBADDR","sources":["binance"],"binance_symbol":"BTCUSDT"},
-            {"symbol":"ETH","stellar_address":"CEADDR","sources":["coinbase"],"coinbase_symbol":"ETH"}
-        ]"#;
-        let cfg = parse_price_feed_config(json).unwrap();
-        assert_eq!(cfg.tokens[0].sources, vec!["binance"]);
-        assert_eq!(cfg.tokens[1].sources, vec!["coinbase"]);
-    }
-
-    #[test]
-    fn reject_missing_coinbase_symbol() {
-        let json = r#"[{"symbol":"TWBTC","stellar_address":"CADDR","sources":["coinbase"]}]"#;
-        let err = parse_price_feed_config(json).unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidToken { .. }));
-    }
-
-    #[test]
-    fn parse_current_testnet_shape() {
-        let json = r#"[
-            {"symbol":"TUSDC","display_symbol":"USDC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["fixed"],"fixed_price":"1000000000000000000000000000000","min_sources":1},
-            {"symbol":"TWBTC","display_symbol":"BTC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["binance","coinbase","pyth"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC","pyth_feed_id":"e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43","min_sources":2}
-        ]"#;
-        let cfg = parse_price_feed_config(json).unwrap();
-        assert_eq!(cfg.tokens[0].display_symbol(), "USDC");
-        assert_eq!(cfg.tokens[1].coinbase_symbol.as_deref(), Some("BTC"));
-    }
+fn env_required(var: &str) -> Result<String, ConfigError> {
+    std::env::var(var).map_err(|_| ConfigError::MissingVar { var: var.into() })
 }
