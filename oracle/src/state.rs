@@ -97,3 +97,20 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RingBuffer;
+
+    #[test]
+    fn ring_buffer_evicts_oldest_items_at_capacity() {
+        let mut buffer = RingBuffer::new(2);
+
+        buffer.push(1);
+        buffer.push(2);
+        buffer.push(3);
+
+        let items = buffer.iter().copied().collect::<Vec<_>>();
+        assert_eq!(items, vec![2, 3]);
+    }
+}

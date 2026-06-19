@@ -482,6 +482,28 @@ mod tests {
     }
 
     #[test]
+    fn config_from_lookup_accepts_deployed_oracle_alias_on_testnet() {
+        let mut env = valid_env();
+        let oracle = env.remove("ORACLE_CONTRACT_ID").unwrap();
+        env.insert("ORACLE", oracle.clone());
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(cfg.oracle_contract_id, oracle);
+    }
+
+    #[test]
+    fn config_from_lookup_requires_explicit_mainnet_rpc() {
+        let mut env = valid_env();
+        env.insert("STELLAR_NETWORK", "mainnet".to_string());
+        env.remove("STELLAR_RPC_URL");
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        assert_eq!(err, EnvError::MissingVar("STELLAR_RPC_URL"));
+    }
+
+    #[test]
     fn config_from_env_names_missing_required_var() {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
