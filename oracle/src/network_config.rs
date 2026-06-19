@@ -41,55 +41,6 @@ impl std::fmt::Display for NetworkConfigError {
     }
 }
 
-/// Load network config from env vars.
-///
-/// `STELLAR_NETWORK=testnet` (default) provides sensible defaults for every
-/// optional var.  `STELLAR_NETWORK=mainnet` requires `STELLAR_RPC_URL` and
-/// `ORACLE_CONTRACT_ID` to be set explicitly; startup aborts with an error
-/// otherwise.
-pub fn load_network_config(env: &worker::Env) -> Result<NetworkConfig, NetworkConfigError> {
-    let network_str = env
-        .var("STELLAR_NETWORK")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "testnet".to_string());
-
-    match network_str.as_str() {
-        "testnet" => {
-            let rpc_url = env
-                .var("STELLAR_RPC_URL")
-                .map(|v| v.to_string())
-                .unwrap_or_else(|_| TESTNET_RPC_URL.to_string());
-            let oracle_contract_id = env
-                .var("ORACLE_CONTRACT_ID")
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            Ok(NetworkConfig {
-                network: StellarNetwork::Testnet,
-                rpc_url,
-                passphrase: TESTNET_PASSPHRASE.to_string(),
-                oracle_contract_id,
-            })
-        }
-        "mainnet" => {
-            let rpc_url = env
-                .var("STELLAR_RPC_URL")
-                .map(|v| v.to_string())
-                .map_err(|_| NetworkConfigError::MissingMainnetVar("STELLAR_RPC_URL"))?;
-            let oracle_contract_id = env
-                .var("ORACLE_CONTRACT_ID")
-                .map(|v| v.to_string())
-                .map_err(|_| NetworkConfigError::MissingMainnetVar("ORACLE_CONTRACT_ID"))?;
-            Ok(NetworkConfig {
-                network: StellarNetwork::Mainnet,
-                rpc_url,
-                passphrase: MAINNET_PASSPHRASE.to_string(),
-                oracle_contract_id,
-            })
-        }
-        other => Err(NetworkConfigError::UnknownNetwork(other.to_string())),
-    }
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

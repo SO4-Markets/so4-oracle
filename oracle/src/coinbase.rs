@@ -61,10 +61,10 @@ pub fn parse_coinbase_http_result(
 pub async fn fetch_spot_price(symbol: &str) -> Result<i128, CoinbasePriceError> {
     // Usually the symbol passed is something like "BTC".
     // If it comes with USDT suffix, we should strip it or ensure we query the base asset.
-    let base_currency = if symbol.ends_with("USDT") {
-        &symbol[..symbol.len() - 4]
-    } else if symbol.ends_with("USD") {
-        &symbol[..symbol.len() - 3]
+    let base_currency = if let Some(stripped) = symbol.strip_suffix("USDT") {
+        stripped
+    } else if let Some(stripped) = symbol.strip_suffix("USD") {
+        stripped
     } else {
         symbol
     };

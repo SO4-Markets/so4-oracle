@@ -158,7 +158,7 @@ pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResu
     // 1. Compute median
     let mut sorted = prices.to_vec();
     sorted.sort_unstable();
-    let median = if sorted.len() % 2 == 0 {
+    let median = if sorted.len().is_multiple_of(2) {
         (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2
     } else {
         sorted[sorted.len() / 2]
@@ -168,7 +168,7 @@ pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResu
     // inflate standard deviation enough to hide itself.
     let mut deviations: Vec<i128> = prices.iter().map(|&p| (p - median).abs()).collect();
     deviations.sort_unstable();
-    let mad = if deviations.len() % 2 == 0 {
+    let mad = if deviations.len().is_multiple_of(2) {
         (deviations[deviations.len() / 2 - 1] + deviations[deviations.len() / 2]) / 2
     } else {
         deviations[deviations.len() / 2]
@@ -228,7 +228,7 @@ pub fn compute_median_allow_single(prices: &[i128]) -> Option<i128> {
     }
     let mut sorted = prices.to_vec();
     sorted.sort_unstable();
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         Some((sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2)
     } else {
         Some(sorted[sorted.len() / 2])

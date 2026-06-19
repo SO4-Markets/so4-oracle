@@ -1,6 +1,18 @@
+use std::fmt;
+use std::net::SocketAddr;
+use std::time::Duration;
+
 use shared_config::{ConfigError, TokenConfig};
 
+use crate::keeper::DEFAULT_MIN_KEEPER_BALANCE_XLM;
+use crate::network_config::{MAINNET_PASSPHRASE, TESTNET_PASSPHRASE, TESTNET_RPC_URL};
+
 pub const ENV_KEY: &str = "PRICE_FEED_CONFIG";
+pub const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
+pub const DEFAULT_TESTNET_HORIZON_URL: &str = "https://horizon-testnet.stellar.org";
+pub const DEFAULT_MAINNET_HORIZON_URL: &str = "https://horizon.stellar.org";
+pub const DEFAULT_PRICE_LOOP_MS: u64 = 1_000;
+pub const DEFAULT_KEEPER_LOOP_MS: u64 = 1_500;
 
 /// Oracle-specific view of a token feed config.
 /// Re-exports fields from `TokenConfig` for backward compatibility with
@@ -10,6 +22,230 @@ pub type TokenFeedConfig = TokenConfig;
 #[derive(Debug, Clone)]
 pub struct PriceFeedConfig {
     pub tokens: Vec<TokenFeedConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Network {
+    Testnet,
+    Mainnet,
+}
+
+impl Network {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Network::Testnet => "testnet",
+            Network::Mainnet => "mainnet",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SecretString(String);
+
+impl SecretString {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub bind_addr: SocketAddr,
+    pub network: Network,
+    pub network_passphrase: String,
+    pub stellar_rpc_url: String,
+    pub horizon_url: String,
+    pub oracle_contract_id: String,
+    pub role_store_contract_id: String,
+    pub data_store_contract_id: String,
+    pub order_handler_contract_id: String,
+    pub deposit_handler_contract_id: String,
+    pub withdrawal_handler_contract_id: String,
+    pub reader_contract_id: String,
+    pub keeper_private_key: SecretString,
+    pub keeper_secret_key: SecretString,
+    pub keeper_account_id: String,
+    pub keeper_index: u32,
+    pub admin_api_token: Option<SecretString>,
+    pub min_keeper_balance_xlm: f64,
+    pub price_loop_interval: Duration,
+    pub keeper_loop_interval: Duration,
+    pub price_feed: PriceFeedConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvError {
+    MissingVar(&'static str),
+    InvalidVar { var: &'static str, reason: String },
+    TokenConfig(String),
+}
+
+impl fmt::Display for EnvError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EnvError::MissingVar(var) => write!(f, "required env var '{var}' is not set"),
+            EnvError::InvalidVar { var, reason } => write!(f, "invalid env var '{var}': {reason}"),
+            EnvError::TokenConfig(reason) => write!(f, "invalid PRICE_FEED_CONFIG: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for EnvError {}
+
+impl From<ConfigError> for EnvError {
+    fn from(value: ConfigError) -> Self {
+        EnvError::TokenConfig(value.to_string())
+    }
+}
+
+impl Config {
+    pub fn from_env() -> Result<Self, EnvError> {
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
+
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, EnvError> {
+        let network_raw = lookup("STELLAR_NETWORK").unwrap_or_else(|| "testnet".to_string());
+        let network = match network_raw.as_str() {
+            "testnet" => Network::Testnet,
+            "mainnet" => Network::Mainnet,
+            other => {
+                return Err(EnvError::InvalidVar {
+                    var: "STELLAR_NETWORK",
+                    reason: format!("unknown network '{other}'; expected 'testnet' or 'mainnet'"),
+                })
+            }
+        };
+
+        let bind_addr = parse_or_default(&mut lookup, "BIND_ADDR", DEFAULT_BIND_ADDR)?;
+        let (network_passphrase, stellar_rpc_url, horizon_url) = match network {
+            Network::Testnet => (
+                TESTNET_PASSPHRASE.to_string(),
+                lookup("STELLAR_RPC_URL").unwrap_or_else(|| TESTNET_RPC_URL.to_string()),
+                lookup("HORIZON_URL").unwrap_or_else(|| DEFAULT_TESTNET_HORIZON_URL.to_string()),
+            ),
+            Network::Mainnet => (
+                MAINNET_PASSPHRASE.to_string(),
+                required(&mut lookup, "STELLAR_RPC_URL")?,
+                lookup("HORIZON_URL").unwrap_or_else(|| DEFAULT_MAINNET_HORIZON_URL.to_string()),
+            ),
+        };
+
+        let oracle_contract_id = match network {
+            Network::Mainnet => required(&mut lookup, "ORACLE_CONTRACT_ID")?,
+            Network::Testnet => required_any(&mut lookup, "ORACLE_CONTRACT_ID", "ORACLE")?,
+        };
+
+        let price_feed = load_price_feed_config(lookup("PRICE_FEED_CONFIG").as_deref())?;
+
+        Ok(Self {
+            bind_addr,
+            network,
+            network_passphrase,
+            stellar_rpc_url,
+            horizon_url,
+            oracle_contract_id,
+            role_store_contract_id: required(&mut lookup, "ROLE_STORE")?,
+            data_store_contract_id: required(&mut lookup, "DATA_STORE")?,
+            order_handler_contract_id: required(&mut lookup, "ORDER_HANDLER")?,
+            deposit_handler_contract_id: required(&mut lookup, "DEPOSIT_HANDLER")?,
+            withdrawal_handler_contract_id: required(&mut lookup, "WITHDRAWAL_HANDLER")?,
+            reader_contract_id: required(&mut lookup, "READER")?,
+            keeper_private_key: SecretString::new(validate_hex_key(
+                "KEEPER_PRIVATE_KEY",
+                required(&mut lookup, "KEEPER_PRIVATE_KEY")?,
+                32,
+            )?),
+            keeper_secret_key: SecretString::new(required(&mut lookup, "KEEPER_SECRET_KEY")?),
+            keeper_account_id: required(&mut lookup, "KEEPER_ACCOUNT_ID")?,
+            keeper_index: parse_or_default(&mut lookup, "KEEPER_INDEX", "0")?,
+            admin_api_token: Some(SecretString::new(required(&mut lookup, "ADMIN_API_TOKEN")?)),
+            min_keeper_balance_xlm: parse_or_default(
+                &mut lookup,
+                "MIN_KEEPER_BALANCE_XLM",
+                &DEFAULT_MIN_KEEPER_BALANCE_XLM.to_string(),
+            )?,
+            price_loop_interval: Duration::from_millis(parse_or_default(
+                &mut lookup,
+                "PRICE_LOOP_MS",
+                &DEFAULT_PRICE_LOOP_MS.to_string(),
+            )?),
+            keeper_loop_interval: Duration::from_millis(parse_or_default(
+                &mut lookup,
+                "KEEPER_LOOP_MS",
+                &DEFAULT_KEEPER_LOOP_MS.to_string(),
+            )?),
+            price_feed,
+        })
+    }
+}
+
+fn required(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+    var: &'static str,
+) -> Result<String, EnvError> {
+    lookup(var)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(EnvError::MissingVar(var))
+}
+
+fn required_any(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+    primary: &'static str,
+    fallback: &'static str,
+) -> Result<String, EnvError> {
+    lookup(primary)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| lookup(fallback).filter(|value| !value.trim().is_empty()))
+        .ok_or(EnvError::MissingVar(primary))
+}
+
+fn parse_or_default<T>(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+    var: &'static str,
+    default: &str,
+) -> Result<T, EnvError>
+where
+    T: std::str::FromStr,
+    T::Err: fmt::Display,
+{
+    let raw = lookup(var).unwrap_or_else(|| default.to_string());
+    raw.parse::<T>().map_err(|err| EnvError::InvalidVar {
+        var,
+        reason: err.to_string(),
+    })
+}
+
+fn validate_hex_key(
+    var: &'static str,
+    value: String,
+    expected_len: usize,
+) -> Result<String, EnvError> {
+    let bytes = hex::decode(&value).map_err(|err| EnvError::InvalidVar {
+        var,
+        reason: err.to_string(),
+    })?;
+    if bytes.len() != expected_len {
+        return Err(EnvError::InvalidVar {
+            var,
+            reason: format!("expected {expected_len} bytes, got {}", bytes.len()),
+        });
+    }
+    Ok(value)
+}
+
+fn load_price_feed_config(raw: Option<&str>) -> Result<PriceFeedConfig, ConfigError> {
+    let raw = raw.unwrap_or(include_str!("../../config/tokens.json"));
+    parse_price_feed_config(raw)
 }
 
 /// Parse and validate the `PRICE_FEED_CONFIG` JSON string.
@@ -87,18 +323,11 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
     Ok(PriceFeedConfig { tokens })
 }
 
-/// Load and validate `PRICE_FEED_CONFIG` from the Worker environment.
-pub fn load_from_env(env: &worker::Env) -> Result<PriceFeedConfig, ConfigError> {
-    let raw = env
-        .var(ENV_KEY)
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| include_str!("../../config/tokens.json").to_string());
-    parse_price_feed_config(&raw)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
 
     const VALID_JSON: &str = r#"[
         {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance","coinbase"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC"},
@@ -181,5 +410,117 @@ mod tests {
         let cfg = parse_price_feed_config(json).unwrap();
         assert_eq!(cfg.tokens[0].display_symbol(), "USDC");
         assert_eq!(cfg.tokens[1].coinbase_symbol.as_deref(), Some("BTC"));
+    }
+
+    fn valid_env() -> HashMap<&'static str, String> {
+        HashMap::from([
+            ("STELLAR_NETWORK", "testnet".to_string()),
+            (
+                "ORACLE_CONTRACT_ID",
+                "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY".to_string(),
+            ),
+            (
+                "ROLE_STORE",
+                "CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q".to_string(),
+            ),
+            (
+                "DATA_STORE",
+                "CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J".to_string(),
+            ),
+            (
+                "ORDER_HANDLER",
+                "CC35OFZVWUTAZPV3B6UKSDVAVORZEWUUMOMTHO33H4YR4C5FKPEFODKY".to_string(),
+            ),
+            (
+                "DEPOSIT_HANDLER",
+                "CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C".to_string(),
+            ),
+            (
+                "WITHDRAWAL_HANDLER",
+                "CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE".to_string(),
+            ),
+            (
+                "READER",
+                "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC".to_string(),
+            ),
+            (
+                "KEEPER_PRIVATE_KEY",
+                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            ),
+            ("KEEPER_SECRET_KEY", "SA_TEST_KEEPER_SECRET".to_string()),
+            (
+                "KEEPER_ACCOUNT_ID",
+                "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            ),
+            ("ADMIN_API_TOKEN", "test-admin-token".to_string()),
+        ])
+    }
+
+    #[test]
+    fn config_from_lookup_uses_testnet_defaults_and_token_file_fallback() {
+        let env = valid_env();
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(cfg.network, Network::Testnet);
+        assert_eq!(cfg.stellar_rpc_url, TESTNET_RPC_URL);
+        assert_eq!(cfg.network_passphrase, TESTNET_PASSPHRASE);
+        assert_eq!(
+            cfg.price_loop_interval,
+            Duration::from_millis(DEFAULT_PRICE_LOOP_MS)
+        );
+        assert!(!cfg.price_feed.tokens.is_empty());
+    }
+
+    #[test]
+    fn config_from_lookup_names_missing_required_var() {
+        let mut env = valid_env();
+        env.remove("KEEPER_PRIVATE_KEY");
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+        assert_eq!(err, EnvError::MissingVar("KEEPER_PRIVATE_KEY"));
+        assert!(err.to_string().contains("KEEPER_PRIVATE_KEY"));
+    }
+
+    #[test]
+    fn config_from_env_names_missing_required_var() {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let keys = [
+            "STELLAR_NETWORK",
+            "ORACLE_CONTRACT_ID",
+            "ROLE_STORE",
+            "DATA_STORE",
+            "ORDER_HANDLER",
+            "DEPOSIT_HANDLER",
+            "WITHDRAWAL_HANDLER",
+            "READER",
+            "KEEPER_PRIVATE_KEY",
+            "KEEPER_SECRET_KEY",
+            "KEEPER_ACCOUNT_ID",
+            "ADMIN_API_TOKEN",
+        ];
+        let original: Vec<_> = keys
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect();
+
+        for key in keys {
+            std::env::remove_var(key);
+        }
+        for (key, value) in valid_env() {
+            std::env::set_var(key, value);
+        }
+        std::env::remove_var("KEEPER_PRIVATE_KEY");
+
+        let err = Config::from_env().unwrap_err();
+
+        for (key, value) in original {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        assert_eq!(err, EnvError::MissingVar("KEEPER_PRIVATE_KEY"));
     }
 }

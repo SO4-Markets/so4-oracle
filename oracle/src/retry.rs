@@ -33,24 +33,15 @@ where
     Err(last_err.expect("max_attempts must be > 0"))
 }
 
-#[cfg(target_arch = "wasm32")]
 fn log_retry_failure<E: std::fmt::Debug>(attempt: u32, max_attempts: u32, error: &E) {
-    worker::console_log!("[retry] attempt {attempt}/{max_attempts} failed: {error:?}");
+    tracing::warn!(attempt, max_attempts, error = ?error, "retry attempt failed");
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn log_retry_failure<E: std::fmt::Debug>(attempt: u32, max_attempts: u32, error: &E) {
-    eprintln!("[retry] attempt {attempt}/{max_attempts} failed: {error:?}");
-}
-
-/// Async sleep.  On WASM (Cloudflare Workers) this uses JS `setTimeout`;
-/// on native targets (unit tests) it is a no-op so tests run without delay.
+/// Async sleep for native tokio runtime.
 async fn sleep_ms(ms: u64) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        worker::Delay::from(std::time::Duration::from_millis(ms)).await;
+    if ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
     }
-    let _ = ms;
 }
 
 #[cfg(test)]

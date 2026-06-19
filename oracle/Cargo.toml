@@ -2,7 +2,7 @@
 name = "oracle"
 version = "0.1.0"
 edition = "2021"
-authors = ["ibrahimijai <sunday.m1701072@st.futminna.edu.ng>"]
+authors = ["0xsteins"]
 
 [lints]
 workspace = true
@@ -24,7 +24,7 @@ serde_json = "1"
 ed25519-dalek = "2.1"
 hex = "0.4"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 shared-config = { path = "../shared/config" }
 

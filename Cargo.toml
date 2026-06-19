@@ -2,7 +2,7 @@
 members = ["oracle", "shared/config"]
 resolver = "2"
 
-[workspace.lints.clippy]
+[workspace.lints.rust]
 mismatched_lifetime_syntaxes = "allow"
 
 [profile.release]

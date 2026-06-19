@@ -137,9 +137,6 @@ async fn send_transaction_xdr(rpc_url: &str, signed_xdr: &str) -> Result<String,
 /// Poll `getTransaction` until confirmed or until `MAX_POLL_ATTEMPTS` are exhausted.
 ///
 /// Delay strategy: exponential backoff starting at `INITIAL_BACKOFF_MS`.
-/// In Cloudflare Workers, implement async sleeping via `js_sys::Promise` +
-/// `wasm_bindgen_futures::JsFuture`; in tests the polling loop is exercised
-/// through mocked responses without actual delays.
 async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitError> {
     let mut backoff_ms = INITIAL_BACKOFF_MS;
 
@@ -159,20 +156,23 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
         match result.status.as_str() {
             "SUCCESS" => {
                 let ledger = result.ledger.unwrap_or(0);
-                worker::console_log!("[oracle] tx {hash} confirmed at ledger {ledger}");
+                tracing::info!(hash, ledger, "transaction confirmed");
                 return Ok(ledger);
             }
             "FAILED" => {
                 let events = result.diagnostic_events_xdr.unwrap_or_default();
-                worker::console_log!("[oracle] tx {hash} FAILED; diagnostic events: {events:?}");
+                tracing::error!(hash, ?events, "transaction failed");
                 return Err(SubmitError::TransactionFailed { events });
             }
             // "NOT_FOUND" or "PENDING" — keep waiting
             _ => {
-                worker::console_log!(
-                    "[oracle] tx {hash} status={} attempt={attempt}/{MAX_POLL_ATTEMPTS} \
-                     next_backoff_ms={backoff_ms}",
-                    result.status
+                tracing::debug!(
+                    hash,
+                    status = result.status,
+                    attempt,
+                    max_attempts = MAX_POLL_ATTEMPTS,
+                    next_backoff_ms = backoff_ms,
+                    "transaction still pending"
                 );
                 sleep_ms(backoff_ms).await;
                 // Double the backoff for the next iteration (capped at 30 s).
@@ -184,20 +184,16 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
     Err(SubmitError::PollTimeout)
 }
 
-#[cfg(target_arch = "wasm32")]
 async fn sleep_ms(ms: u64) {
-    worker::Delay::from(std::time::Duration::from_millis(ms)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
 }
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn sleep_ms(_ms: u64) {}
 
 /// Submit a signed transaction XDR and poll for the result with exponential backoff.
 ///
 /// Returns the ledger sequence at which the transaction was confirmed.
 pub async fn submit_and_poll(rpc_url: &str, signed_xdr: &str) -> Result<u32, SubmitError> {
     let hash = send_transaction_xdr(rpc_url, signed_xdr).await?;
-    worker::console_log!("[oracle] tx submitted: {hash}");
+    tracing::info!(hash, "transaction submitted");
     poll_until_confirmed(rpc_url, &hash).await
 }
 

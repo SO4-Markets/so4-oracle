@@ -66,13 +66,6 @@ pub fn sign_price(
     Ok(signature)
 }
 
-/// Helper function to read the private key from the worker environment.
-pub fn get_keeper_private_key(env: &worker::Env) -> Result<String, SigningError> {
-    env.var("KEEPER_PRIVATE_KEY")
-        .map(|v| v.to_string())
-        .map_err(|_| SigningError::MissingPrivateKey)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
