@@ -22,6 +22,7 @@ async fn main() {
     let state = Arc::new(AppState::new(Arc::clone(&config)));
     let app = api::build_router(Arc::clone(&state));
     let price_loop = tokio::spawn(oracle::price_loop::run_price_loop(Arc::clone(&state)));
+    let keeper_loop = tokio::spawn(oracle::keeper_loop::run_keeper_loop(Arc::clone(&state)));
 
     let listener = match TcpListener::bind(bind_addr).await {
         Ok(listener) => listener,
@@ -42,6 +43,7 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await;
     price_loop.abort();
+    keeper_loop.abort();
 
     if let Err(error) = server {
         tracing::error!(%error, "server error");

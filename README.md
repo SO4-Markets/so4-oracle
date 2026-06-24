@@ -1,74 +1,162 @@
 # so4-oracle
 
-Cloudflare Worker keeper for the SO4.market Soroban oracle.
+Production Axum service for the SO4.market Soroban oracle and keeper.
 
-This repository is intentionally scoped to the oracle only. The old Axum API server,
-contract deployment scripts, Docker stack, and local contract workspace have been
-removed so the remaining build surface is the scheduled keeper.
+This repository contains a single Rust binary that runs:
+- Price fetching and aggregation from multiple sources (Binance, Coinbase, Pyth)
+- Keeper loop that executes pending orders, deposits, and withdrawals on-chain
+- HTTP API for price feeds and operational endpoints
+
+## Architecture
+
+```
+so4-oracle  (single statically-deployed binary)
+├── main.rs            tokio::main → load Config → build AppState → spawn loops → serve axum
+├── HTTP API (axum + tower-http CORS/trace)
+│     GET /health                      public   liveness
+│     GET /ready                       public   RPC reachable + keeper funded
+│     GET /prices                      public   serves in-memory PriceCache (frontend)
+│     GET /oracle/status               admin    last cycle, balance, per-token state
+│     GET /keeper/status               admin    pending work + last N executions
+│     GET /oracle/failed-submissions   admin    ring buffer of failures
+│     GET /metrics                     admin    Prometheus metrics
+├── task: price_loop   tokio::interval(~1s)
+│     fetch sources → validate → aggregate min/max → sign → write PriceCache
+└── task: keeper_loop  tokio::interval(~1-2s)
+      poll reader (orders/deposits/withdrawals)
+      → if work: set_prices(needed tokens) → execute_*(key) per item → freeze on budget
+      → record results; never panics the loop
+```
 
 ## Deployed Contract Reference
 
 Testnet oracle:
 
 ```text
-ORACLE=CBABE5O7QJMXT2I42KHUV7ESNER3Z2BGJCF2QRKWMKVTCBEYFQNHV3J6
-ROLE_STORE=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q
+ORACLE=CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY
+ORDER_HANDLER=CC35OFZVWUTAZPV3B6UKSDVAVORZEWUUMOMTHO33H4YR4C5FKPEFODKY
+DEPOSIT_HANDLER=CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C
+WITHDRAWAL_HANDLER=CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE
+READER=CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC
 DATA_STORE=CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J
-ADMIN=GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI
-NETWORK=testnet
+ROLE_STORE=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q
+NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
+RPC_URL=https://soroban-testnet.stellar.org
 ```
 
-Contract source reference lives outside this repo at:
-
-```text
-/home/sunny/zero/so4-market-project/contracts
-```
-
-## What The Keeper Does
-
-- Loads token feed config from `PRICE_FEED_CONFIG`, falling back to `config/tokens.json`.
-- Fetches prices from Binance, Coinbase, and Pyth per token config.
-- Filters outliers and computes a min/max price band.
-- Signs live price payloads without writing to Cloudflare KV.
-- Exposes small operational endpoints:
-  - `GET /prices` (live, on-demand)
-  - `GET /health`
-  - `GET /oracle/status` (live, on-demand; requires admin bearer token)
-  - `GET /oracle/failed-submissions` (log-only notice; requires admin bearer token)
-  - `GET /keeper/balance` (requires admin bearer token)
-
-## Required Worker Configuration
-
-Secrets:
+## Required Environment Variables
 
 ```bash
-wrangler secret put KEEPER_PRIVATE_KEY
-wrangler secret put KEEPER_ACCOUNT_ID
-wrangler secret put ADMIN_API_TOKEN
-wrangler secret put PRICE_FEED_CONFIG
-```
-
-Variables are defined in `wrangler.toml` for testnet defaults:
-
-```text
+# Network configuration
 STELLAR_NETWORK=testnet
 STELLAR_RPC_URL=https://soroban-testnet.stellar.org
-ORACLE_CONTRACT_ID=CBABE5O7QJMXT2I42KHUV7ESNER3Z2BGJCF2QRKWMKVTCBEYFQNHV3J6
-```
+HORIZON_URL=https://horizon-testnet.stellar.org
+NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 
-No KV namespace is required. The Worker is stateless; failures and diagnostics are emitted to Worker logs.
+# Contract IDs
+ORACLE_CONTRACT_ID=CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY
+ORDER_HANDLER_CONTRACT_ID=CC35OFZVWUTAZPV3B6UKSDVAVORZEWUUMOMTHO33H4YR4C5FKPEFODKY
+DEPOSIT_HANDLER_CONTRACT_ID=CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C
+WITHDRAWAL_HANDLER_CONTRACT_ID=CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE
+READER_CONTRACT_ID=CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC
+DATA_STORE_CONTRACT_ID=CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J
+ROLE_STORE_CONTRACT_ID=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q
+
+# Keeper configuration
+KEEPER_PRIVATE_KEY=<hex-encoded-ed25519-private-key>
+KEEPER_SECRET_KEY=<S...-strkey-seed>
+KEEPER_ACCOUNT_ID=<G...-public-key>
+KEEPER_INDEX=0
+MIN_KEEPER_BALANCE_XLM=10
+
+# API configuration
+BIND_ADDR=0.0.0.0:8080
+ADMIN_API_TOKEN=<optional-admin-token>
+
+# Loop intervals (milliseconds)
+PRICE_LOOP_MS=1000
+KEEPER_LOOP_MS=1500
+
+# Price feed configuration
+PRICE_FEED_CONFIG=/path/to/tokens.json
+```
 
 ## Development
 
 ```bash
+# Check the code
 cargo check --workspace
+
+# Run tests
 cargo test --workspace
-wrangler dev --test-scheduled
-wrangler deploy
+
+# Run locally (with .env file)
+cargo run --bin oracle
+
+# Build for production
+cargo build --release --bin oracle
 ```
 
-Install `worker-build` once if it is not already available:
+## Deployment
+
+### Docker
 
 ```bash
-cargo install worker-build
+# Build the image
+docker build -t so4-oracle .
+
+# Run with environment variables
+docker run -p 8080:8080 \
+  -e STELLAR_RPC_URL=https://soroban-testnet.stellar.org \
+  -e KEEPER_PRIVATE_KEY=<key> \
+  -e KEEPER_SECRET_KEY=<secret> \
+  -e KEEPER_ACCOUNT_ID=<account> \
+  so4-oracle
 ```
+
+### Systemd
+
+```bash
+# Copy the service file
+sudo cp oracle.service /etc/systemd/system/
+
+# Create environment file
+sudo cp .env /opt/oracle/.env
+
+# Enable and start
+sudo systemctl enable oracle
+sudo systemctl start oracle
+```
+
+### Fly.io
+
+```bash
+# Deploy to Fly.io
+fly deploy
+
+# Set secrets
+fly secrets set KEEPER_PRIVATE_KEY=<key>
+fly secrets set KEEPER_SECRET_KEY=<secret>
+fly secrets set KEEPER_ACCOUNT_ID=<account>
+```
+
+### Railway
+
+```bash
+# Deploy to Railway
+railway up
+
+# Set environment variables in Railway dashboard
+```
+
+## Endpoints
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/health` | GET | No | Liveness check |
+| `/ready` | GET | No | Readiness check (RPC + keeper balance) |
+| `/prices` | GET | No | Current price feeds (CORS-enabled) |
+| `/oracle/status` | GET | Admin | Oracle status and recent errors |
+| `/keeper/status` | GET | Admin | Keeper status and execution history |
+| `/oracle/failed-submissions` | GET | Admin | Failed submission history |
+| `/metrics` | GET | Admin | Prometheus metrics |

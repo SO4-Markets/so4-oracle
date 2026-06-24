@@ -4,6 +4,8 @@ pub mod config;
 pub mod fixed;
 pub mod http;
 pub mod keeper;
+pub mod keeper_loop;
+pub mod metrics;
 pub mod network_config;
 pub mod price_loop;
 pub mod prices;

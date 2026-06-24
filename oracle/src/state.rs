@@ -6,6 +6,7 @@ use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::config::Config;
+use crate::metrics::Metrics;
 
 pub const FAILURE_RING_CAPACITY: usize = 256;
 
@@ -42,6 +43,24 @@ pub struct CycleStatus {
     pub last_price_cycle_at: Option<SystemTime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_keeper_cycle_at: Option<SystemTime>,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct KeeperStatus {
+    pub pending_orders: usize,
+    pub pending_deposits: usize,
+    pub pending_withdrawals: usize,
+    pub last_executions: Vec<KeeperExecution>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KeeperExecution {
+    pub timestamp: SystemTime,
+    pub operation: String,
+    pub key: String,
+    pub tx_hash: Option<String>,
+    pub success: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +116,8 @@ pub struct AppState {
     pub price_cache: Arc<RwLock<PriceCache>>,
     pub cycle_status: Arc<RwLock<CycleStatus>>,
     pub failures: Arc<Mutex<RingBuffer<FailedSubmission>>>,
+    pub keeper_status: Arc<RwLock<KeeperStatus>>,
+    pub metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -107,6 +128,8 @@ impl AppState {
             price_cache: Arc::new(RwLock::new(PriceCache::default())),
             cycle_status: Arc::new(RwLock::new(CycleStatus::default())),
             failures: Arc::new(Mutex::new(RingBuffer::default())),
+            keeper_status: Arc::new(RwLock::new(KeeperStatus::default())),
+            metrics: Metrics::new(),
         }
     }
 }

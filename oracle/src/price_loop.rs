@@ -72,10 +72,13 @@ async fn finish_cycle(
         status.last_price_cycle_at = Some(SystemTime::now());
     }
 
+    let latency_ms = started.elapsed().as_millis() as u64;
+    state.metrics.record_price_cycle(latency_ms);
+
     tracing::info!(
         tokens_ok,
         tokens_failed,
-        latency_ms = started.elapsed().as_millis() as u64,
+        latency_ms,
         "cycle_complete"
     );
 }

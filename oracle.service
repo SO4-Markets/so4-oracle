@@ -1,0 +1,32 @@
+[Unit]
+Description=SO4 Oracle Service
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oracle
+Group=oracle
+WorkingDirectory=/opt/oracle
+ExecStart=/opt/oracle/oracle
+Restart=always
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Environment
+EnvironmentFile=/opt/oracle/.env
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/oracle
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=so4-oracle
+
+[Install]
+WantedBy=multi-user.target
