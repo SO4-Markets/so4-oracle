@@ -29,6 +29,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 shared-config = { path = "../shared/config" }
 base64 = "0.22"
+worker = "0.8.5"
 
 [dev-dependencies]
 futures = "0.3"
