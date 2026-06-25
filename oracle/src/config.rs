@@ -351,7 +351,7 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
                 }
             }
         }
-        if token.min_sources() == 0 {
+        if token.min_sources == 0 {
             return Err(ConfigError::InvalidToken {
                 symbol: token.symbol.clone(),
                 reason: "min_sources must be greater than zero".to_string(),

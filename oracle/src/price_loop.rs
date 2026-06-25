@@ -109,8 +109,8 @@ async fn build_cached_price(
     let aggregate = crate::prices::aggregate_prices(
         &prices,
         &sources,
-        token.min_sources(),
-        token.max_deviation_bps(),
+        token.min_sources,
+        token.max_deviation_bps,
     )?;
     signed_cached_price(state, token, ledger_seq, aggregate)
 }
@@ -154,7 +154,7 @@ async fn fetch_source_price(source: &str, token: &TokenConfig) -> Result<i128, S
                 .pyth_feed_id
                 .as_ref()
                 .ok_or_else(|| "missing pyth_feed_id".to_string())?;
-            crate::pyth::fetch_pyth_price(feed_id, token.stale_after_seconds(), 50)
+            crate::pyth::fetch_pyth_price(feed_id, token.stale_after_seconds, 50)
                 .await
                 .map_err(|err| format!("{err:?}"))
         }
@@ -263,10 +263,10 @@ mod tests {
             coinbase_symbol: None,
             pyth_feed_id: None,
             fixed_price: Some("1000000000000000000000000000000".to_string()),
-            min_sources: Some(1),
-            max_deviation_bps: Some(100),
-            stale_after_seconds: None,
-            submit_threshold_bps: None,
+            min_sources: 1,
+            max_deviation_bps: 100,
+            stale_after_seconds: 60,
+            submit_threshold_bps: 10,
             min: 0.0,
             max: 0.0,
             sources_used: vec![],
