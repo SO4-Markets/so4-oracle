@@ -395,3 +395,38 @@ async fn ledger_failure_records_non_zero_latency_in_metrics() {
         "at least one cycle must be counted in metrics after ledger failure"
     );
 }
+
+#[tokio::test]
+async fn fail_ok_fail_sequence_counts_all_three_cycles() {
+    // cycle 1: ledger fails
+    let mock_fail1 = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
+        .mount(&mock_fail1)
+        .await;
+    let state1 = test_state(&mock_fail1.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
+    run_price_cycle(Arc::clone(&state1)).await;
+
+    // cycle 2: ledger succeeds
+    let mock_ok = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
+        .mount(&mock_ok)
+        .await;
+    let state2 = test_state(&mock_ok.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
+    run_price_cycle(Arc::clone(&state2)).await;
+
+    // cycle 3: ledger fails again
+    let mock_fail2 = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
+        .mount(&mock_fail2)
+        .await;
+    let state3 = test_state(&mock_fail2.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
+    run_price_cycle(Arc::clone(&state3)).await;
+
+    // Each state instance only sees 1 cycle; all three counted individually.
+    assert_eq!(state1.metrics.to_response().price_cycle_count, 1);
+    assert_eq!(state2.metrics.to_response().price_cycle_count, 1);
+    assert_eq!(state3.metrics.to_response().price_cycle_count, 1);
+}
