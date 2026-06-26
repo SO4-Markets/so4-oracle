@@ -164,6 +164,28 @@ mod tests {
         assert!(parse_price_to_precision("abc").is_err());
     }
 
+    // #345 — rejects negatives and multiple dots
+    #[test]
+    fn parse_price_rejects_negative() {
+        let err = parse_price_to_precision("-1.5").unwrap_err();
+        assert!(matches!(err, BinancePriceError::PriceParseError(_)));
+    }
+
+    #[test]
+    fn parse_price_rejects_multiple_dots() {
+        let err = parse_price_to_precision("1.2.3").unwrap_err();
+        assert!(matches!(err, BinancePriceError::PriceParseError(_)));
+    }
+
+    #[test]
+    fn parse_price_correct_scaling_to_1e30() {
+        assert_eq!(parse_price_to_precision("1").unwrap(), FLOAT_PRECISION);
+        assert_eq!(
+            parse_price_to_precision("0.5").unwrap(),
+            FLOAT_PRECISION / 2
+        );
+    }
+
     #[test]
     fn parse_ticker_response_filters_symbols() {
         let body = r#"[{"symbol":"BTCUSDT","price":"100.25"},{"symbol":"ETHUSDT","price":"10.5"}]"#;

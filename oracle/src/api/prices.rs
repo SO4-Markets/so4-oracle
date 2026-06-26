@@ -85,3 +85,15 @@ pub async fn failed_submissions(
 
     Json(FailuresResponse { failures })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #339 — GET /health must return 200 with {"status":"ok"}, no auth required
+    #[tokio::test]
+    async fn health_returns_status_ok() {
+        let Json(body) = health().await;
+        assert_eq!(body.status, "ok");
+    }
+}

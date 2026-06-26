@@ -63,12 +63,10 @@ pub fn sign_transaction(
     network_passphrase: &str,
 ) -> Result<String, String> {
     let key_bytes_raw = if secret_key.starts_with('S') {
-        let decoded = stellar_strkey::Strkey::from_string(secret_key)
-            .map_err(|e| format!("invalid secret strkey: {e}"))?;
-        match decoded {
-            stellar_strkey::Strkey::PrivateKeyEd25519(pk) => pk.0.as_ref().to_vec(),
-            other => return Err(format!("expected S... secret strkey, got: {other:?}")),
-        }
+        stellar_strkey::ed25519::PrivateKey::from_string(secret_key)
+            .map_err(|e| format!("invalid secret strkey: {e}"))?
+            .0
+            .to_vec()
     } else if secret_key.len() == 64 && secret_key.chars().all(|c| c.is_ascii_hexdigit()) {
         hex::decode(secret_key).map_err(|e| format!("invalid secret key hex: {e}"))?
     } else {

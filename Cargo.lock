@@ -1472,6 +1472,7 @@ dependencies = [
  "stellar-strkey 0.0.18",
  "stellar-xdr",
  "tokio",
+ "tower",
  "tower-http 0.7.0",
  "tracing",
  "tracing-subscriber",

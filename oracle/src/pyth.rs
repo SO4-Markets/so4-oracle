@@ -413,6 +413,39 @@ mod tests {
         assert_eq!(err, PythPriceError::InvalidPublishTime(-1));
     }
 
+    // #349 — fetch_pyth_price handles both array and wrapped Hermes response formats
+
+    #[test]
+    fn hermes_response_deserializes_array_format() {
+        let json = r#"[{"id":"abc123","price":{"price":"4500000000","expo":-8,"conf":"100000","publish_time":1000}}]"#;
+        let response: HermesResponse = serde_json::from_str(json).unwrap();
+        let feed = match response {
+            HermesResponse::Array(mut feeds) => feeds.pop().unwrap(),
+            HermesResponse::Wrapped(_) => panic!("expected array format"),
+        };
+        assert_eq!(feed.id, "abc123");
+        assert_eq!(feed.price.expo, -8);
+    }
+
+    #[test]
+    fn hermes_response_deserializes_wrapped_format() {
+        let json = r#"{"data":{"id":"abc123","price":{"price":"4500000000","expo":-8,"conf":"100000","publish_time":1000}}}"#;
+        let response: HermesResponse = serde_json::from_str(json).unwrap();
+        let feed = match response {
+            HermesResponse::Wrapped(w) => w.data,
+            HermesResponse::Array(_) => panic!("expected wrapped format"),
+        };
+        assert_eq!(feed.id, "abc123");
+        assert_eq!(feed.price.expo, -8);
+    }
+
+    #[test]
+    fn hermes_response_array_empty_is_parseable() {
+        let json = r#"[]"#;
+        let response: HermesResponse = serde_json::from_str(json).unwrap();
+        assert!(matches!(response, HermesResponse::Array(v) if v.is_empty()));
+    }
+
     // #365 — normalize_pyth_price("4500000000", -8) must equal 45 * FLOAT_PRECISION
     // exponent_diff = 30 + (-8) = 22 → 4_500_000_000 * 10^22 = 45 * 10^30
     #[test]
