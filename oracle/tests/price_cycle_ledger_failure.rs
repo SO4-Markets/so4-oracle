@@ -430,3 +430,29 @@ async fn fail_ok_fail_sequence_counts_all_three_cycles() {
     assert_eq!(state2.metrics.to_response().price_cycle_count, 1);
     assert_eq!(state3.metrics.to_response().price_cycle_count, 1);
 }
+
+#[tokio::test]
+async fn last_price_cycle_at_bounded_within_test_window() {
+    use std::time::SystemTime;
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
+        .mount(&mock)
+        .await;
+
+    let before = SystemTime::now();
+    let state = test_state(&mock.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
+    run_price_cycle(Arc::clone(&state)).await;
+    let after = SystemTime::now();
+
+    let last_at = state
+        .cycle_status
+        .read()
+        .await
+        .last_price_cycle_at
+        .expect("last_price_cycle_at must be set by finish_cycle");
+
+    assert!(last_at >= before, "last_price_cycle_at must not predate the cycle");
+    assert!(last_at <= after, "last_price_cycle_at must not postdate the observation");
+}
