@@ -220,4 +220,14 @@ mod tests {
         assert!(prometheus.contains("oracle_price_cycle_count 1"));
         assert!(prometheus.contains("oracle_price_cycle_latency_ms 100"));
     }
+
+    #[test]
+    fn token_fetch_failures_accumulates_across_price_cycles() {
+        let metrics = Metrics::new();
+        metrics.record_price_cycle(50, 2, 1);
+        metrics.record_price_cycle(60, 3, 2);
+
+        let resp = metrics.to_response();
+        assert_eq!(resp.token_fetch_failures, 3, "1 + 2 = 3 total failures");
+    }
 }
