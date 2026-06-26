@@ -467,4 +467,66 @@ mod tests {
         let price = validate_pyth_price(&data, 1_010, 60, 100).unwrap();
         assert_eq!(price, 45 * FLOAT_PRECISION);
     }
+
+    // #366 — normalize_pyth_price rejects a positive exponent with PriceParseError
+    #[test]
+    fn issue_366_normalize_rejects_positive_exponent() {
+        // Any exponent > 0 is outside the accepted range (-30..=0)
+        // and must return Err(PriceParseError).
+        let err = normalize_pyth_price("100000000", 1).unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::PriceParseError(_)),
+            "expected PriceParseError for exponent 1, got {:?}",
+            err
+        );
+
+        let err2 = normalize_pyth_price("1", 30).unwrap_err();
+        assert!(
+            matches!(err2, PythPriceError::PriceParseError(_)),
+            "expected PriceParseError for exponent 30, got {:?}",
+            err2
+        );
+    }
+
+    // #368 — validate_pyth_price returns StalePrice when age > stale_after_seconds
+    #[test]
+    fn issue_368_validate_rejects_stale_price() {
+        // publish_time=1_000, now=1_500, age=500 > stale_after=60
+        let data = PythPriceData {
+            price: "4500000000".to_string(),
+            conf: None,
+            expo: -8,
+            publish_time: Some(1_000),
+        };
+        let err = validate_pyth_price(&data, 1_500, 60, 100).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PythPriceError::StalePrice {
+                    age_seconds,
+                    max_age_seconds: 60,
+                } if age_seconds == 500
+            ),
+            "expected StalePrice with age_seconds=500 and max_age_seconds=60, got {:?}",
+            err
+        );
+    }
+
+    // #369 — validate_pyth_price returns ConfidenceTooWide when confidence_bps > max_bps
+    #[test]
+    fn issue_369_validate_rejects_wide_confidence() {
+        // price=100_000_000, conf=10_000_000 → confidence_bps = 1_000 bps; max_bps=50 → rejected
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: Some("10000000".to_string()),
+            expo: -8,
+            publish_time: Some(1_000),
+        };
+        let err = validate_pyth_price(&data, 1_010, 60, 50).unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::ConfidenceTooWide { max_bps: 50, .. }),
+            "expected ConfidenceTooWide with max_bps=50, got {:?}",
+            err
+        );
+    }
 }

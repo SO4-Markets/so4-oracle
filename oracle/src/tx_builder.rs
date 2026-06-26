@@ -9,7 +9,7 @@ use stellar_xdr::{
 use crate::scval::{encode_signed_prices_vec, ScValError, SignedPrice};
 use crate::stellar_rpc::RpcError;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum TxBuilderError {
     RpcError(RpcError),
     ScValError(ScValError),

@@ -5,7 +5,7 @@ use crate::stellar_rpc::{rpc_post, RpcError};
 const MAX_POLL_ATTEMPTS: u32 = 10;
 const INITIAL_BACKOFF_MS: u64 = 1_000;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum SubmitError {
     Rpc(RpcError),
     JsonError(String),
