@@ -172,6 +172,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_price_rejects_negative_integer() {
+        let err = parse_price_to_precision("-100").unwrap_err();
+        assert!(matches!(err, BinancePriceError::PriceParseError(_)));
+    }
+
+    #[test]
     fn parse_price_rejects_multiple_dots() {
         let err = parse_price_to_precision("1.2.3").unwrap_err();
         assert!(matches!(err, BinancePriceError::PriceParseError(_)));
