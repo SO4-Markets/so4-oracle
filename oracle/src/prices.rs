@@ -495,4 +495,32 @@ mod tests {
         let median = compute_median(&prices);
         assert_eq!(median, None);
     }
+
+    #[test]
+    fn test_issue_380_explicit_percentile_validation() {
+        // Input of 3 sources
+        let prices = vec![100i128, 200, 300];
+
+        // If it mistakenly used the fallback spread (100 bps / 1%),
+        // the spread around the median (200) would be:
+        // mid = 200, spread = 200 * 100 / 10_000 = 2
+        // fallback_min = 198, fallback_max = 202
+
+        let p = compute_confidence_interval(&prices).unwrap();
+
+        // Assert that the results match the 10th/90th percentile values,
+        // which completely validates that we are NOT using the spread fallback.
+        assert_eq!(
+            p.min, 120,
+            "Should use percentile min (120), not fallback spread min (198)"
+        );
+        assert_eq!(
+            p.max, 280,
+            "Should use percentile max (280), not fallback spread max (202)"
+        );
+
+        // Explicitly verify it didn't fall back to the narrow 1% median spread bounds
+        assert_ne!(p.min, 198);
+        assert_ne!(p.max, 202);
+    }
 }
