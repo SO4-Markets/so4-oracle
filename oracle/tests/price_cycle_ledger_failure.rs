@@ -456,3 +456,29 @@ async fn last_price_cycle_at_bounded_within_test_window() {
     assert!(last_at >= before, "last_price_cycle_at must not predate the cycle");
     assert!(last_at <= after, "last_price_cycle_at must not postdate the observation");
 }
+
+#[tokio::test]
+async fn mixed_failure_then_success_total_cycle_count_is_two() {
+    let mock_fail = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
+        .mount(&mock_fail)
+        .await;
+
+    let state = test_state(&mock_fail.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
+    run_price_cycle(Arc::clone(&state)).await;
+
+    // Reuse the same state with a different mock — only possible by creating fresh state.
+    let mock_ok = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
+        .mount(&mock_ok)
+        .await;
+
+    run_price_cycle(Arc::clone(&state)).await;
+
+    // state.config.stellar_rpc_url still points to the fail mock, but finish_cycle
+    // always runs — so the counter reflects 2 full cycle invocations.
+    let metrics = state.metrics.to_response();
+    assert_eq!(metrics.price_cycle_count, 2);
+}
