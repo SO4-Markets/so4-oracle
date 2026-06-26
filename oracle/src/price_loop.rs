@@ -82,7 +82,7 @@ async fn finish_cycle(
     }
 
     let latency_ms = started.elapsed().as_millis() as u64;
-    state.metrics.record_price_cycle(latency_ms);
+    state.metrics.record_price_cycle(latency_ms, tokens_ok, tokens_failed);
 
     tracing::info!(tokens_ok, tokens_failed, latency_ms, "cycle_complete");
 }

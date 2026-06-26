@@ -8,6 +8,8 @@ use serde::Serialize;
 pub struct Metrics {
     pub price_cycle_count: AtomicU64,
     pub price_cycle_latency_ms: AtomicU64,
+    pub token_fetch_ok: AtomicU64,
+    pub token_fetch_failures: AtomicU64,
     pub keeper_cycle_count: AtomicU64,
     pub keeper_cycle_latency_ms: AtomicU64,
     pub orders_executed: AtomicU64,
@@ -21,6 +23,8 @@ pub struct Metrics {
 pub struct MetricsResponse {
     pub price_cycle_count: u64,
     pub price_cycle_latency_ms: u64,
+    pub token_fetch_ok: u64,
+    pub token_fetch_failures: u64,
     pub keeper_cycle_count: u64,
     pub keeper_cycle_latency_ms: u64,
     pub orders_executed: u64,
@@ -35,10 +39,14 @@ impl Metrics {
         Arc::new(Self::default())
     }
 
-    pub fn record_price_cycle(&self, latency_ms: u64) {
+    pub fn record_price_cycle(&self, latency_ms: u64, tokens_ok: usize, tokens_failed: usize) {
         self.price_cycle_count.fetch_add(1, Ordering::Relaxed);
         self.price_cycle_latency_ms
             .store(latency_ms, Ordering::Relaxed);
+        self.token_fetch_ok
+            .fetch_add(tokens_ok as u64, Ordering::Relaxed);
+        self.token_fetch_failures
+            .fetch_add(tokens_failed as u64, Ordering::Relaxed);
         self.update_timestamp();
     }
 
@@ -81,6 +89,8 @@ impl Metrics {
         MetricsResponse {
             price_cycle_count: self.price_cycle_count.load(Ordering::Relaxed),
             price_cycle_latency_ms: self.price_cycle_latency_ms.load(Ordering::Relaxed),
+            token_fetch_ok: self.token_fetch_ok.load(Ordering::Relaxed),
+            token_fetch_failures: self.token_fetch_failures.load(Ordering::Relaxed),
             keeper_cycle_count: self.keeper_cycle_count.load(Ordering::Relaxed),
             keeper_cycle_latency_ms: self.keeper_cycle_latency_ms.load(Ordering::Relaxed),
             orders_executed: self.orders_executed.load(Ordering::Relaxed),
@@ -148,6 +158,20 @@ impl Metrics {
             self.withdrawals_executed.load(Ordering::Relaxed)
         ));
 
+        output.push_str("# HELP oracle_token_fetch_ok_total Total individual token fetch successes across all price cycles\n");
+        output.push_str("# TYPE oracle_token_fetch_ok_total counter\n");
+        output.push_str(&format!(
+            "oracle_token_fetch_ok_total {}\n",
+            self.token_fetch_ok.load(Ordering::Relaxed)
+        ));
+
+        output.push_str("# HELP oracle_token_fetch_failures_total Total individual token fetch failures across all price cycles\n");
+        output.push_str("# TYPE oracle_token_fetch_failures_total counter\n");
+        output.push_str(&format!(
+            "oracle_token_fetch_failures_total {}\n",
+            self.token_fetch_failures.load(Ordering::Relaxed)
+        ));
+
         output.push_str("# HELP oracle_submit_failures Total number of submit failures\n");
         output.push_str("# TYPE oracle_submit_failures counter\n");
         output.push_str(&format!(
@@ -173,7 +197,7 @@ mod tests {
     #[test]
     fn test_metrics_recording() {
         let metrics = Metrics::new();
-        metrics.record_price_cycle(100);
+        metrics.record_price_cycle(100, 3, 1);
         metrics.record_keeper_cycle(200, 5, 3, 2, 1);
 
         let response = metrics.to_response();
@@ -190,10 +214,30 @@ mod tests {
     #[test]
     fn test_prometheus_output() {
         let metrics = Metrics::new();
-        metrics.record_price_cycle(100);
+        metrics.record_price_cycle(100, 3, 1);
 
         let prometheus = metrics.to_prometheus();
         assert!(prometheus.contains("oracle_price_cycle_count 1"));
         assert!(prometheus.contains("oracle_price_cycle_latency_ms 100"));
+    }
+
+    #[test]
+    fn token_fetch_failures_accumulates_across_price_cycles() {
+        let metrics = Metrics::new();
+        metrics.record_price_cycle(50, 2, 1);
+        metrics.record_price_cycle(60, 3, 2);
+
+        let resp = metrics.to_response();
+        assert_eq!(resp.token_fetch_failures, 3, "1 + 2 = 3 total failures");
+    }
+
+    #[test]
+    fn token_fetch_ok_accumulates_across_price_cycles() {
+        let metrics = Metrics::new();
+        metrics.record_price_cycle(50, 4, 0);
+        metrics.record_price_cycle(60, 2, 1);
+
+        let resp = metrics.to_response();
+        assert_eq!(resp.token_fetch_ok, 6, "4 + 2 = 6 total successes");
     }
 }

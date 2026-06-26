@@ -398,3 +398,32 @@ async fn failure_operation_field_contains_token_symbol() {
         entries.iter().map(|f| &f.operation).collect::<Vec<_>>()
     );
 }
+
+#[tokio::test]
+async fn token_failure_count_reflected_in_metrics_after_partial_cycle() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok_response()))
+        .mount(&mock_server)
+        .await;
+
+    // One bad token (unsupported source) and one good token (fixed source).
+    let tokens = vec![
+        bad_token("FAIL1", "CFAIL111111111111111111111111111111111111111111111111111111"),
+        fixed_token("OK1", "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES"),
+    ];
+    let state = test_state(&mock_server.uri(), tokens);
+
+    run_price_cycle(Arc::clone(&state)).await;
+
+    let resp = state.metrics.to_response();
+    assert_eq!(
+        resp.token_fetch_failures, 1,
+        "exactly one token failed in this cycle"
+    );
+    assert_eq!(
+        resp.token_fetch_ok, 1,
+        "exactly one token succeeded in this cycle"
+    );
+}
