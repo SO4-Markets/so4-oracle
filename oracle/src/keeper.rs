@@ -28,13 +28,17 @@ pub async fn check_keeper_balance(cfg: &KeeperBalanceConfig) -> Result<i64, RpcE
             account_id = cfg.account_id,
             "keeper balance below minimum"
         );
-    } else {
-        tracing::info!(
-            balance_xlm = xlm,
-            min_balance_xlm = cfg.min_balance_xlm,
-            "keeper balance ok"
-        );
+        return Err(RpcError::BalanceBelowMinimum {
+            balance_xlm: xlm,
+            min_xlm: cfg.min_balance_xlm,
+        });
     }
+
+    tracing::info!(
+        balance_xlm = xlm,
+        min_balance_xlm = cfg.min_balance_xlm,
+        "keeper balance ok"
+    );
 
     Ok(stroops)
 }
@@ -94,6 +98,8 @@ pub async fn fund_keeper_via_friendbot(account_id: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::stellar_rpc::parse_account_balance_response;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn low_balance_body() -> &'static str {
         r#"{"id":"GABC","balances":[{"asset_type":"native","balance":"3.0000000"}]}"#
@@ -133,10 +139,10 @@ mod tests {
 
     // ── check_keeper_balance — HTTP-level tests (#406) ────────────────────────
 
+    /// Closes #414: above minimum returns Ok(stroops).
     #[tokio::test]
     async fn check_keeper_balance_above_minimum_returns_ok() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::path;
 
         let server = MockServer::start().await;
         let body = r#"{
@@ -157,23 +163,17 @@ mod tests {
         };
 
         let stroops = check_keeper_balance(&cfg).await.unwrap();
-        assert_eq!(stroops, 200_000_000); // 20 XLM
+        assert_eq!(stroops, 200_000_000); // 20 XLM in stroops
     }
 
+    /// Closes #413: below minimum returns Err(BalanceBelowMinimum).
     #[tokio::test]
-    async fn check_keeper_balance_below_minimum_still_returns_ok_with_stroops() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
+    async fn check_keeper_balance_below_minimum_returns_err() {
         let server = MockServer::start().await;
-        let body = r#"{
-            "id": "GKEEPER",
-            "balances": [{"asset_type":"native","balance":"3.0000000"}]
-        }"#;
-
         Mock::given(method("GET"))
-            .and(path("/accounts/GKEEPER"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "balances": [{"asset_type": "native", "balance": "3.0000000"}]
+            })))
             .mount(&server)
             .await;
 
@@ -183,18 +183,13 @@ mod tests {
             min_balance_xlm: 10.0,
         };
 
-        // Returns Ok with actual stroops even when below minimum;
-        // caller uses build_balance_response to inspect below_minimum flag.
-        let stroops = check_keeper_balance(&cfg).await.unwrap();
-        assert_eq!(stroops, 30_000_000); // 3 XLM
-        let resp = build_balance_response(&cfg, stroops);
-        assert!(resp.below_minimum);
+        let err = check_keeper_balance(&cfg).await.unwrap_err();
+        assert!(matches!(err, RpcError::BalanceBelowMinimum { .. }));
     }
 
+    /// Horizon unreachable returns NetworkError.
     #[tokio::test]
     async fn check_keeper_balance_horizon_unreachable_returns_network_error() {
-        use crate::stellar_rpc::RpcError;
-
         let cfg = KeeperBalanceConfig {
             horizon_url: "http://127.0.0.1:19999".to_string(), // nothing listening
             account_id: "GKEEPER".to_string(),

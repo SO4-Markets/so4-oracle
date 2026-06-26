@@ -112,4 +112,25 @@ mod tests {
             FixedPriceError::InvalidFixedPrice("abc".to_string()),
         );
     }
+
+    // #370 — fixed_price parses the configured i128 string and returns it exactly
+    #[test]
+    fn issue_370_fixed_source_returns_configured_value() {
+        // The oracle internally stores prices scaled to 30 decimal places.
+        // A USDC-pegged token fixed at 1.0 would be configured as
+        // "1000000000000000000000000000000" (1 followed by 30 zeros = 10^30).
+        let configured = "1000000000000000000000000000000";
+        let token = token_with_fixed_price(Some(configured));
+        let result = fixed_price(&token).unwrap();
+        assert_eq!(
+            result,
+            configured.parse::<i128>().unwrap(),
+            "fixed_price must return the configured i128 value unchanged"
+        );
+
+        // Also verify a different concrete value parses correctly.
+        let token2 = token_with_fixed_price(Some("42000000000000000000000000000000"));
+        let result2 = fixed_price(&token2).unwrap();
+        assert_eq!(result2, 42_000_000_000_000_000_000_000_000_000_000_i128);
+    }
 }
