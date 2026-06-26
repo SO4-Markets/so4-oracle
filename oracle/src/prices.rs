@@ -519,7 +519,6 @@ mod tests {
             "Should use percentile max (280), not fallback spread max (202)"
         );
 
-        // Explicitly verify it didn't fall back to the narrow 1% median spread bounds
         assert_ne!(p.min, 198);
         assert_ne!(p.max, 202);
     }
