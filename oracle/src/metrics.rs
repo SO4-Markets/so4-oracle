@@ -39,10 +39,14 @@ impl Metrics {
         Arc::new(Self::default())
     }
 
-    pub fn record_price_cycle(&self, latency_ms: u64) {
+    pub fn record_price_cycle(&self, latency_ms: u64, tokens_ok: usize, tokens_failed: usize) {
         self.price_cycle_count.fetch_add(1, Ordering::Relaxed);
         self.price_cycle_latency_ms
             .store(latency_ms, Ordering::Relaxed);
+        self.token_fetch_ok
+            .fetch_add(tokens_ok as u64, Ordering::Relaxed);
+        self.token_fetch_failures
+            .fetch_add(tokens_failed as u64, Ordering::Relaxed);
         self.update_timestamp();
     }
 
