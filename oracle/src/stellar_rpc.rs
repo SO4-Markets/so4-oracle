@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum RpcError {
     NetworkError(String),
     HttpError(u16),
     JsonError(String),
     RpcFault { code: i64, message: String },
+    BalanceBelowMinimum { balance_xlm: f64, min_xlm: f64 },
 }
 
 impl std::fmt::Display for RpcError {
@@ -16,6 +17,9 @@ impl std::fmt::Display for RpcError {
             RpcError::JsonError(msg) => write!(f, "JSON parse error: {msg}"),
             RpcError::RpcFault { code, message } => {
                 write!(f, "RPC fault {code}: {message}")
+            }
+            RpcError::BalanceBelowMinimum { balance_xlm, min_xlm } => {
+                write!(f, "balance {balance_xlm} XLM is below minimum {min_xlm} XLM")
             }
         }
     }

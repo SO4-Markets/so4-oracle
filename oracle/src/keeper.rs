@@ -28,13 +28,17 @@ pub async fn check_keeper_balance(cfg: &KeeperBalanceConfig) -> Result<i64, RpcE
             account_id = cfg.account_id,
             "keeper balance below minimum"
         );
-    } else {
-        tracing::info!(
-            balance_xlm = xlm,
-            min_balance_xlm = cfg.min_balance_xlm,
-            "keeper balance ok"
-        );
+        return Err(RpcError::BalanceBelowMinimum {
+            balance_xlm: xlm,
+            min_xlm: cfg.min_balance_xlm,
+        });
     }
+
+    tracing::info!(
+        balance_xlm = xlm,
+        min_balance_xlm = cfg.min_balance_xlm,
+        "keeper balance ok"
+    );
 
     Ok(stroops)
 }
@@ -94,6 +98,8 @@ pub async fn fund_keeper_via_friendbot(account_id: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::stellar_rpc::parse_account_balance_response;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn low_balance_body() -> &'static str {
         r#"{"id":"GABC","balances":[{"asset_type":"native","balance":"3.0000000"}]}"#
@@ -129,5 +135,43 @@ mod tests {
         let resp = build_balance_response(&cfg, stroops);
         assert!(!resp.below_minimum);
         assert_eq!(resp.balance_xlm, 20.0);
+    }
+
+    /// Closes #413: check_keeper_balance returns Err when balance is below minimum.
+    #[tokio::test]
+    async fn check_keeper_balance_below_min() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "balances": [{"asset_type": "native", "balance": "5.0000000"}]
+            })))
+            .mount(&server)
+            .await;
+        let config = KeeperBalanceConfig {
+            horizon_url: server.uri(),
+            account_id: "GABC".to_string(),
+            min_balance_xlm: 10.0,
+        };
+        let result = check_keeper_balance(&config).await;
+        assert!(result.is_err());
+    }
+
+    /// Closes #414: check_keeper_balance returns Ok(stroops) when balance is above minimum.
+    #[tokio::test]
+    async fn check_keeper_balance_above_min() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "balances": [{"asset_type": "native", "balance": "100.0000000"}]
+            })))
+            .mount(&server)
+            .await;
+        let config = KeeperBalanceConfig {
+            horizon_url: server.uri(),
+            account_id: "GABC".to_string(),
+            min_balance_xlm: 10.0,
+        };
+        let result = check_keeper_balance(&config).await.unwrap();
+        assert_eq!(result, 1_000_000_000); // 100 XLM in stroops
     }
 }

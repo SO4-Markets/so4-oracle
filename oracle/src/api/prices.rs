@@ -47,14 +47,12 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
     };
 
     match crate::keeper::check_keeper_balance(&keeper_cfg).await {
-        Ok(stroops) => {
-            let xlm = stroops as f64 / crate::keeper::XLM_IN_STROOPS as f64;
-            if xlm < state.config.min_keeper_balance_xlm {
-                return Err(ApiError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "keeper_balance_low",
-                ));
-            }
+        Ok(_) => {}
+        Err(crate::stellar_rpc::RpcError::BalanceBelowMinimum { .. }) => {
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "keeper_balance_low",
+            ));
         }
         Err(error) => {
             tracing::warn!(error = %error, "keeper balance check failed");
