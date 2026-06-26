@@ -121,7 +121,10 @@ async fn ledger_failure_records_error_in_failures() {
 
     let failures = state.failures.lock().await;
     let entries: Vec<_> = failures.iter().collect();
-    assert!(!entries.is_empty(), "an error must be recorded when ledger fetch fails");
+    assert!(
+        !entries.is_empty(),
+        "an error must be recorded when ledger fetch fails"
+    );
     let entry = &entries[0];
     assert_eq!(
         entry.operation, "get_latest_ledger",
@@ -291,7 +294,10 @@ async fn ledger_failure_error_message_is_non_empty() {
 
     let failures = state.failures.lock().await;
     let entries: Vec<_> = failures.iter().collect();
-    assert!(!entries[0].error.is_empty(), "error message must be non-empty");
+    assert!(
+        !entries[0].error.is_empty(),
+        "error message must be non-empty"
+    );
 }
 
 #[tokio::test]
@@ -354,7 +360,10 @@ async fn http_500_also_aborts_cycle() {
     drop(cache);
     let failures = state.failures.lock().await;
     let entries: Vec<_> = failures.iter().collect();
-    assert!(!entries.is_empty(), "HTTP 500 must produce a failure record");
+    assert!(
+        !entries.is_empty(),
+        "HTTP 500 must produce a failure record"
+    );
 }
 
 #[tokio::test]
@@ -455,8 +464,14 @@ async fn last_price_cycle_at_bounded_within_test_window() {
         .last_price_cycle_at
         .expect("last_price_cycle_at must be set by finish_cycle");
 
-    assert!(last_at >= before, "last_price_cycle_at must not predate the cycle");
-    assert!(last_at <= after, "last_price_cycle_at must not postdate the observation");
+    assert!(
+        last_at >= before,
+        "last_price_cycle_at must not predate the cycle"
+    );
+    assert!(
+        last_at <= after,
+        "last_price_cycle_at must not postdate the observation"
+    );
 }
 
 #[tokio::test]

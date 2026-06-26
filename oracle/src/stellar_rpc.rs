@@ -20,8 +20,14 @@ impl std::fmt::Display for RpcError {
             RpcError::RpcFault { code, message } => {
                 write!(f, "RPC fault {code}: {message}")
             }
-            RpcError::BalanceBelowMinimum { balance_xlm, min_xlm } => {
-                write!(f, "balance {balance_xlm} XLM is below minimum {min_xlm} XLM")
+            RpcError::BalanceBelowMinimum {
+                balance_xlm,
+                min_xlm,
+            } => {
+                write!(
+                    f,
+                    "balance {balance_xlm} XLM is below minimum {min_xlm} XLM"
+                )
             }
         }
     }
