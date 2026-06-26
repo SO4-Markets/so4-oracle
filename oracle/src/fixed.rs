@@ -103,4 +103,13 @@ mod tests {
         let token = token_with_fixed_price(Some("1"));
         assert_eq!(fixed_price(&token).unwrap(), 1);
     }
+
+    #[test]
+    fn rejects_abc_string_with_invalid_fixed_price_error() {
+        let token = token_with_fixed_price(Some("abc"));
+        assert_eq!(
+            fixed_price(&token).unwrap_err(),
+            FixedPriceError::InvalidFixedPrice("abc".to_string()),
+        );
+    }
 }

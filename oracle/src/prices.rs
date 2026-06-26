@@ -116,7 +116,7 @@ pub fn compute_confidence_interval_with_spread(
 }
 
 /// Interpolating percentile (nearest-rank method).
-fn percentile(sorted: &[i128], p: u8) -> i128 {
+pub fn percentile(sorted: &[i128], p: u8) -> i128 {
     debug_assert!(!sorted.is_empty());
     if sorted.len() == 1 || p == 0 {
         return sorted[0];
@@ -235,7 +235,7 @@ pub fn compute_median_allow_single(prices: &[i128]) -> Option<i128> {
     }
 }
 
-fn deviation_bps(price: i128, median: i128) -> f64 {
+pub fn deviation_bps(price: i128, median: i128) -> f64 {
     if median == 0 {
         return f64::INFINITY;
     }
