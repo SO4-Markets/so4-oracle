@@ -1,3 +1,5 @@
+pub mod price;
+
 use axum::{routing::get, Router};
 use tower_service::Service;
 use worker::*;
