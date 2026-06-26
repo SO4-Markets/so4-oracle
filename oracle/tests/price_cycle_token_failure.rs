@@ -342,3 +342,28 @@ async fn metrics_price_cycle_count_increments_after_partial_failure() {
         "price_cycle_count must be 1 after one cycle, even with a partial failure"
     );
 }
+
+#[tokio::test]
+async fn two_cycles_with_partial_failure_count_both_in_metrics() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok_response()))
+        .mount(&mock_server)
+        .await;
+
+    let tokens = vec![
+        bad_token("ALWAYS_BAD", "CBAD22222222222222222222222222222222222222222222222222222"),
+        fixed_token("USDC", "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES"),
+    ];
+    let state = test_state(&mock_server.uri(), tokens);
+
+    run_price_cycle(Arc::clone(&state)).await;
+    run_price_cycle(Arc::clone(&state)).await;
+
+    let resp = state.metrics.to_response();
+    assert_eq!(
+        resp.price_cycle_count, 2,
+        "both cycles must be counted even though a token failed in each"
+    );
+}
