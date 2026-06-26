@@ -164,6 +164,32 @@ async fn failed_token_error_is_recorded_in_failures() {
 }
 
 #[tokio::test]
+async fn multiple_bad_tokens_each_recorded_as_separate_failure() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok_response()))
+        .mount(&mock_server)
+        .await;
+
+    let tokens = vec![
+        bad_token("BAD_X", "CBADX111111111111111111111111111111111111111111111111111111"),
+        bad_token("BAD_Y", "CBADY111111111111111111111111111111111111111111111111111111"),
+    ];
+    let state = test_state(&mock_server.uri(), tokens);
+
+    run_price_cycle(Arc::clone(&state)).await;
+
+    let failures = state.failures.lock().await;
+    let entries: Vec<_> = failures.iter().collect();
+    assert!(
+        entries.len() >= 2,
+        "each failed token must produce its own failure record; got {}",
+        entries.len()
+    );
+}
+
+#[tokio::test]
 async fn single_bad_token_alone_leaves_cache_empty() {
     let mock_server = MockServer::start().await;
 
