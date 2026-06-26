@@ -334,3 +334,27 @@ async fn last_updated_not_set_when_ledger_fetch_fails() {
         "last_updated must not be set when the cycle aborts due to ledger fetch failure"
     );
 }
+
+const ADDR3: &str = "CADDR3111111111111111111111111111111111111111111111111111111";
+
+#[tokio::test]
+async fn last_updated_set_with_three_successful_tokens() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
+        .mount(&mock)
+        .await;
+
+    let tokens = vec![
+        fixed_token("T1", USDC_ADDR),
+        fixed_token("T2", XLM_ADDR),
+        fixed_token("T3", ADDR3),
+    ];
+    let state = test_state(&mock.uri(), tokens);
+
+    run_price_cycle(Arc::clone(&state)).await;
+
+    let cache = state.price_cache.read().await;
+    assert!(cache.last_updated.is_some());
+    assert_eq!(cache.prices.len(), 3, "all three tokens must be cached");
+}
