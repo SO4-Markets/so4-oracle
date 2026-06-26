@@ -312,7 +312,10 @@ mod tests {
     #[test]
     fn submit_error_display_rpc() {
         let err = SubmitError::Rpc(RpcError::NetworkError("connection reset".to_string()));
-        assert_eq!(err.to_string(), "RPC error: network error: connection reset");
+        assert_eq!(
+            err.to_string(),
+            "RPC error: network error: connection reset"
+        );
     }
 
     #[test]
@@ -383,10 +386,9 @@ mod tests {
                 })),
                 "getTransaction" => {
                     let idx = counter.fetch_add(1, Ordering::SeqCst);
-                    let result = bodies
-                        .get(idx)
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({ "status": "SUCCESS", "ledger": 42 }));
+                    let result = bodies.get(idx).cloned().unwrap_or_else(
+                        || serde_json::json!({ "status": "SUCCESS", "ledger": 42 }),
+                    );
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": 1,
