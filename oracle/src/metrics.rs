@@ -230,4 +230,14 @@ mod tests {
         let resp = metrics.to_response();
         assert_eq!(resp.token_fetch_failures, 3, "1 + 2 = 3 total failures");
     }
+
+    #[test]
+    fn token_fetch_ok_accumulates_across_price_cycles() {
+        let metrics = Metrics::new();
+        metrics.record_price_cycle(50, 4, 0);
+        metrics.record_price_cycle(60, 2, 1);
+
+        let resp = metrics.to_response();
+        assert_eq!(resp.token_fetch_ok, 6, "4 + 2 = 6 total successes");
+    }
 }
