@@ -1,3 +1,9 @@
 [workspace]
-members = ["oracle", "apis", "contracts"]
+members = ["oracle", "shared/config"]
 resolver = "2"
+
+[workspace.lints.rust]
+mismatched_lifetime_syntaxes = "allow"
+
+[profile.release]
+overflow-checks = true

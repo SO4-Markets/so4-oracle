@@ -1,0 +1,47 @@
+app = 'so4-oracle'
+primary_region = 'iad'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  PORT = '8080'
+  BIND_ADDR = '0.0.0.0:8080'
+  STELLAR_NETWORK = 'testnet'
+  NETWORK_PASSPHRASE = 'Test SDF Network ; September 2015'
+  PRICE_LOOP_MS = '1000'
+  KEEPER_LOOP_MS = '1500'
+  MIN_KEEPER_BALANCE_XLM = '10'
+  KEEPER_INDEX = '0'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = 'connections'
+    hard_limit = 250
+    soft_limit = 200
+
+[[vm]]
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 256
+
+[checks]
+  [checks.health]
+    port = 8080
+    type = 'http'
+    interval = '30s'
+    timeout = '3s'
+    path = '/health'
+
+  [checks.ready]
+    port = 8080
+    type = 'http'
+    interval = '10s'
+    timeout = '3s'
+    path = '/ready'

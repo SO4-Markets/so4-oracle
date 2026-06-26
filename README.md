@@ -1,126 +1,162 @@
-# so4-oracle.
+# so4-oracle
 
-Oracle keeper and API server for [SO4 Markets](https://github.com/SO4-Markets) — a decentralised perpetuals and spot exchange on Stellar/Soroban.
+Production Axum service for the SO4.market Soroban oracle and keeper.
 
-This workspace feeds signed prices into the on-chain `oracle` contract and exposes REST/WebSocket APIs for frontends and integrators.
+This repository contains a single Rust binary that runs:
+- Price fetching and aggregation from multiple sources (Binance, Coinbase, Pyth)
+- Keeper loop that executes pending orders, deposits, and withdrawals on-chain
+- HTTP API for price feeds and operational endpoints
 
----
-
-## Workspace Structure
+## Architecture
 
 ```
-so4-oracle/
-├── Cargo.toml          # Workspace manifest
-├── wrangler.toml       # Cloudflare Worker deployment config
-│
-├── oracle/             # Cloudflare Worker — keeper price submission
-│   ├── Cargo.toml
-│   └── src/lib.rs
-│
-└── apis/               # Native Axum server — REST + WebSocket API
-    ├── Cargo.toml
-    └── src/main.rs
+so4-oracle  (single statically-deployed binary)
+├── main.rs            tokio::main → load Config → build AppState → spawn loops → serve axum
+├── HTTP API (axum + tower-http CORS/trace)
+│     GET /health                      public   liveness
+│     GET /ready                       public   RPC reachable + keeper funded
+│     GET /prices                      public   serves in-memory PriceCache (frontend)
+│     GET /oracle/status               admin    last cycle, balance, per-token state
+│     GET /keeper/status               admin    pending work + last N executions
+│     GET /oracle/failed-submissions   admin    ring buffer of failures
+│     GET /metrics                     admin    Prometheus metrics
+├── task: price_loop   tokio::interval(~1s)
+│     fetch sources → validate → aggregate min/max → sign → write PriceCache
+└── task: keeper_loop  tokio::interval(~1-2s)
+      poll reader (orders/deposits/withdrawals)
+      → if work: set_prices(needed tokens) → execute_*(key) per item → freeze on budget
+      → record results; never panics the loop
 ```
 
----
+## Deployed Contract Reference
 
-## Crates
+Testnet oracle:
 
-### `oracle` — Cloudflare Worker
+```text
+ORACLE=CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY
+ORDER_HANDLER=CC35OFZVWUTAZPV3B6UKSDVAVORZEWUUMOMTHO33H4YR4C5FKPEFODKY
+DEPOSIT_HANDLER=CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C
+WITHDRAWAL_HANDLER=CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE
+READER=CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC
+DATA_STORE=CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J
+ROLE_STORE=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q
+NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
+RPC_URL=https://soroban-testnet.stellar.org
+```
 
-Runs on Cloudflare's edge network. Fetches prices from external exchanges, aggregates them, signs with the keeper ed25519 key, and submits to the on-chain `oracle` Soroban contract via Stellar RPC.
-
-Deployed via `wrangler deploy`.
-
-### `apis` — Axum API Server
-
-A standard Tokio/Axum binary that projects can run alongside or independently. Exposes price feeds, market data, and oracle status over HTTP and WebSocket so frontends and integrators don't need to hit Stellar RPC directly.
-
-Runs with `cargo run -p apis`.
-
----
-
-## Features
-
-### Oracle Worker (`oracle/`)
-
-- [x] Cloudflare Worker scaffolding (Axum + worker-build)
-- [ ] Fetch prices from Binance
-- [ ] Fetch prices from Coinbase
-- [ ] Fetch prices from Pyth Network
-- [ ] Multi-source median price aggregation
-- [ ] Outlier rejection (> 3σ from median)
-- [ ] Confidence interval calculation
-- [ ] Ed25519 keeper key signing (on-chain oracle message format)
-- [ ] Stellar RPC client — submit signed prices to on-chain oracle
-- [ ] Cloudflare Cron Trigger — scheduled price updates (every ~30s)
-- [ ] Multi-token feed configuration (token list + per-token source mapping)
-- [ ] Retry logic with exponential backoff
-- [ ] Network selection via env vars (testnet / mainnet)
-- [ ] Keeper wallet balance monitoring
-- [ ] Dead-letter queue for failed submissions
-
-### APIs Server (`apis/`)
-
-- [x] `GET /health` — `{"status":"ok"}`
-- [ ] `GET /prices` — latest aggregated prices for all tokens
-- [ ] `GET /prices/:token` — single token price (min/max/timestamp)
-- [ ] `GET /markets` — all active markets with pool stats
-- [ ] `GET /markets/:market_token` — single market detail (pool value, OI, funding rate)
-- [ ] `GET /positions/:account` — account open positions
-- [ ] `GET /orders/:account` — account pending orders
-- [ ] `GET /oracle/status` — keeper health, last update time, submission latency
-- [ ] `WS /prices/stream` — real-time price push over WebSocket
-- [ ] Redis / in-memory cache layer for oracle prices
-- [ ] CORS configuration for frontend integration
-- [ ] Rate limiting middleware
-- [ ] Structured logging (`tracing` subscriber)
-- [ ] Graceful shutdown
-- [ ] OpenAPI / Swagger spec generation
-- [ ] Admin endpoint authentication
-
----
-
-## Getting Started
-
-**Prerequisites:** Rust (stable), `wrangler` CLI, a Cloudflare account for the worker.
+## Required Environment Variables
 
 ```bash
-# Check the workspace builds
-cargo check
+# Network configuration
+STELLAR_NETWORK=testnet
+STELLAR_RPC_URL=https://soroban-testnet.stellar.org
+HORIZON_URL=https://horizon-testnet.stellar.org
+NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 
-# Run the APIs server locally
-cargo run -p apis
-# → listening on 0.0.0.0:3000
+# Contract IDs
+ORACLE_CONTRACT_ID=CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY
+ORDER_HANDLER_CONTRACT_ID=CC35OFZVWUTAZPV3B6UKSDVAVORZEWUUMOMTHO33H4YR4C5FKPEFODKY
+DEPOSIT_HANDLER_CONTRACT_ID=CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C
+WITHDRAWAL_HANDLER_CONTRACT_ID=CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE
+READER_CONTRACT_ID=CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC
+DATA_STORE_CONTRACT_ID=CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J
+ROLE_STORE_CONTRACT_ID=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q
 
-# Deploy the oracle worker to Cloudflare
-wrangler deploy
+# Keeper configuration
+KEEPER_PRIVATE_KEY=<hex-encoded-ed25519-private-key>
+KEEPER_SECRET_KEY=<S...-strkey-seed>
+KEEPER_ACCOUNT_ID=<G...-public-key>
+KEEPER_INDEX=0
+MIN_KEEPER_BALANCE_XLM=10
+
+# API configuration
+BIND_ADDR=0.0.0.0:8080
+ADMIN_API_TOKEN=<optional-admin-token>
+
+# Loop intervals (milliseconds)
+PRICE_LOOP_MS=1000
+KEEPER_LOOP_MS=1500
+
+# Price feed configuration
+PRICE_FEED_CONFIG=/path/to/tokens.json
 ```
 
----
+## Development
 
-## Environment Variables
+```bash
+# Check the code
+cargo check --workspace
 
-| Variable | Crate | Description |
-|---|---|---|
-| `KEEPER_PRIVATE_KEY` | oracle | Ed25519 private key (hex) for signing prices |
-| `STELLAR_RPC_URL` | oracle | Stellar RPC endpoint |
-| `ORACLE_CONTRACT_ID` | oracle | On-chain oracle contract address |
-| `NETWORK_PASSPHRASE` | oracle | `"Test SDF Network ; September 2015"` or mainnet |
-| `PORT` | apis | Listen port (default `3000`) |
-| `REDIS_URL` | apis | Redis connection string for price cache |
+# Run tests
+cargo test --workspace
 
----
+# Run locally (with .env file)
+cargo run --bin oracle
 
-## Related Repos
+# Build for production
+cargo build --release --bin oracle
+```
 
-| Repo | Description |
-|---|---|
-| [SO4-Markets/contracts](https://github.com/SO4-Markets/contracts) | Soroban smart contracts |
-| [SO4-Markets/interface](https://github.com/SO4-Markets/interface) | Frontend |
+## Deployment
 
----
+### Docker
 
-## License
+```bash
+# Build the image
+docker build -t so4-oracle .
 
-MIT.
+# Run with environment variables
+docker run -p 8080:8080 \
+  -e STELLAR_RPC_URL=https://soroban-testnet.stellar.org \
+  -e KEEPER_PRIVATE_KEY=<key> \
+  -e KEEPER_SECRET_KEY=<secret> \
+  -e KEEPER_ACCOUNT_ID=<account> \
+  so4-oracle
+```
+
+### Systemd
+
+```bash
+# Copy the service file
+sudo cp oracle.service /etc/systemd/system/
+
+# Create environment file
+sudo cp .env /opt/oracle/.env
+
+# Enable and start
+sudo systemctl enable oracle
+sudo systemctl start oracle
+```
+
+### Fly.io
+
+```bash
+# Deploy to Fly.io
+fly deploy
+
+# Set secrets
+fly secrets set KEEPER_PRIVATE_KEY=<key>
+fly secrets set KEEPER_SECRET_KEY=<secret>
+fly secrets set KEEPER_ACCOUNT_ID=<account>
+```
+
+### Railway
+
+```bash
+# Deploy to Railway
+railway up
+
+# Set environment variables in Railway dashboard
+```
+
+## Endpoints
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/health` | GET | No | Liveness check |
+| `/ready` | GET | No | Readiness check (RPC + keeper balance) |
+| `/prices` | GET | No | Current price feeds (CORS-enabled) |
+| `/oracle/status` | GET | Admin | Oracle status and recent errors |
+| `/keeper/status` | GET | Admin | Keeper status and execution history |
+| `/oracle/failed-submissions` | GET | Admin | Failed submission history |
+| `/metrics` | GET | Admin | Prometheus metrics |

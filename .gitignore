@@ -1,5 +1,37 @@
-target
-node_modules
-.wrangler
+# ── Rust build artifacts ──────────────────────────────────────────────────────
+target/
+
+# ── Cloudflare Worker compiled output ─────────────────────────────────────────
+oracle/build/
+
+# ── Wrangler local state ──────────────────────────────────────────────────────
+.wrangler/
+
+# ── Secrets / local env — NEVER commit ───────────────────────────────────────
+.dev.vars
+*.dev.vars
+oracle_vars.md
+
+# ── Generic env files ─────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Frontend dependencies & build output ──────────────────────────────────────
+node_modules/
+dist/
+.next/
+out/
+
+# ── OS / editor clutter ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Scratch / campaign leftovers ─────────────────────────────────────────────
 temp_docs.md
 ISSUES.md
+scripts/.deploy-testnet-state
