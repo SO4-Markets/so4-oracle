@@ -204,8 +204,7 @@ mod tests {
     #[test]
     fn parse_price_exact_30_fractional_digits() {
         // Exactly 30 fractional digits, no truncation or padding needed
-        let result =
-            parse_price_to_precision("1.123456789012345678901234567890").unwrap();
+        let result = parse_price_to_precision("1.123456789012345678901234567890").unwrap();
         let expected_frac = 123_456_789_012_345_678_901_234_567_890i128;
         assert_eq!(result, FLOAT_PRECISION + expected_frac);
     }
