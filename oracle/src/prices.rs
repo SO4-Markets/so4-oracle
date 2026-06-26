@@ -271,9 +271,9 @@ mod tests {
     fn two_sources_uses_average_median_equal_spread() {
         let prices = vec![1000i128, 2000];
         let p = compute_confidence_interval(&prices).unwrap();
-        let mid = 1500i128;
-        assert_eq!(p.min, mid - mid / 100);
-        assert_eq!(p.max, mid + mid / 100);
+
+        assert_eq!(p.min, 1485, "Expected mid (1500) - 1% (15)");
+        assert_eq!(p.max, 1515, "Expected mid (1500) + 1% (15)");
     }
 
     #[test]
