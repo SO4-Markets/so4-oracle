@@ -438,3 +438,35 @@ async fn cycle_running_is_false_after_ledger_failure() {
         "price_cycle_running must be false even when ledger fetch fails"
     );
 }
+
+#[tokio::test]
+async fn last_updated_bounded_between_cycle_start_and_now() {
+    use std::time::SystemTime;
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
+        .mount(&mock)
+        .await;
+
+    let before = SystemTime::now();
+    let state = test_state(&mock.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
+    run_price_cycle(Arc::clone(&state)).await;
+    let after = SystemTime::now();
+
+    let last_updated = state
+        .price_cache
+        .read()
+        .await
+        .last_updated
+        .expect("last_updated must be set after a successful cycle");
+
+    assert!(
+        last_updated >= before,
+        "last_updated must not predate the cycle"
+    );
+    assert!(
+        last_updated <= after,
+        "last_updated must not postdate the observation"
+    );
+}
