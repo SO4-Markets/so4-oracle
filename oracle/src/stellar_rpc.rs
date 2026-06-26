@@ -9,6 +9,8 @@ pub enum RpcError {
     BalanceBelowMinimum { balance_xlm: f64, min_xlm: f64 },
 }
 
+impl Eq for RpcError {}
+
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
