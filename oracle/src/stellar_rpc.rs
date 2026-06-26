@@ -183,6 +183,8 @@ pub async fn get_account_balance_stroops(
 mod tests {
     use super::*;
 
+    /// Verifies that a valid `getLatestLedger` RPC response is parsed correctly
+    /// and the sequence number is extracted. Closes #409.
     #[test]
     fn parse_valid_latest_ledger_response() {
         let body = r#"{
@@ -192,6 +194,9 @@ mod tests {
         assert_eq!(parse_latest_ledger_response(body).unwrap(), 12345u32);
     }
 
+    /// Verifies that an RPC fault in the `getLatestLedger` response is
+    /// propagated as `RpcError::RpcFault` with the correct code and message.
+    /// Closes #410.
     #[test]
     fn parse_rpc_fault_response() {
         let body = r#"{
