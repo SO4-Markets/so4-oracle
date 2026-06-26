@@ -13,10 +13,14 @@
 /// statement are correct by inspecting observable state that is set alongside
 /// (or before) the log:
 ///
-/// - `tokens_ok`     → reflected in `price_cache.prices` entry count
-/// - `tokens_failed` → reflected in `state.failures` ring-buffer entry count
-/// - `latency_ms`    → reflected via `state.metrics.price_cycle_count > 0`
-/// - Cycle ran       → `cycle_status.last_price_cycle_at` is set
+/// Verified invariants (17 tests):
+/// - `tokens_ok`  = number of cache entries added this cycle
+/// - `tokens_failed` = number of per-token failure records in the ring buffer
+/// - `tokens_ok + tokens_failed` = total token count (no token is silently skipped)
+/// - `tokens_ok` and `tokens_failed` are per-token counts, not per-source
+/// - `latency_ms` is captured by `state.metrics` on every `finish_cycle` call
+/// - `finish_cycle` (and thus the log) fires on ALL exit paths including abort
+/// - `cycle_status.last_price_cycle_at` is set before the log event fires
 use std::sync::Arc;
 use std::time::Duration;
 
