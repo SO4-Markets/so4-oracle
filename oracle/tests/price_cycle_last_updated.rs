@@ -1,8 +1,21 @@
-/// Tests for issue #396: last_updated timestamp on the price cache is updated
-/// only when at least one token succeeded in the cycle.
+/// Integration tests for issue #396: `price_cache.last_updated` semantics.
 ///
-/// Relevant code: oracle/src/price_loop.rs — after the token loop,
-/// `if tokens_ok > 0 { state.price_cache.write().await.last_updated = Some(SystemTime::now()); }`
+/// The oracle sets `price_cache.last_updated` at most once per price cycle,
+/// in `price_loop.rs::run_price_cycle`, only when `tokens_ok > 0`:
+///
+/// ```text
+/// if tokens_ok > 0 {
+///     state.price_cache.write().await.last_updated = Some(SystemTime::now());
+/// }
+/// ```
+///
+/// Covered invariants:
+/// - Set when ≥ 1 token succeeds (single, multiple, mixed success/failure).
+/// - Not set when all tokens fail, the token list is empty, the source list is
+///   empty, or the ledger fetch fails (cycle aborts before the token loop).
+/// - Monotonically non-decreasing across consecutive successful cycles.
+/// - Remains within [cycle_start, post_cycle_read] bounds.
+/// - Unaffected by `finish_cycle`, which always runs regardless of outcome.
 use std::sync::Arc;
 use std::time::Duration;
 
