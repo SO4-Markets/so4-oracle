@@ -23,6 +23,8 @@ pub struct Metrics {
 pub struct MetricsResponse {
     pub price_cycle_count: u64,
     pub price_cycle_latency_ms: u64,
+    pub token_fetch_ok: u64,
+    pub token_fetch_failures: u64,
     pub keeper_cycle_count: u64,
     pub keeper_cycle_latency_ms: u64,
     pub orders_executed: u64,
@@ -83,6 +85,8 @@ impl Metrics {
         MetricsResponse {
             price_cycle_count: self.price_cycle_count.load(Ordering::Relaxed),
             price_cycle_latency_ms: self.price_cycle_latency_ms.load(Ordering::Relaxed),
+            token_fetch_ok: self.token_fetch_ok.load(Ordering::Relaxed),
+            token_fetch_failures: self.token_fetch_failures.load(Ordering::Relaxed),
             keeper_cycle_count: self.keeper_cycle_count.load(Ordering::Relaxed),
             keeper_cycle_latency_ms: self.keeper_cycle_latency_ms.load(Ordering::Relaxed),
             orders_executed: self.orders_executed.load(Ordering::Relaxed),
