@@ -40,23 +40,25 @@ impl FixedSource {
         Ok(Self { price })
     }
 
-    /// Parse a decimal string into a `FixedSource`.
-    ///
-    /// The string is parsed as an `i128`; the same sign rules apply.
-    pub fn from_str(s: &str) -> Result<Self, OracleError> {
-        let price: i128 = s.trim().parse().map_err(|_| OracleError::ZeroPrice)?;
-        Self::new(price)
-    }
-
     /// Return the fixed price.
     pub fn price(&self) -> i128 {
         self.price
     }
 }
 
+impl std::str::FromStr for FixedSource {
+    type Err = OracleError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let price: i128 = s.trim().parse().map_err(|_| OracleError::ZeroPrice)?;
+        Self::new(price)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     // ── FixedSource::new ───────────────────────────────────────────────────────
 
@@ -72,7 +74,10 @@ mod tests {
 
     #[test]
     fn fixed_source_rejects_large_negative() {
-        assert_eq!(FixedSource::new(-1_000_000), Err(OracleError::NegativePrice));
+        assert_eq!(
+            FixedSource::new(-1_000_000),
+            Err(OracleError::NegativePrice)
+        );
     }
 
     #[test]

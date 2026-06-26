@@ -656,7 +656,10 @@ mod tests {
 
         assert!(matches!(
             err,
-            EnvError::InvalidVar { var: "KEEPER_ACCOUNT_ID", .. }
+            EnvError::InvalidVar {
+                var: "KEEPER_ACCOUNT_ID",
+                ..
+            }
         ));
     }
 
