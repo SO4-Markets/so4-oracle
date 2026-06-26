@@ -266,4 +266,67 @@ mod tests {
         let err = parse_account_balance_response("not json").unwrap_err();
         assert!(matches!(err, RpcError::JsonError(_)));
     }
+
+    // ── get_account_balance_stroops — HTTP-level tests (#404) ────────────────
+
+    #[tokio::test]
+    async fn get_account_balance_stroops_200_returns_stroops() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = r#"{
+            "id": "GABC",
+            "balances": [
+                {"asset_type":"native","balance":"50.0000000"}
+            ]
+        }"#;
+
+        Mock::given(method("GET"))
+            .and(path("/accounts/GABC"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let result = get_account_balance_stroops(&server.uri(), "GABC").await;
+        assert_eq!(result.unwrap(), 500_000_000); // 50 XLM in stroops
+    }
+
+    #[tokio::test]
+    async fn get_account_balance_stroops_404_returns_http_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/accounts/GNOT_FOUND"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = get_account_balance_stroops(&server.uri(), "GNOT_FOUND")
+            .await
+            .unwrap_err();
+        assert_eq!(err, RpcError::HttpError(404));
+    }
+
+    #[tokio::test]
+    async fn get_account_balance_stroops_500_returns_http_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/accounts/GABC"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let err = get_account_balance_stroops(&server.uri(), "GABC")
+            .await
+            .unwrap_err();
+        assert_eq!(err, RpcError::HttpError(500));
+    }
 }
