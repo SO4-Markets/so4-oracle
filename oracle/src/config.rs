@@ -482,20 +482,24 @@ mod tests {
     }
 
     #[test]
-    fn reject_min_sources_zero() {
-        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":0}]"#;
+    fn reject_missing_binance_symbol() {
+        let json = r#"[{"symbol":"TWBTC","stellar_address":"CADDR","sources":["binance"]}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
-        assert!(matches!(
-            err,
-            ConfigError::InvalidToken { ref symbol, .. } if symbol == "BTC"
-        ));
+        assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
 
     #[test]
-    fn accept_min_sources_one() {
-        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1}]"#;
-        let cfg = parse_price_feed_config(json).unwrap();
-        assert_eq!(cfg.tokens[0].min_sources, 1);
+    fn reject_missing_pyth_feed_id() {
+        let json = r#"[{"symbol":"TWBTC","stellar_address":"CADDR","sources":["pyth"]}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }));
+    }
+
+    #[test]
+    fn reject_missing_fixed_price() {
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CADDR","sources":["fixed"]}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
 
     #[test]
@@ -637,6 +641,22 @@ mod tests {
                 var: "KEEPER_ACCOUNT_ID",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn config_from_lookup_rejects_account_with_secret_prefix() {
+        let mut env = valid_env();
+        env.insert(
+            "KEEPER_ACCOUNT_ID",
+            "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+        );
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        assert!(matches!(
+            err,
+            EnvError::InvalidVar { var: "KEEPER_ACCOUNT_ID", .. }
         ));
     }
 

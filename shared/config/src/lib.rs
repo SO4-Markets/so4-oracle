@@ -257,4 +257,23 @@ mod tests {
         assert!(map.contains_key("eth"));
         assert!(!map.contains_key("BTC"));
     }
+
+    #[test]
+    fn build_lookup_returns_correct_references() {
+        let tokens = parse_token_configs(VALID_JSON).unwrap();
+        let map = build_lookup(&tokens);
+        assert_eq!(map.get("btc").unwrap().symbol, "BTC");
+        assert_eq!(map.get("eth").unwrap().symbol, "ETH");
+    }
+
+    #[test]
+    fn build_lookup_keys_are_lowercased_symbol() {
+        let json = r#"[{"symbol":"MIXEDcase","sources":["binance"]},{"symbol":"UPPER","sources":["fixed"],"fixed_price":"1"}]"#;
+        let tokens = parse_token_configs(json).unwrap();
+        let map = build_lookup(&tokens);
+        assert!(map.contains_key("mixedcase"));
+        assert!(map.contains_key("upper"));
+        assert!(!map.contains_key("MIXEDcase"));
+        assert!(!map.contains_key("UPPER"));
+    }
 }
