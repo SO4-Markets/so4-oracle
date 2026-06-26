@@ -110,8 +110,14 @@ async fn token_failure_does_not_abort_remaining_tokens() {
     // First token uses an unsupported source — will fail.
     // Second token uses "fixed" — will succeed.
     let tokens = vec![
-        bad_token("FAILTOKEN", "CFAILADDR111111111111111111111111111111111111111111111111"),
-        fixed_token("USDC", "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES"),
+        bad_token(
+            "FAILTOKEN",
+            "CFAILADDR111111111111111111111111111111111111111111111111",
+        ),
+        fixed_token(
+            "USDC",
+            "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES",
+        ),
     ];
     let state = test_state(&mock_server.uri(), tokens);
 
@@ -142,8 +148,14 @@ async fn failed_token_error_is_recorded_in_failures() {
         .await;
 
     let tokens = vec![
-        bad_token("BADTOK", "CBADADDR11111111111111111111111111111111111111111111111111"),
-        fixed_token("USDC", "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES"),
+        bad_token(
+            "BADTOK",
+            "CBADADDR11111111111111111111111111111111111111111111111111",
+        ),
+        fixed_token(
+            "USDC",
+            "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES",
+        ),
     ];
     let state = test_state(&mock_server.uri(), tokens);
 
@@ -173,8 +185,14 @@ async fn multiple_bad_tokens_each_recorded_as_separate_failure() {
         .await;
 
     let tokens = vec![
-        bad_token("BAD_X", "CBADX111111111111111111111111111111111111111111111111111111"),
-        bad_token("BAD_Y", "CBADY111111111111111111111111111111111111111111111111111111"),
+        bad_token(
+            "BAD_X",
+            "CBADX111111111111111111111111111111111111111111111111111111",
+        ),
+        bad_token(
+            "BAD_Y",
+            "CBADY111111111111111111111111111111111111111111111111111111",
+        ),
     ];
     let state = test_state(&mock_server.uri(), tokens);
 
@@ -238,7 +256,10 @@ async fn failed_token_does_not_overwrite_previous_good_cache_entry() {
         .prices
         .get(&usdc_key)
         .cloned();
-    assert!(first_price.is_some(), "USDC must be cached after first cycle");
+    assert!(
+        first_price.is_some(),
+        "USDC must be cached after first cycle"
+    );
 }
 
 #[tokio::test]
@@ -251,8 +272,14 @@ async fn cycle_status_not_stuck_running_after_partial_failure() {
         .await;
 
     let tokens = vec![
-        bad_token("FAILME", "CFAILME11111111111111111111111111111111111111111111111111111"),
-        fixed_token("USDC", "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES"),
+        bad_token(
+            "FAILME",
+            "CFAILME11111111111111111111111111111111111111111111111111111",
+        ),
+        fixed_token(
+            "USDC",
+            "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES",
+        ),
     ];
     let state = test_state(&mock_server.uri(), tokens);
 
@@ -279,9 +306,18 @@ async fn all_good_tokens_processed_when_one_fails() {
         .await;
 
     let tokens = vec![
-        bad_token("TOKEN_A", "CADDRA11111111111111111111111111111111111111111111111111111"),
-        fixed_token("TOKEN_B", "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES"),
-        fixed_token("TOKEN_C", "CADDRC11111111111111111111111111111111111111111111111111111"),
+        bad_token(
+            "TOKEN_A",
+            "CADDRA11111111111111111111111111111111111111111111111111111",
+        ),
+        fixed_token(
+            "TOKEN_B",
+            "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES",
+        ),
+        fixed_token(
+            "TOKEN_C",
+            "CADDRC11111111111111111111111111111111111111111111111111111",
+        ),
     ];
     let state = test_state(&mock_server.uri(), tokens);
 
@@ -305,8 +341,14 @@ async fn good_tokens_have_non_zero_price_after_partial_failure() {
         .await;
 
     let tokens = vec![
-        bad_token("SKIPME", "CSKIPME111111111111111111111111111111111111111111111111111"),
-        fixed_token("USDC", "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES"),
+        bad_token(
+            "SKIPME",
+            "CSKIPME111111111111111111111111111111111111111111111111111",
+        ),
+        fixed_token(
+            "USDC",
+            "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES",
+        ),
     ];
     let state = test_state(&mock_server.uri(), tokens);
 
@@ -329,8 +371,14 @@ async fn metrics_price_cycle_count_increments_after_partial_failure() {
         .await;
 
     let tokens = vec![
-        bad_token("FAILME2", "CFAILME21111111111111111111111111111111111111111111111111111"),
-        fixed_token("USDC", "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES"),
+        bad_token(
+            "FAILME2",
+            "CFAILME21111111111111111111111111111111111111111111111111111",
+        ),
+        fixed_token(
+            "USDC",
+            "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES",
+        ),
     ];
     let state = test_state(&mock_server.uri(), tokens);
 
@@ -353,8 +401,14 @@ async fn two_cycles_with_partial_failure_count_both_in_metrics() {
         .await;
 
     let tokens = vec![
-        bad_token("ALWAYS_BAD", "CBAD22222222222222222222222222222222222222222222222222222"),
-        fixed_token("USDC", "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES"),
+        bad_token(
+            "ALWAYS_BAD",
+            "CBAD22222222222222222222222222222222222222222222222222222",
+        ),
+        fixed_token(
+            "USDC",
+            "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES",
+        ),
     ];
     let state = test_state(&mock_server.uri(), tokens);
 
@@ -387,10 +441,7 @@ async fn failure_operation_field_contains_token_symbol() {
 
     let failures = state.failures.lock().await;
     let entries: Vec<_> = failures.iter().collect();
-    assert!(
-        !entries.is_empty(),
-        "at least one failure must be recorded"
-    );
+    assert!(!entries.is_empty(), "at least one failure must be recorded");
     let has_symbol = entries.iter().any(|f| f.operation.contains("XLM"));
     assert!(
         has_symbol,
@@ -410,8 +461,14 @@ async fn token_failure_count_reflected_in_metrics_after_partial_cycle() {
 
     // One bad token (unsupported source) and one good token (fixed source).
     let tokens = vec![
-        bad_token("FAIL1", "CFAIL111111111111111111111111111111111111111111111111111111"),
-        fixed_token("OK1", "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES"),
+        bad_token(
+            "FAIL1",
+            "CFAIL111111111111111111111111111111111111111111111111111111",
+        ),
+        fixed_token(
+            "OK1",
+            "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES",
+        ),
     ];
     let state = test_state(&mock_server.uri(), tokens);
 

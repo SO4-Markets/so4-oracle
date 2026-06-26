@@ -275,11 +275,7 @@ async fn last_updated_set_only_once_per_cycle_not_per_token() {
         cache.last_updated.is_some(),
         "last_updated must be set when multiple tokens all succeed"
     );
-    assert_eq!(
-        cache.prices.len(),
-        2,
-        "both tokens must be in the cache"
-    );
+    assert_eq!(cache.prices.len(), 2, "both tokens must be in the cache");
 }
 
 #[tokio::test]

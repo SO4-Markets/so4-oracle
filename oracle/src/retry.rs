@@ -13,7 +13,10 @@ where
     Fut: std::future::Future<Output = Result<T, E>>,
     E: std::fmt::Debug,
 {
-    assert!(max_attempts > 0, "retry_with_backoff requires max_attempts >= 1");
+    assert!(
+        max_attempts > 0,
+        "retry_with_backoff requires max_attempts >= 1"
+    );
     let mut delay_ms = base_delay_ms;
     let mut last_err: Option<E> = None;
 
@@ -112,12 +115,7 @@ mod tests {
     fn panics_when_max_attempts_is_zero() {
         let result = std::panic::catch_unwind(|| {
             block_on(async {
-                retry_with_backoff(
-                    || async { Ok::<u32, &'static str>(1) },
-                    0,
-                    100,
-                )
-                .await
+                retry_with_backoff(|| async { Ok::<u32, &'static str>(1) }, 0, 100).await
             })
         });
         assert!(result.is_err());

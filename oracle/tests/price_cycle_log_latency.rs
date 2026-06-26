@@ -158,7 +158,10 @@ async fn tokens_failed_equals_failures_ring_buffer_count() {
 
     let state = test_state(
         &mock.uri(),
-        vec![bad_token("FAIL1", FAIL1_ADDR), bad_token("FAIL2", FAIL2_ADDR)],
+        vec![
+            bad_token("FAIL1", FAIL1_ADDR),
+            bad_token("FAIL2", FAIL2_ADDR),
+        ],
     );
 
     run_price_cycle(Arc::clone(&state)).await;
@@ -331,7 +334,11 @@ async fn tokens_ok_zero_when_no_tokens_configured() {
 
     // tokens_ok = 0, tokens_failed = 0 — finish_cycle still logs the event.
     let cache = state.price_cache.read().await;
-    assert_eq!(cache.prices.len(), 0, "tokens_ok = 0 when no tokens configured");
+    assert_eq!(
+        cache.prices.len(),
+        0,
+        "tokens_ok = 0 when no tokens configured"
+    );
     drop(cache);
 
     let metrics = state.metrics.to_response();
@@ -404,10 +411,7 @@ async fn tokens_ok_is_per_token_not_per_source() {
 
     // ADDR4 gets a fixed token — one token with one source.
     // tokens_ok should be 1 (one token succeeded), NOT 1-per-source.
-    let state = test_state(
-        &mock.uri(),
-        vec![fixed_token("USDC", ADDR4)],
-    );
+    let state = test_state(&mock.uri(), vec![fixed_token("USDC", ADDR4)]);
 
     run_price_cycle(Arc::clone(&state)).await;
 
