@@ -135,7 +135,7 @@ pub fn percentile(sorted: &[i128], p: u8) -> i128 {
     let frac = idx - lo as f64;
     let lo_val = sorted[lo] as f64;
     let hi_val = sorted[hi] as f64;
-    (lo_val + frac * (hi_val - lo_val)) as i128
+    (lo_val + frac * (hi_val - lo_val) + 0.5).floor() as i128
 }
 
 #[derive(Debug)]
