@@ -203,6 +203,8 @@ mod tests {
 
     // ── sendTransaction parsing ──────────────────────────────────────────────
 
+    /// Verifies that a PENDING sendTransaction response is parsed correctly.
+    /// Closes #423.
     #[test]
     fn parse_send_response_pending() {
         let body = r#"{
@@ -214,6 +216,8 @@ mod tests {
         assert_eq!(r.hash, "abc123def456");
     }
 
+    /// Verifies that an ERROR status with errorResultXdr in a sendTransaction
+    /// response is parsed correctly. Closes #424.
     #[test]
     fn parse_send_response_error_status() {
         let body = r#"{
@@ -225,6 +229,8 @@ mod tests {
         assert_eq!(r.error_result_xdr.as_deref(), Some("AAAA"));
     }
 
+    /// Verifies that an RPC fault in a sendTransaction response is propagated
+    /// as SubmitError::Rpc(RpcError::RpcFault). Closes #425.
     #[test]
     fn parse_send_response_rpc_fault() {
         let body = r#"{
@@ -237,6 +243,8 @@ mod tests {
 
     // ── getTransaction parsing ───────────────────────────────────────────────
 
+    /// Verifies that a SUCCESS getTransaction response with ledger sequence is
+    /// parsed correctly. Closes #426.
     #[test]
     fn parse_get_transaction_success() {
         let body = r#"{
