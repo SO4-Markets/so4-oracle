@@ -56,7 +56,8 @@ pub async fn run_price_cycle(state: Arc<AppState>) {
                     token: token.stellar_address.clone(),
                     symbol: token.symbol.clone(),
                 };
-                record_error_with_context(&state, format!("price:{}", token.symbol), error, ctx).await;
+                record_error_with_context(&state, format!("price:{}", token.symbol), error, ctx)
+                    .await;
             }
         }
     }
@@ -82,7 +83,9 @@ async fn finish_cycle(
     }
 
     let latency_ms = started.elapsed().as_millis() as u64;
-    state.metrics.record_price_cycle(latency_ms, tokens_ok, tokens_failed);
+    state
+        .metrics
+        .record_price_cycle(latency_ms, tokens_ok, tokens_failed);
 
     tracing::info!(tokens_ok, tokens_failed, latency_ms, "cycle_complete");
 }
@@ -221,7 +224,16 @@ async fn record_error(
     operation: impl Into<String>,
     error: impl Into<String>,
 ) {
-    record_error_with_context(state, operation, error, ErrorContext { token: String::new(), symbol: String::new() }).await;
+    record_error_with_context(
+        state,
+        operation,
+        error,
+        ErrorContext {
+            token: String::new(),
+            symbol: String::new(),
+        },
+    )
+    .await;
 }
 
 async fn record_error_with_context(
