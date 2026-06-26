@@ -8,6 +8,8 @@ use serde::Serialize;
 pub struct Metrics {
     pub price_cycle_count: AtomicU64,
     pub price_cycle_latency_ms: AtomicU64,
+    pub token_fetch_ok: AtomicU64,
+    pub token_fetch_failures: AtomicU64,
     pub keeper_cycle_count: AtomicU64,
     pub keeper_cycle_latency_ms: AtomicU64,
     pub orders_executed: AtomicU64,
