@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn test_metrics_recording() {
         let metrics = Metrics::new();
-        metrics.record_price_cycle(100);
+        metrics.record_price_cycle(100, 3, 1);
         metrics.record_keeper_cycle(200, 5, 3, 2, 1);
 
         let response = metrics.to_response();
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn test_prometheus_output() {
         let metrics = Metrics::new();
-        metrics.record_price_cycle(100);
+        metrics.record_price_cycle(100, 3, 1);
 
         let prometheus = metrics.to_prometheus();
         assert!(prometheus.contains("oracle_price_cycle_count 1"));
