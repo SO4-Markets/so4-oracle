@@ -280,8 +280,9 @@ mod tests {
     fn single_source_uses_fallback_equal_spread() {
         let prices = vec![5000i128];
         let p = compute_confidence_interval(&prices).unwrap();
-        assert_eq!(p.min, 5000 - 50);
-        assert_eq!(p.max, 5000 + 50);
+
+        assert_eq!(p.min, 4950, "Expected 5000 - 1% spread (50)");
+        assert_eq!(p.max, 5050, "Expected 5000 + 1% spread (50)");
     }
 
     #[test]
