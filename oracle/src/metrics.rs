@@ -158,6 +158,13 @@ impl Metrics {
             self.withdrawals_executed.load(Ordering::Relaxed)
         ));
 
+        output.push_str("# HELP oracle_token_fetch_failures_total Total individual token fetch failures across all price cycles\n");
+        output.push_str("# TYPE oracle_token_fetch_failures_total counter\n");
+        output.push_str(&format!(
+            "oracle_token_fetch_failures_total {}\n",
+            self.token_fetch_failures.load(Ordering::Relaxed)
+        ));
+
         output.push_str("# HELP oracle_submit_failures Total number of submit failures\n");
         output.push_str("# TYPE oracle_submit_failures counter\n");
         output.push_str(&format!(
