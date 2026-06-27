@@ -188,7 +188,7 @@ fn signed_cached_price(
     ledger_seq: u32,
     aggregate: AggregatedPrice,
 ) -> Result<CachedPrice, String> {
-    let timestamp = current_timestamp_secs();
+    let timestamp = crate::current_timestamp_secs();
     let signature = crate::signing::sign_price(
         state.config.keeper_private_key.as_str(),
         &state.config.network_passphrase,
@@ -257,13 +257,6 @@ async fn record_error_with_context(
     });
 }
 
-fn current_timestamp_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,11 +318,16 @@ mod tests {
         let state = test_state(token.clone());
         let cached = build_cached_price(&state, &token, 123).await.unwrap();
 
+        // Verify all fields are correct (closes #400)
+        assert_eq!(cached.token_address, "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES");
         assert_eq!(cached.symbol, "TUSDC");
         assert_eq!(cached.display_symbol, "USDC");
+        assert_eq!(cached.min, 1_000_000_000_000_000_000_000_000_000_000);
+        assert_eq!(cached.max, 1_000_000_000_000_000_000_000_000_000_000);
+        assert_eq!(cached.median, 1_000_000_000_000_000_000_000_000_000_000);
         assert_eq!(cached.ledger_seq, 123);
         assert_eq!(cached.sources_used, vec!["fixed"]);
-        assert_eq!(cached.median, 1_000_000_000_000_000_000_000_000_000_000);
         assert_eq!(cached.signature.len(), 128);
+        assert!(cached.timestamp > 0, "timestamp should be positive");
     }
 }

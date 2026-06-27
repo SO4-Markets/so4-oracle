@@ -26,3 +26,16 @@ pub mod api;
 
 pub use config::Config;
 pub use state::AppState;
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Returns the current Unix timestamp in seconds.
+///
+/// This is a convenience wrapper around `SystemTime::now() - UNIX_EPOCH`
+/// that returns the duration as seconds (`u64`). Closes #399.
+pub fn current_timestamp_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}

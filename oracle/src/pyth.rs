@@ -162,18 +162,10 @@ pub async fn fetch_pyth_price(
 
     validate_pyth_price(
         &feed.price,
-        current_timestamp_secs(),
+        crate::current_timestamp_secs(),
         stale_after_seconds,
         max_confidence_bps,
     )
-}
-
-fn current_timestamp_secs() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
