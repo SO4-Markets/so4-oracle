@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime};
 
 use shared_config::TokenConfig;
 use tokio::time::{interval, MissedTickBehavior};
@@ -15,7 +15,13 @@ pub async fn run_price_loop(state: Arc<AppState>) {
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = state.shutdown_token.cancelled() => {
+                tracing::info!("price_loop shutting down");
+                break;
+            }
+        }
         run_price_cycle(Arc::clone(&state)).await;
     }
 }

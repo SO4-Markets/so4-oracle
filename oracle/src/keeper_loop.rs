@@ -16,7 +16,13 @@ pub async fn run_keeper_loop(state: Arc<AppState>) {
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = state.shutdown_token.cancelled() => {
+                tracing::info!("keeper_loop shutting down");
+                break;
+            }
+        }
         let _ = run_keeper_cycle(Arc::clone(&state)).await;
     }
 }
@@ -37,6 +43,10 @@ pub async fn run_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     }
 
     let latency_ms = started.elapsed().as_millis() as u64;
+    {
+        let mut status = state.cycle_status.write().await;
+        status.last_keeper_cycle_latency_ms = Some(latency_ms);
+    }
     match &result {
         Ok(summary) => {
             info!(
