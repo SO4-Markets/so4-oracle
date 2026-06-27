@@ -498,6 +498,18 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_prices_fails_when_filtered_lt_min() {
+        let sources = vec![
+            "binance".to_string(),
+            "coinbase".to_string(),
+            "pyth".to_string(),
+        ];
+        let result = aggregate_prices(&[100, 101, 1000], &sources, 3, 200);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("insufficient sources after filtering"));
+    }
+
+    #[test]
     fn test_issue_380_explicit_percentile_validation() {
         // Input of 3 sources
         let prices = vec![100i128, 200, 300];
