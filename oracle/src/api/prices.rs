@@ -1,12 +1,18 @@
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{AdminAuth, ApiError};
 use crate::state::{AppState, CachedPrice, FailedSubmission};
+
+#[derive(Debug, Deserialize)]
+pub struct FailedSubmissionsQuery {
+    pub operation: Option<String>,
+    pub limit: Option<usize>,
+}
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -16,6 +22,7 @@ pub struct HealthResponse {
 #[derive(Debug, Serialize)]
 pub struct FailuresResponse {
     pub failures: Vec<FailedSubmission>,
+    pub total_count: usize,
 }
 
 pub async fn health() -> Json<HealthResponse> {
@@ -78,11 +85,28 @@ pub async fn prices(
 
 pub async fn failed_submissions(
     _auth: AdminAuth,
+    Query(query): Query<FailedSubmissionsQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Json<FailuresResponse> {
-    let failures = state.failures.lock().await.iter().rev().cloned().collect();
+    let all_failures = state.failures.lock().await;
+    let failures_iter = all_failures.iter().rev();
 
-    Json(FailuresResponse { failures })
+    let filtered: Vec<FailedSubmission> = match &query.operation {
+        Some(op) => failures_iter
+            .filter(|f| f.operation.starts_with(op.as_str()))
+            .cloned()
+            .collect(),
+        None => failures_iter.cloned().collect(),
+    };
+
+    let total_count = filtered.len();
+    let limit = query.limit.unwrap_or(100).min(256);
+    let failures: Vec<_> = filtered.into_iter().take(limit).collect();
+
+    Json(FailuresResponse {
+        failures,
+        total_count,
+    })
 }
 
 #[cfg(test)]
