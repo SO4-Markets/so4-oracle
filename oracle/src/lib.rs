@@ -11,6 +11,7 @@ pub mod keeper;
 pub mod kv_store;
 pub mod log;
 pub mod network_config;
+pub mod price_loop;
 pub mod prices;
 pub mod pyth;
 pub mod retry;
