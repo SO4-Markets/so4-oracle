@@ -291,6 +291,20 @@ mod tests {
         assert_eq!(events.len(), 2);
     }
 
+    /// Verifies that an RPC fault in a getTransaction response is propagated
+    /// as SubmitError::Rpc(RpcError::RpcFault). Closes #427.
+    #[test]
+    fn parse_get_transaction_rpc_fault() {
+        let body = r#"{
+            "jsonrpc":"2.0","id":1,
+            "error":{"code":-32600,"message":"invalid request"}
+        }"#;
+        let err = parse_get_transaction_response(body).unwrap_err();
+        assert!(matches!(err, SubmitError::Rpc(RpcError::RpcFault { .. })));
+    }
+
+    /// Verifies that a NOT_FOUND getTransaction response is parsed without error.
+    /// Closes #428.
     #[test]
     fn parse_get_transaction_not_found() {
         let body = r#"{
@@ -301,6 +315,8 @@ mod tests {
         assert_eq!(r.status, "NOT_FOUND");
     }
 
+    /// Verifies that malformed JSON input returns a JsonError without panicking.
+    /// Closes #429.
     #[test]
     fn parse_get_transaction_malformed_json() {
         let err = parse_get_transaction_response("garbage").unwrap_err();
