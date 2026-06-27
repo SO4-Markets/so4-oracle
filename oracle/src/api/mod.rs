@@ -97,6 +97,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(public)
         .route("/oracle/status", get(admin::oracle_status))
         .route("/keeper/status", get(admin::keeper_status))
+        .route("/keeper/balance", get(admin::keeper_balance))
         .route("/metrics", get(admin::metrics))
         .route(
             "/oracle/failed-submissions",

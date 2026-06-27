@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::metrics::Metrics;
@@ -43,6 +44,8 @@ pub struct CycleStatus {
     pub last_price_cycle_at: Option<SystemTime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_keeper_cycle_at: Option<SystemTime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_keeper_cycle_latency_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -129,6 +132,7 @@ pub struct AppState {
     pub failures: Arc<Mutex<RingBuffer<FailedSubmission>>>,
     pub keeper_status: Arc<RwLock<KeeperStatus>>,
     pub metrics: Arc<Metrics>,
+    pub shutdown_token: CancellationToken,
 }
 
 impl AppState {
@@ -141,6 +145,7 @@ impl AppState {
             failures: Arc::new(Mutex::new(RingBuffer::default())),
             keeper_status: Arc::new(RwLock::new(KeeperStatus::default())),
             metrics: Metrics::new(),
+            shutdown_token: CancellationToken::new(),
         }
     }
 }
