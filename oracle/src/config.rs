@@ -503,6 +503,20 @@ mod tests {
     }
 
     #[test]
+    fn per_source_rejects_unsupported_source() {
+        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":["kraken"]}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { ref symbol, .. } if symbol == "BTC"));
+    }
+
+    #[test]
+    fn per_source_rejects_empty_source_name() {
+        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":[""]}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { ref symbol, .. } if symbol == "BTC"));
+    }
+
+    #[test]
     fn parse_current_testnet_shape() {
         let json = r#"[
             {"symbol":"TUSDC","display_symbol":"USDC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["fixed"],"fixed_price":"1000000000000000000000000000000","min_sources":1},
@@ -625,6 +639,43 @@ mod tests {
     fn validate_strkey_rejects_invalid_base32_chars() {
         let value = "0AUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCB";
         let result = validate_strkey("KEEPER_SECRET_KEY", value.to_string(), 'S');
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_strkey_accepts_g_prefixed() {
+        let value = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let result = validate_strkey("KEEPER_ACCOUNT_ID", value.to_string(), 'G');
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), value);
+    }
+
+    #[test]
+    fn validate_strkey_rejects_s_prefixed_for_account() {
+        let value = "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let result = validate_strkey("KEEPER_ACCOUNT_ID", value.to_string(), 'G');
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_hex_key_accepts_64_hex_chars() {
+        let value = "1111111111111111111111111111111111111111111111111111111111111111";
+        let result = validate_hex_key("KEEPER_PRIVATE_KEY", value.to_string(), 32);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), value);
+    }
+
+    #[test]
+    fn validate_hex_key_rejects_non_hex() {
+        let value = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+        let result = validate_hex_key("KEEPER_PRIVATE_KEY", value.to_string(), 32);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_hex_key_rejects_wrong_length() {
+        let value = "11111111111111111111111111111111";
+        let result = validate_hex_key("KEEPER_PRIVATE_KEY", value.to_string(), 32);
         assert!(result.is_err());
     }
 
