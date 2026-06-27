@@ -23,8 +23,8 @@ pub struct ErrorBody {
 
 #[derive(Debug)]
 pub struct ApiError {
-    status: StatusCode,
-    message: String,
+    pub status: StatusCode,
+    pub message: String,
 }
 
 impl ApiError {

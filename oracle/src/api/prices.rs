@@ -23,6 +23,33 @@ pub async fn health() -> Json<HealthResponse> {
 }
 
 pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResponse>, ApiError> {
+    // Check price cache has at least one cycle completed
+    {
+        let cache = state.price_cache.read().await;
+        if cache.prices.is_empty() {
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no_prices_cached",
+            ));
+        }
+    }
+
+    // Check price loop is not stale (must have run within 3x the loop interval)
+    {
+        let cycle = state.cycle_status.read().await;
+        let stale_threshold = state.config.price_loop_interval * 3;
+        let is_stale = cycle
+            .last_price_cycle_at
+            .map(|last| last.elapsed().unwrap_or_default() > stale_threshold)
+            .unwrap_or(true);
+        if is_stale {
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "price_loop_stale",
+            ));
+        }
+    }
+
     // Check RPC reachability
     let rpc_url = &state.config.stellar_rpc_url;
     let response = state
