@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use axum::body::Body;
 use axum::http::Request;
@@ -9,7 +9,7 @@ use wiremock::{MockServer, ResponseTemplate};
 
 use oracle::api::build_router;
 use oracle::config::{Config, Network, PriceFeedConfig, SecretString};
-use oracle::state::AppState;
+use oracle::state::{AppState, CachedPrice};
 
 fn test_config(rpc_url: &str, horizon_url: &str) -> Arc<Config> {
     Arc::new(Config {
@@ -46,6 +46,21 @@ fn test_config(rpc_url: &str, horizon_url: &str) -> Arc<Config> {
     })
 }
 
+fn sample_cached_price() -> CachedPrice {
+    CachedPrice {
+        token_address: "addr".to_string(),
+        symbol: "BTC".to_string(),
+        display_symbol: "BTC".to_string(),
+        min: 100,
+        max: 200,
+        median: 150,
+        timestamp: 0,
+        ledger_seq: 1,
+        sources_used: vec!["binance".to_string()],
+        signature: "sig".to_string(),
+    }
+}
+
 // #339 — GET /health returns 200 with {"status":"ok"}, no auth required
 #[tokio::test]
 async fn get_health_returns_200_with_status_ok() {
@@ -72,7 +87,8 @@ async fn get_health_returns_200_with_status_ok() {
     assert_eq!(json["status"], "ok");
 }
 
-// #340 — GET /ready returns 200 when RPC is reachable and keeper balance is healthy
+// #340 — GET /ready returns 200 when RPC is reachable, keeper balance is healthy,
+//        price cache is populated, and price loop is recent
 #[tokio::test]
 async fn get_ready_returns_200_when_healthy() {
     let rpc_mock = MockServer::start().await;
@@ -93,6 +109,19 @@ async fn get_ready_returns_200_when_healthy() {
 
     let config = test_config(&rpc_mock.uri(), &horizon_mock.uri());
     let state = Arc::new(AppState::new(config));
+
+    // Populate price cache
+    {
+        let mut cache = state.price_cache.write().await;
+        cache.prices.insert("BTC".to_string(), sample_cached_price());
+    }
+
+    // Set price cycle as recent
+    {
+        let mut cycle = state.cycle_status.write().await;
+        cycle.last_price_cycle_at = Some(SystemTime::now());
+    }
+
     let app = build_router(state);
 
     let response = app
@@ -133,4 +162,109 @@ async fn get_ready_returns_503_when_rpc_down() {
         .unwrap();
 
     assert_eq!(response.status(), 503);
+}
+
+// #435 — GET /ready returns 503 when price cache is empty
+#[tokio::test]
+async fn get_ready_returns_503_when_price_cache_empty() {
+    let rpc_mock = MockServer::start().await;
+    let horizon_mock = MockServer::start().await;
+
+    wiremock::Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&rpc_mock)
+        .await;
+
+    wiremock::Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "balances": [{"asset_type": "native", "balance": "100.0000000"}]
+        })))
+        .mount(&horizon_mock)
+        .await;
+
+    let config = test_config(&rpc_mock.uri(), &horizon_mock.uri());
+    let state = Arc::new(AppState::new(config));
+
+    // Set price cycle as recent (so staleness check passes)
+    {
+        let mut cycle = state.cycle_status.write().await;
+        cycle.last_price_cycle_at = Some(SystemTime::now());
+    }
+
+    // Leave price cache empty
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 503);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "no_prices_cached");
+}
+
+// #435 — GET /ready returns 503 when price loop is stale (last cycle too old)
+#[tokio::test]
+async fn get_ready_returns_503_when_price_loop_stale() {
+    let rpc_mock = MockServer::start().await;
+    let horizon_mock = MockServer::start().await;
+
+    wiremock::Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&rpc_mock)
+        .await;
+
+    wiremock::Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "balances": [{"asset_type": "native", "balance": "100.0000000"}]
+        })))
+        .mount(&horizon_mock)
+        .await;
+
+    let config = test_config(&rpc_mock.uri(), &horizon_mock.uri());
+    let state = Arc::new(AppState::new(config));
+
+    // Populate price cache (so empty check passes)
+    {
+        let mut cache = state.price_cache.write().await;
+        cache.prices.insert("BTC".to_string(), sample_cached_price());
+    }
+
+    // Set last_price_cycle_at to 30 seconds ago (stale, since interval is 1s * 3 = 3s)
+    {
+        let mut cycle = state.cycle_status.write().await;
+        cycle.last_price_cycle_at = Some(SystemTime::now() - Duration::from_secs(30));
+    }
+
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 503);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "price_loop_stale");
 }
