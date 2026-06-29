@@ -20,6 +20,8 @@ pub mod signing;
 pub mod state;
 pub mod stellar_rpc;
 pub mod submit;
+pub mod auth;
+pub mod ring_buffer;
 pub mod tx_builder;
 
 pub mod api;
