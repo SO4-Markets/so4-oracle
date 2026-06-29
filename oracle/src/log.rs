@@ -36,24 +36,17 @@ fn current_timestamp() -> String {
     format!("{}.{:03}", secs, millis)
 }
 
-macro_rules! info {
-    ($msg:expr, $ctx:expr) => {
-        crate::log::log_json("INFO", $msg, $ctx)
-    };
+/// Structured INFO log.
+pub fn info(message: &str, context: serde_json::Value) {
+    log_json("INFO", message, context);
 }
 
-macro_rules! error {
-    ($msg:expr, $ctx:expr) => {
-        crate::log::log_json("ERROR", $msg, $ctx)
-    };
+/// Structured ERROR log.
+pub fn error(message: &str, context: serde_json::Value) {
+    log_json("ERROR", message, context);
 }
 
-macro_rules! warn {
-    ($msg:expr, $ctx:expr) => {
-        crate::log::log_json("WARN", $msg, $ctx)
-    };
+/// Structured WARN log.
+pub fn warn(message: &str, context: serde_json::Value) {
+    log_json("WARN", message, context);
 }
-
-pub use error;
-pub use info;
-pub use warn;
