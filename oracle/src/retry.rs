@@ -1,4 +1,4 @@
-/// Retry an async fallible closure with exponential backoff.
+/// Retry an async fallible closure with exponential backoff (resolves #356).
 ///
 /// Doubles the delay after every failure, starting at `base_delay_ms`.
 /// Returns `Ok(T)` on the first success, or the last `Err(E)` after all
@@ -13,6 +13,10 @@ where
     Fut: std::future::Future<Output = Result<T, E>>,
     E: std::fmt::Debug,
 {
+    assert!(
+        max_attempts > 0,
+        "retry_with_backoff requires max_attempts >= 1"
+    );
     let mut delay_ms = base_delay_ms;
     let mut last_err: Option<E> = None;
 
@@ -30,7 +34,7 @@ where
         }
     }
 
-    Err(last_err.expect("max_attempts must be > 0"))
+    Err(last_err.expect("loop exhausted with max_attempts >= 1"))
 }
 
 fn log_retry_failure<E: std::fmt::Debug>(attempt: u32, max_attempts: u32, error: &E) {
@@ -105,6 +109,16 @@ mod tests {
 
         assert_eq!(result, Err("always fails"));
         assert_eq!(call_count.get(), 3);
+    }
+
+    #[test]
+    fn panics_when_max_attempts_is_zero() {
+        let result = std::panic::catch_unwind(|| {
+            block_on(async {
+                retry_with_backoff(|| async { Ok::<u32, &'static str>(1) }, 0, 100).await
+            })
+        });
+        assert!(result.is_err());
     }
 
     #[test]

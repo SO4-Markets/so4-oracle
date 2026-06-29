@@ -14,51 +14,60 @@ use std::path::Path;
 ///   - `symbol`, `stellar_address`, `sources` — oracle feed config
 ///   - `min`, `max`, `sources_used` — API price-lookup metadata
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct TokenConfig {
     /// On-chain token symbol, e.g. "TWBTC", "TETH". Used as the canonical key.
     pub symbol: String,
     /// External market symbol, e.g. "BTC", "ETH".
-    #[serde(default)]
     pub display_symbol: Option<String>,
     /// Stellar contract address for the token.
-    #[serde(default)]
     pub stellar_address: String,
     /// Price sources the oracle should query (e.g. `["binance", "coinbase"]`).
-    #[serde(default)]
     pub sources: Vec<String>,
     /// Optional Binance-specific symbol override (e.g. "BTCUSDT").
-    #[serde(default)]
     pub binance_symbol: Option<String>,
     /// Optional Coinbase-specific base currency override (e.g. "BTC").
-    #[serde(default)]
     pub coinbase_symbol: Option<String>,
     /// Optional Pyth feed ID.
-    #[serde(default)]
     pub pyth_feed_id: Option<String>,
     /// Fixed price in 1e30 precision, encoded as a decimal integer string.
-    #[serde(default)]
     pub fixed_price: Option<String>,
     /// Minimum source count required after source fetches and outlier filtering.
-    #[serde(default)]
-    pub min_sources: Option<usize>,
+    pub min_sources: usize,
     /// Maximum allowed source deviation from the median in basis points.
-    #[serde(default)]
-    pub max_deviation_bps: Option<u32>,
+    pub max_deviation_bps: u32,
     /// Source freshness limit.
-    #[serde(default)]
-    pub stale_after_seconds: Option<u64>,
+    pub stale_after_seconds: u64,
     /// Minimum movement before on-chain submission, in basis points.
-    #[serde(default)]
-    pub submit_threshold_bps: Option<u32>,
+    pub submit_threshold_bps: u32,
     /// Minimum price bound (used by the API server for display).
-    #[serde(default)]
     pub min: f64,
     /// Maximum price bound (used by the API server for display).
-    #[serde(default)]
     pub max: f64,
     /// Sources that contributed to the latest price (populated at runtime).
-    #[serde(default)]
     pub sources_used: Vec<String>,
+}
+
+impl Default for TokenConfig {
+    fn default() -> Self {
+        Self {
+            symbol: String::new(),
+            display_symbol: None,
+            stellar_address: String::new(),
+            sources: vec![],
+            binance_symbol: None,
+            coinbase_symbol: None,
+            pyth_feed_id: None,
+            fixed_price: None,
+            min_sources: 2,
+            max_deviation_bps: 100,
+            stale_after_seconds: 60,
+            submit_threshold_bps: 10,
+            min: 0.0,
+            max: 0.0,
+            sources_used: vec![],
+        }
+    }
 }
 
 /// Canonical token address for lookups.  Returns `stellar_address` if set,
@@ -74,22 +83,6 @@ impl TokenConfig {
 
     pub fn display_symbol(&self) -> &str {
         self.display_symbol.as_deref().unwrap_or(&self.symbol)
-    }
-
-    pub fn min_sources(&self) -> usize {
-        self.min_sources.unwrap_or(2)
-    }
-
-    pub fn max_deviation_bps(&self) -> u32 {
-        self.max_deviation_bps.unwrap_or(100)
-    }
-
-    pub fn stale_after_seconds(&self) -> u64 {
-        self.stale_after_seconds.unwrap_or(60)
-    }
-
-    pub fn submit_threshold_bps(&self) -> u32 {
-        self.submit_threshold_bps.unwrap_or(10)
     }
 }
 
@@ -152,6 +145,17 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
         }
         // stellar_address and sources are optional for the API server path,
         // but required for the oracle path — the oracle validates separately.
+        for source in &token.sources {
+            match source.as_str() {
+                "binance" | "coinbase" | "pyth" | "fixed" => {}
+                other => {
+                    return Err(ConfigError::InvalidToken {
+                        symbol: token.symbol.clone(),
+                        reason: format!("unsupported source '{other}'"),
+                    });
+                }
+            }
+        }
     }
 
     Ok(tokens)
@@ -252,5 +256,24 @@ mod tests {
         assert!(map.contains_key("btc"));
         assert!(map.contains_key("eth"));
         assert!(!map.contains_key("BTC"));
+    }
+
+    #[test]
+    fn build_lookup_returns_correct_references() {
+        let tokens = parse_token_configs(VALID_JSON).unwrap();
+        let map = build_lookup(&tokens);
+        assert_eq!(map.get("btc").unwrap().symbol, "BTC");
+        assert_eq!(map.get("eth").unwrap().symbol, "ETH");
+    }
+
+    #[test]
+    fn build_lookup_keys_are_lowercased_symbol() {
+        let json = r#"[{"symbol":"MIXEDcase","sources":["binance"]},{"symbol":"UPPER","sources":["fixed"],"fixed_price":"1"}]"#;
+        let tokens = parse_token_configs(json).unwrap();
+        let map = build_lookup(&tokens);
+        assert!(map.contains_key("mixedcase"));
+        assert!(map.contains_key("upper"));
+        assert!(!map.contains_key("MIXEDcase"));
+        assert!(!map.contains_key("UPPER"));
     }
 }

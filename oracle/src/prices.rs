@@ -109,14 +109,14 @@ pub fn compute_confidence_interval_with_spread(
         let mid = compute_median_allow_single(&sorted)?;
         let spread = mid.saturating_mul(spread_bps as i128) / 10_000;
         Some(PriceProps {
-            min: mid - spread,
-            max: mid + spread,
+            min: mid.saturating_sub(spread).max(0),
+            max: mid.saturating_add(spread),
         })
     }
 }
 
 /// Interpolating percentile (nearest-rank method).
-fn percentile(sorted: &[i128], p: u8) -> i128 {
+pub fn percentile(sorted: &[i128], p: u8) -> i128 {
     debug_assert!(!sorted.is_empty());
     if sorted.len() == 1 || p == 0 {
         return sorted[0];
@@ -135,7 +135,7 @@ fn percentile(sorted: &[i128], p: u8) -> i128 {
     let frac = idx - lo as f64;
     let lo_val = sorted[lo] as f64;
     let hi_val = sorted[hi] as f64;
-    (lo_val + frac * (hi_val - lo_val)) as i128
+    (lo_val + frac * (hi_val - lo_val) + 0.5).floor() as i128
 }
 
 #[derive(Debug)]
@@ -235,7 +235,7 @@ pub fn compute_median_allow_single(prices: &[i128]) -> Option<i128> {
     }
 }
 
-fn deviation_bps(price: i128, median: i128) -> f64 {
+pub fn deviation_bps(price: i128, median: i128) -> f64 {
     if median == 0 {
         return f64::INFINITY;
     }
@@ -271,17 +271,18 @@ mod tests {
     fn two_sources_uses_average_median_equal_spread() {
         let prices = vec![1000i128, 2000];
         let p = compute_confidence_interval(&prices).unwrap();
-        let mid = 1500i128;
-        assert_eq!(p.min, mid - mid / 100);
-        assert_eq!(p.max, mid + mid / 100);
+
+        assert_eq!(p.min, 1485, "Expected mid (1500) - 1% (15)");
+        assert_eq!(p.max, 1515, "Expected mid (1500) + 1% (15)");
     }
 
     #[test]
     fn single_source_uses_fallback_equal_spread() {
         let prices = vec![5000i128];
         let p = compute_confidence_interval(&prices).unwrap();
-        assert_eq!(p.min, 5000 - 50);
-        assert_eq!(p.max, 5000 + 50);
+
+        assert_eq!(p.min, 4950, "Expected 5000 - 1% spread (50)");
+        assert_eq!(p.max, 5050, "Expected 5000 + 1% spread (50)");
     }
 
     #[test]
@@ -412,6 +413,16 @@ mod tests {
     }
 
     #[test]
+    fn fallback_spread_with_large_bps_does_not_underflow() {
+        let prices = vec![100i128, 200];
+        // spread_bps=20000 means 200%, so spread=200 and mid=150
+        // mid - spread = -50 would underflow; saturating_sub should clamp to 0
+        let p = compute_confidence_interval_with_spread(&prices, 20_000).unwrap();
+        assert!(p.min >= 0, "min should not be negative, got {}", p.min);
+        assert!(p.max >= p.min);
+    }
+
+    #[test]
     fn full_aggregation_pipeline_even_sources() {
         // Simulate a full price aggregation with even number of sources
         let prices = [45000i128, 45100, 44900, 45050];
@@ -498,5 +509,44 @@ mod tests {
         let prices = [1000];
         let median = compute_median(&prices);
         assert_eq!(median, None);
+    }
+
+    #[test]
+    fn aggregate_prices_fails_when_filtered_lt_min() {
+        let sources = vec![
+            "binance".to_string(),
+            "coinbase".to_string(),
+            "pyth".to_string(),
+        ];
+        let result = aggregate_prices(&[100, 101, 1000], &sources, 3, 200);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("insufficient sources after filtering"));
+    }
+
+    #[test]
+    fn test_issue_380_explicit_percentile_validation() {
+        // Input of 3 sources
+        let prices = vec![100i128, 200, 300];
+
+        // If it mistakenly used the fallback spread (100 bps / 1%),
+        // the spread around the median (200) would be:
+        // mid = 200, spread = 200 * 100 / 10_000 = 2
+        // fallback_min = 198, fallback_max = 202
+
+        let p = compute_confidence_interval(&prices).unwrap();
+
+        // Assert that the results match the 10th/90th percentile values,
+        // which completely validates that we are NOT using the spread fallback.
+        assert_eq!(
+            p.min, 120,
+            "Should use percentile min (120), not fallback spread min (198)"
+        );
+        assert_eq!(
+            p.max, 280,
+            "Should use percentile max (280), not fallback spread max (202)"
+        );
+
+        assert_ne!(p.min, 198);
+        assert_ne!(p.max, 202);
     }
 }

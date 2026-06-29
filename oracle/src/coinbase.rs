@@ -139,4 +139,35 @@ mod tests {
         let err = parse_coinbase_http_result(Err("timeout".to_string())).unwrap_err();
         assert_eq!(err, CoinbasePriceError::NetworkError("timeout".to_string()));
     }
+
+    // #363 — verify the USD rate is extracted and scaled to 1e30 precision
+    #[test]
+    fn test_coinbase_parse_extracts_usd_rate_correctly() {
+        let body = r#"{
+            "data": {
+                "currency": "XLM",
+                "rates": {
+                    "USD": "1.0",
+                    "EUR": "0.9"
+                }
+            }
+        }"#;
+        let result = parse_coinbase_response_body(body).unwrap();
+        assert_eq!(result, FLOAT_PRECISION);
+    }
+
+    // #364 — a response body without a USD key must return MissingUsdRate
+    #[test]
+    fn test_coinbase_parse_rejects_missing_usd_rate() {
+        let body = r#"{
+            "data": {
+                "currency": "XLM",
+                "rates": {
+                    "EUR": "0.9"
+                }
+            }
+        }"#;
+        let err = parse_coinbase_response_body(body).unwrap_err();
+        assert_eq!(err, CoinbasePriceError::MissingUsdRate);
+    }
 }

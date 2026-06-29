@@ -13,6 +13,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
 
+pub mod admin;
 pub mod prices;
 
 #[derive(Debug, Serialize)]
@@ -22,8 +23,8 @@ pub struct ErrorBody {
 
 #[derive(Debug)]
 pub struct ApiError {
-    status: StatusCode,
-    message: String,
+    pub status: StatusCode,
+    pub message: String,
 }
 
 impl ApiError {
@@ -94,6 +95,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/health", get(prices::health))
         .route("/ready", get(prices::ready))
         .merge(public)
+        .route("/oracle/status", get(admin::oracle_status))
+        .route("/keeper/status", get(admin::keeper_status))
+        .route("/keeper/balance", get(admin::keeper_balance))
+        .route("/metrics", get(admin::metrics))
         .route(
             "/oracle/failed-submissions",
             get(prices::failed_submissions),

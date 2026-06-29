@@ -7,7 +7,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-/// Returns the process-wide shared HTTP client, initializing it on first use.
+/// Returns the process-wide shared HTTP client, initializing it on first use (resolves #355).
 pub fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {

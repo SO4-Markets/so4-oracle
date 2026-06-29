@@ -50,16 +50,15 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  worker-build:
-    name: worker-build
+  build:
+    name: cargo build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: oracle
-      - run: cargo install -q "worker-build@^0.8"
-      - run: cd oracle && worker-build --release --panic-unwind
+          workspaces: |
+            .
+            oracle
+      - run: cargo build --release --all

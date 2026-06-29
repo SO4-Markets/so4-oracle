@@ -164,6 +164,60 @@ mod tests {
         assert!(parse_price_to_precision("abc").is_err());
     }
 
+    // #345 — rejects negatives and multiple dots
+    #[test]
+    fn parse_price_rejects_negative() {
+        let err = parse_price_to_precision("-1.5").unwrap_err();
+        assert!(matches!(err, BinancePriceError::PriceParseError(_)));
+    }
+
+    #[test]
+    fn parse_price_rejects_multiple_dots() {
+        let err = parse_price_to_precision("1.2.3").unwrap_err();
+        assert!(matches!(err, BinancePriceError::PriceParseError(_)));
+    }
+
+    #[test]
+    fn parse_price_truncates_fractional_part_to_30_digits() {
+        // 40 fractional digits should be truncated to 30
+        let result =
+            parse_price_to_precision("1.1234567890123456789012345678901234567890").unwrap();
+        // Only first 30 digits used: 123456789012345678901234567890
+        let expected_frac = 123_456_789_012_345_678_901_234_567_890i128;
+        assert_eq!(result, FLOAT_PRECISION + expected_frac);
+    }
+
+    #[test]
+    fn parse_price_truncates_fractional_with_leading_zeros() {
+        // 31 fractional digits, first 30 are zeros; truncation loses the trailing 5
+        let result = parse_price_to_precision("1.0000000000000000000000000000005").unwrap();
+        assert_eq!(result, FLOAT_PRECISION);
+    }
+
+    #[test]
+    fn parse_price_pads_fractional_to_30_digits() {
+        // 2 fractional digits padded to 30 zeros
+        let result = parse_price_to_precision("1.5").unwrap();
+        assert_eq!(result, FLOAT_PRECISION + (FLOAT_PRECISION / 2));
+    }
+
+    #[test]
+    fn parse_price_exact_30_fractional_digits() {
+        // Exactly 30 fractional digits, no truncation or padding needed
+        let result = parse_price_to_precision("1.123456789012345678901234567890").unwrap();
+        let expected_frac = 123_456_789_012_345_678_901_234_567_890i128;
+        assert_eq!(result, FLOAT_PRECISION + expected_frac);
+    }
+
+    #[test]
+    fn parse_price_correct_scaling_to_1e30() {
+        assert_eq!(parse_price_to_precision("1").unwrap(), FLOAT_PRECISION);
+        assert_eq!(
+            parse_price_to_precision("0.5").unwrap(),
+            FLOAT_PRECISION / 2
+        );
+    }
+
     #[test]
     fn parse_ticker_response_filters_symbols() {
         let body = r#"[{"symbol":"BTCUSDT","price":"100.25"},{"symbol":"ETHUSDT","price":"10.5"}]"#;
