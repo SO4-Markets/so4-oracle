@@ -40,5 +40,6 @@ digest = "0.10"
 futures = "0.3"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+openssl = { version = "0.10", features = ["vendored"] }
 tower = { version = "0.5", features = ["util"] }
