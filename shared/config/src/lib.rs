@@ -89,7 +89,7 @@ impl TokenConfig {
 // ── Loading helpers ──────────────────────────────────────────────────────────
 
 /// Error type for configuration loading.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ConfigError {
     /// The `PRICE_FEED_CONFIG` env var is missing.
     MissingEnvVar,
