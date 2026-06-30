@@ -328,8 +328,8 @@ mod tests {
         assert_eq!(cached.token_address, "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES");
         assert_eq!(cached.symbol, "TUSDC");
         assert_eq!(cached.display_symbol, "USDC");
-        assert_eq!(cached.min, 1_000_000_000_000_000_000_000_000_000_000);
-        assert_eq!(cached.max, 1_000_000_000_000_000_000_000_000_000_000);
+        assert_eq!(cached.min, 990_000_000_000_000_000_000_000_000_000);
+        assert_eq!(cached.max, 1_010_000_000_000_000_000_000_000_000_000);
         assert_eq!(cached.median, 1_000_000_000_000_000_000_000_000_000_000);
         assert_eq!(cached.ledger_seq, 123);
         assert_eq!(cached.sources_used, vec!["fixed"]);

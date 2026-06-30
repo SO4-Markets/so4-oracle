@@ -45,36 +45,6 @@ pub fn build_price_message(
 }
 
 /// Sign a price update message using the ed25519 keeper key.
-///
-/// Layout: `network_passphrase || ledger_seq || token_strkey || min || max || timestamp`
-///
-/// Data types:
-/// - `network_passphrase`: UTF-8 bytes
-/// - `ledger_seq`: u32 Big-Endian
-/// - `token_strkey`: UTF-8 bytes
-/// - `min`: i128 Big-Endian
-/// - `max`: i128 Big-Endian
-/// - `timestamp`: u64 Big-Endian
-pub fn build_price_message(
-    network_passphrase: &str,
-    ledger_seq: u32,
-    token_strkey: &str,
-    min: i128,
-    max: i128,
-    timestamp: u64,
-) -> Vec<u8> {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(network_passphrase.as_bytes());
-    payload.extend_from_slice(&ledger_seq.to_be_bytes());
-    payload.extend_from_slice(token_strkey.as_bytes());
-    payload.extend_from_slice(&min.to_be_bytes());
-    payload.extend_from_slice(&max.to_be_bytes());
-    payload.extend_from_slice(&timestamp.to_be_bytes());
-    payload
-}
-
-/// Sign a price update message using the ed25519 keeper key.
-
 //Fix size implementation for i128 and u64 to ensure correct byte representation
 pub fn sign_price(
     private_key_hex: &str,
@@ -94,20 +64,6 @@ pub fn sign_price(
     let signing_key = SigningKey::from_bytes(&key_array);
 
     let payload = build_price_message(network_passphrase, ledger_seq, token_strkey, min, max, timestamp);
-    let signature = signing_key.sign(&payload);
-
-    Ok(signature)
-    // 2. Construct the byte layout
-    let payload = build_price_message(
-        network_passphrase,
-        ledger_seq,
-        token_strkey,
-        min,
-        max,
-        timestamp,
-    );
-
-    // 3. Sign the payload
     let signature = signing_key.sign(&payload);
 
     Ok(signature)
