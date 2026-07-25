@@ -31,6 +31,7 @@ pub async fn check_keeper_balance(cfg: &KeeperBalanceConfig) -> Result<i64, RpcE
         return Err(RpcError::BalanceBelowMinimum {
             balance_xlm: xlm,
             min_xlm: cfg.min_balance_xlm,
+            balance_stroops: stroops,
         });
     }
 
