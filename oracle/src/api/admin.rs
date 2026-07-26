@@ -130,12 +130,12 @@ pub async fn keeper_balance(
         }
         Err(crate::stellar_rpc::RpcError::BalanceBelowMinimum {
             balance_xlm,
+            balance_stroops,
             ..
         }) => {
-            let stroops = (balance_xlm * crate::keeper::XLM_IN_STROOPS as f64) as i64;
             Ok(Json(BalanceResponse {
                 account_id: state.config.keeper_account_id.clone(),
-                balance_stroops: stroops,
+                balance_stroops,
                 balance_xlm,
                 min_balance_xlm: state.config.min_keeper_balance_xlm,
                 is_funded: false,
