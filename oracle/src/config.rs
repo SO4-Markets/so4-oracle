@@ -589,7 +589,7 @@ mod tests {
 
     const VALID_JSON: &str = r#"[
         {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance","coinbase"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC"},
-        {"symbol":"ETH","stellar_address":"CETHADDR","sources":["binance"],"binance_symbol":"ETHUSDT"}
+        {"symbol":"ETH","stellar_address":"CETHADDR","sources":["binance"],"binance_symbol":"ETHUSDT","min_sources":1}
     ]"#;
 
     #[test]
@@ -710,8 +710,8 @@ mod tests {
     #[test]
     fn per_token_source_list_preserved() {
         let json = r#"[
-            {"symbol":"BTC","stellar_address":"CBADDR","sources":["binance"],"binance_symbol":"BTCUSDT"},
-            {"symbol":"ETH","stellar_address":"CEADDR","sources":["coinbase"],"coinbase_symbol":"ETH"}
+            {"symbol":"BTC","stellar_address":"CBADDR","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1},
+            {"symbol":"ETH","stellar_address":"CEADDR","sources":["coinbase"],"coinbase_symbol":"ETH","min_sources":1}
         ]"#;
         let cfg = parse_price_feed_config(json).unwrap();
         assert_eq!(cfg.tokens[0].sources, vec!["binance"]);
@@ -831,7 +831,7 @@ mod tests {
 
     #[test]
     fn load_price_feed_config_uses_env_when_set() {
-        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":["binance"],"binance_symbol":"BTCUSDT"}]"#;
+        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1}]"#;
         let cfg = load_price_feed_config(Some(json)).unwrap();
         assert_eq!(cfg.tokens.len(), 1);
         assert_eq!(cfg.tokens[0].symbol, "BTC");

@@ -116,33 +116,50 @@ pub struct CycleSummary {
     pub errors: usize,
 }
 
+fn is_parse_error(err: &str) -> bool {
+    err.contains("failed to parse result")
+        || err.contains("expected u32 value")
+        || err.contains("expected vector")
+        || err.contains("expected array")
+        || err.contains("expected ")
+}
+
 async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, String> {
     let prices = state.price_cache.read().await.prices.clone();
     if prices.is_empty() {
         return Err("No prices available in cache".to_string());
     }
 
-    let order_keys =
-        get_pending_keys(&state, "get_order_count", "get_order_keys")
-            .await
-            .unwrap_or_else(|e| {
-                warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
-                Vec::new()
-            });
-    let deposit_keys =
-        get_pending_keys(&state, "get_deposit_count", "get_deposit_keys")
-            .await
-            .unwrap_or_else(|e| {
-                warn!(error = %e, "get_pending_keys(deposits) failed, skipping deposits this cycle");
-                Vec::new()
-            });
-    let withdrawal_keys =
-        get_pending_keys(&state, "get_withdrawal_count", "get_withdrawal_keys")
-            .await
-            .unwrap_or_else(|e| {
-                warn!(error = %e, "get_pending_keys(withdrawals) failed, skipping withdrawals this cycle");
-                Vec::new()
-            });
+    let order_keys = match get_pending_keys(&state, "get_order_count", "get_order_keys").await {
+        Ok(keys) => keys,
+        Err(e) => {
+            if !is_parse_error(&e) {
+                return Err(e);
+            }
+            warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
+            Vec::new()
+        }
+    };
+    let deposit_keys = match get_pending_keys(&state, "get_deposit_count", "get_deposit_keys").await {
+        Ok(keys) => keys,
+        Err(e) => {
+            if !is_parse_error(&e) {
+                return Err(e);
+            }
+            warn!(error = %e, "get_pending_keys(deposits) failed, skipping deposits this cycle");
+            Vec::new()
+        }
+    };
+    let withdrawal_keys = match get_pending_keys(&state, "get_withdrawal_count", "get_withdrawal_keys").await {
+        Ok(keys) => keys,
+        Err(e) => {
+            if !is_parse_error(&e) {
+                return Err(e);
+            }
+            warn!(error = %e, "get_pending_keys(withdrawals) failed, skipping withdrawals this cycle");
+            Vec::new()
+        }
+    };
 
     {
         let mut keeper_status = state.keeper_status.write().await;
@@ -537,6 +554,7 @@ async fn set_prices_on_chain(
         vec![prices_scval],
         1_000_000,
         sequence,
+        None,
     )?;
 
     let signed_xdr = tx_builder::sign_transaction(
@@ -580,6 +598,7 @@ async fn execute_handler(
         ],
         KEEPER_TX_FEE,
         sequence,
+        None,
     )?;
 
     let signed_xdr = tx_builder::sign_transaction(

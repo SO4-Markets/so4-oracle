@@ -402,19 +402,29 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
     })
     .await;
 
+    assert!(ready_ok.is_ok(), "ready did not become healthy in time");
+
+    // Also wait up to 5 seconds for a sendTransaction request to be recorded by the mock server,
+    // to ensure the keeper cycle has run successfully after prices became available.
+    let send_tx_ok = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let requests = rpc_mock.received_requests().await.unwrap_or_default();
+            let has_send_tx = requests.iter().any(|req| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                body["method"] == "sendTransaction"
+            });
+            if has_send_tx {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+
     state.shutdown_token.cancel();
     let _ = tokio::join!(price_handle, keeper_handle);
 
-    assert!(ready_ok.is_ok(), "ready did not become healthy in time");
-
-    let requests = rpc_mock.received_requests().await.unwrap_or_default();
-    assert!(
-        requests.iter().any(|req| {
-            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
-            body["method"] == "sendTransaction"
-        }),
-        "keeper did not submit a transaction"
-    );
+    assert!(send_tx_ok.is_ok(), "keeper did not submit a transaction");
 }
 
 // #340 — GET /ready returns 503 when RPC is unreachable

@@ -405,8 +405,11 @@ async fn keeper_cycle_freezes_order_when_budget_exceeded_and_freeze_succeeds() {
     let mock_server = MockServer::start().await;
     let rpc_url = mock_server.uri();
 
+    let tx_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tx_counter_clone = tx_counter.clone();
+
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .respond_with(|req: &Request| {
+        .respond_with(move |req: &Request| {
             let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
             let method = body["method"].as_str().unwrap_or("");
 
@@ -455,11 +458,17 @@ async fn keeper_cycle_freezes_order_when_budget_exceeded_and_freeze_succeeds() {
                     }))
                 }
                 "sendTransaction" => {
+                    let count = tx_counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let hash = match count {
+                        0 => "set_prices_hash_0000000000000000000000000000000000000000000000",
+                        1 => "execute_order_hash_111111111111111111111111111111111111111111",
+                        _ => "freeze_order_hash_222222222222222222222222222222222222222222",
+                    };
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({
                         "jsonrpc": "2.0", "id": 1,
                         "result": {
                             "status": "PENDING",
-                            "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                            "hash": hash
                         }
                     }))
                 }
@@ -467,9 +476,7 @@ async fn keeper_cycle_freezes_order_when_budget_exceeded_and_freeze_succeeds() {
                     let body_obj: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
                     let tx_hash = body_obj["params"]["hash"].as_str().unwrap_or("");
 
-                    // First call returns error with "Budget, ExceededLimit"
-                    // Second call (from freeze_order) returns success
-                    if tx_hash == "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233" {
+                    if tx_hash.starts_with("execute_order_hash") {
                         ResponseTemplate::new(200).set_body_json(serde_json::json!({
                             "jsonrpc": "2.0", "id": 1,
                             "result": {
@@ -584,6 +591,14 @@ async fn keeper_cycle_rejects_non_hex_order_key() {
                         "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                     }
                 })),
+                "getTransaction" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": {
+                        "status": "SUCCESS",
+                        "ledger": 50001,
+                        "diagnosticEventsXdr": []
+                    }
+                })),
                 _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "jsonrpc": "2.0", "id": 1,
                     "error": {"code": -1, "message": "unknown method"}
@@ -621,21 +636,16 @@ async fn keeper_cycle_rejects_non_hex_order_key() {
 // ── #516: get_account_sequence error branches ─────────────────────────────────
 
 /// Helper: state with one cached price pointing at the mock RPC.
-fn state_with_price(rpc_url: &str) -> Arc<AppState> {
+async fn state_with_price(rpc_url: &str) -> Arc<AppState> {
     let config = test_config(rpc_url, "http://127.0.0.1:9");
     let state = Arc::new(AppState::new(config));
     // Pre-populate the price cache so the cycle reaches get_account_sequence.
-    // We do this synchronously via a blocking write; tests are single-threaded
-    // at this point so the lock is uncontested.
-    let rt = tokio::runtime::Handle::current();
-    rt.block_on(async {
-        state
-            .price_cache
-            .write()
-            .await
-            .prices
-            .insert("TUSDC".to_string(), test_cached_price());
-    });
+    state
+        .price_cache
+        .write()
+        .await
+        .prices
+        .insert("TUSDC".to_string(), test_cached_price());
     state
 }
 
@@ -693,7 +703,7 @@ async fn get_account_sequence_rpc_error_field_propagates() {
         })
     );
 
-    let state = state_with_price(&server.uri());
+    let state = state_with_price(&server.uri()).await;
     let result = oracle::keeper_loop::run_keeper_cycle(state).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("getAccount error"));
@@ -711,7 +721,7 @@ async fn get_account_sequence_missing_sequence_field_propagates() {
         })
     );
 
-    let state = state_with_price(&server.uri());
+    let state = state_with_price(&server.uri()).await;
     let result = oracle::keeper_loop::run_keeper_cycle(state).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Missing sequence"));
@@ -728,7 +738,7 @@ async fn get_account_sequence_non_numeric_sequence_propagates() {
         })
     );
 
-    let state = state_with_price(&server.uri());
+    let state = state_with_price(&server.uri()).await;
     let result = oracle::keeper_loop::run_keeper_cycle(state).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("failed to parse sequence"));
@@ -770,7 +780,7 @@ async fn simulate_contract_call_rpc_error_field_propagates() {
         })
     );
 
-    let state = state_with_price(&server.uri());
+    let state = state_with_price(&server.uri()).await;
     let result = oracle::keeper_loop::run_keeper_cycle(state).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Simulation error"));
@@ -788,7 +798,7 @@ async fn simulate_contract_call_missing_result_field_propagates() {
         })
     );
 
-    let state = state_with_price(&server.uri());
+    let state = state_with_price(&server.uri()).await;
     let result = oracle::keeper_loop::run_keeper_cycle(state).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Missing result"));
