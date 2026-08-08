@@ -3,6 +3,7 @@ name = "oracle"
 version = "0.1.0"
 edition = "2021"
 authors = ["0xsteins"]
+license = "MIT"
 
 [lints]
 workspace = true
@@ -42,3 +43,4 @@ futures = "0.3"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
+predicates = "3.0"

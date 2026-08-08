@@ -5,8 +5,18 @@ use wiremock::{MockServer, Request, ResponseTemplate};
 
 mod common;
 
-use common::test_config;
+use common::{fixed_token, test_config_with_tokens};
 use oracle::state::{AppState, CachedPrice};
+
+/// Cache key for `test_cached_price()`/`fresh_cached_price()` — must equal the
+/// matching token's `lookup_key()`, which lowercases the symbol.
+const TUSDC_KEY: &str = "tusdc";
+
+/// Token config matching `TUSDC_KEY`, for keeper-cycle tests that rely on the
+/// per-token freshness filter in `execute_keeper_cycle` (#530) finding a match.
+fn test_token() -> shared_config::TokenConfig {
+    fixed_token("TUSDC", "")
+}
 
 fn test_cached_price() -> CachedPrice {
     CachedPrice {
@@ -24,12 +34,27 @@ fn test_cached_price() -> CachedPrice {
     }
 }
 
+/// Same as `test_cached_price()` but timestamped "now" so it survives the
+/// per-token freshness filter in `execute_keeper_cycle` (#530).
+fn fresh_cached_price() -> CachedPrice {
+    CachedPrice {
+        timestamp: oracle::current_timestamp_secs(),
+        ..test_cached_price()
+    }
+}
+
+/// Deterministic 64-hex transaction hash for the `nth` submission a test's mock
+/// RPC answers, so `getTransaction` can be routed per submission.
+fn submission_hash(nth: usize) -> String {
+    format!("{nth:0>64}")
+}
+
 #[tokio::test]
 async fn empty_price_cache_returns_error_and_no_rpc_calls() {
     let mock_server = MockServer::start().await;
     let rpc_url = mock_server.uri();
 
-    let config = test_config(&rpc_url, "http://127.0.0.1:9");
+    let config = test_config_with_tokens(&rpc_url, "http://127.0.0.1:9", vec![test_token()]);
     let state = Arc::new(AppState::new(config));
 
     // Don't populate the price cache — leave it empty.
@@ -39,8 +64,8 @@ async fn empty_price_cache_returns_error_and_no_rpc_calls() {
     assert!(result.is_err(), "expected Err for empty price cache");
     assert_eq!(
         result.unwrap_err(),
-        "No prices available in cache",
-        "error must match the exact string in execute_keeper_cycle line 89"
+        "No fresh prices available in cache (cache size: 0, all stale)",
+        "error must match the exact string in execute_keeper_cycle"
     );
 
     // Verify no RPC calls were made — the function short-circuits before any network I/O.
@@ -77,14 +102,14 @@ async fn mock_rpc_empty_cycle_skips_submission() {
         .mount(&mock_server)
         .await;
 
-    let config = test_config(&rpc_url, "http://127.0.0.1:9");
+    let config = test_config_with_tokens(&rpc_url, "http://127.0.0.1:9", vec![test_token()]);
     let state = Arc::new(AppState::new(config));
 
     {
         let mut cache = state.price_cache.write().await;
         cache
             .prices
-            .insert("TUSDC".to_string(), test_cached_price());
+            .insert(TUSDC_KEY.to_string(), fresh_cached_price());
     }
 
     let result = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state)).await;
@@ -111,26 +136,25 @@ async fn mock_rpc_rpc_failure_continues() {
         .mount(&mock_server)
         .await;
 
-    let config = test_config(&rpc_url, "http://127.0.0.1:9");
+    let config = test_config_with_tokens(&rpc_url, "http://127.0.0.1:9", vec![test_token()]);
     let state = Arc::new(AppState::new(config));
 
     {
         let mut cache = state.price_cache.write().await;
         cache
             .prices
-            .insert("TUSDC".to_string(), test_cached_price());
+            .insert(TUSDC_KEY.to_string(), fresh_cached_price());
     }
 
     let result = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state)).await;
 
-    assert!(result.is_err(), "keeper cycle should fail on RPC error");
-    let err = result.err().unwrap();
-    assert!(
-        err.contains("RPC")
-            || err.contains("request failed")
-            || err.contains("parse")
-            || err.contains("status")
-    );
+    // A failing pending-work lookup is logged and skipped rather than aborting
+    // the cycle, so the keeper keeps running across transient RPC outages.
+    let summary = result.expect("keeper cycle should survive an RPC failure");
+    assert_eq!(summary.orders_executed, 0);
+    assert_eq!(summary.deposits_executed, 0);
+    assert_eq!(summary.withdrawals_executed, 0);
+    assert_eq!(summary.errors, 0);
 }
 
 #[tokio::test]
@@ -215,14 +239,14 @@ async fn mock_rpc_full_keeper_cycle_with_pending_orders() {
         .mount(&mock_server)
         .await;
 
-    let config = test_config(&rpc_url, "http://127.0.0.1:9");
+    let config = test_config_with_tokens(&rpc_url, "http://127.0.0.1:9", vec![test_token()]);
     let state = Arc::new(AppState::new(config));
 
     {
         let mut cache = state.price_cache.write().await;
         cache
             .prices
-            .insert("TUSDC".to_string(), test_cached_price());
+            .insert(TUSDC_KEY.to_string(), fresh_cached_price());
     }
 
     let result = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state)).await;
@@ -325,14 +349,14 @@ async fn keeper_cycle_retries_transient_get_account_sequence_failure() {
         .mount(&mock_server)
         .await;
 
-    let config = test_config(&rpc_url, "http://127.0.0.1:9");
+    let config = test_config_with_tokens(&rpc_url, "http://127.0.0.1:9", vec![test_token()]);
     let state = Arc::new(AppState::new(config));
 
     {
         let mut cache = state.price_cache.write().await;
         cache
             .prices
-            .insert("TUSDC".to_string(), test_cached_price());
+            .insert(TUSDC_KEY.to_string(), fresh_cached_price());
     }
 
     let result = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state)).await;
@@ -405,8 +429,9 @@ async fn keeper_cycle_freezes_order_when_budget_exceeded_and_freeze_succeeds() {
     let mock_server = MockServer::start().await;
     let rpc_url = mock_server.uri();
 
-    let tx_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let tx_counter_clone = tx_counter.clone();
+    // sendTransaction hands back a distinct hash per submission so getTransaction
+    // can tell set_prices, execute_order and freeze_order apart.
+    let submissions = Arc::new(AtomicUsize::new(0));
 
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .respond_with(move |req: &Request| {
@@ -458,34 +483,28 @@ async fn keeper_cycle_freezes_order_when_budget_exceeded_and_freeze_succeeds() {
                     }))
                 }
                 "sendTransaction" => {
-                    let count = tx_counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let hash = match count {
-                        0 => "set_prices_hash_0000000000000000000000000000000000000000000000",
-                        1 => "execute_order_hash_111111111111111111111111111111111111111111",
-                        _ => "freeze_order_hash_222222222222222222222222222222222222222222",
-                    };
+                    let nth = submissions.fetch_add(1, Ordering::SeqCst);
+                    // 0 = set_prices, 1 = execute_order, 2 = freeze_order
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({
                         "jsonrpc": "2.0", "id": 1,
-                        "result": {
-                            "status": "PENDING",
-                            "hash": hash
-                        }
+                        "result": { "status": "PENDING", "hash": submission_hash(nth) }
                     }))
                 }
                 "getTransaction" => {
                     let body_obj: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
                     let tx_hash = body_obj["params"]["hash"].as_str().unwrap_or("");
 
-                    if tx_hash.starts_with("execute_order_hash") {
+                    // The execute_order submission (the second one) fails with a
+                    // budget overrun; that is what drives the keeper into the
+                    // freeze path. set_prices and freeze_order both succeed.
+                    if tx_hash == submission_hash(1) {
                         ResponseTemplate::new(200).set_body_json(serde_json::json!({
                             "jsonrpc": "2.0", "id": 1,
                             "result": {
                                 "status": "FAILED",
                                 "ledger": 50001,
-                                "diagnosticEventsXdr": [],
-                                "resultXdr": "some_error_containing_Budget_ExceededLimit"
-                            },
-                            "error_description": "Budget, ExceededLimit"
+                                "diagnosticEventsXdr": ["HostError: Error(Budget, ExceededLimit)"]
+                            }
                         }))
                     } else {
                         ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -507,14 +526,14 @@ async fn keeper_cycle_freezes_order_when_budget_exceeded_and_freeze_succeeds() {
         .mount(&mock_server)
         .await;
 
-    let config = test_config(&rpc_url, "http://127.0.0.1:9");
+    let config = test_config_with_tokens(&rpc_url, "http://127.0.0.1:9", vec![test_token()]);
     let state = Arc::new(AppState::new(config));
 
     {
         let mut cache = state.price_cache.write().await;
         cache
             .prices
-            .insert("TUSDC".to_string(), test_cached_price());
+            .insert(TUSDC_KEY.to_string(), fresh_cached_price());
     }
 
     let result = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state)).await;
@@ -591,6 +610,8 @@ async fn keeper_cycle_rejects_non_hex_order_key() {
                         "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                     }
                 })),
+                // set_prices runs before any order is executed, so its
+                // submission has to confirm for the cycle to reach the bad key.
                 "getTransaction" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "jsonrpc": "2.0", "id": 1,
                     "result": {
@@ -608,14 +629,14 @@ async fn keeper_cycle_rejects_non_hex_order_key() {
         .mount(&mock_server)
         .await;
 
-    let config = test_config(&rpc_url, "http://127.0.0.1:9");
+    let config = test_config_with_tokens(&rpc_url, "http://127.0.0.1:9", vec![test_token()]);
     let state = Arc::new(AppState::new(config));
 
     {
         let mut cache = state.price_cache.write().await;
         cache
             .prices
-            .insert("TUSDC".to_string(), test_cached_price());
+            .insert(TUSDC_KEY.to_string(), fresh_cached_price());
     }
 
     let result = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state)).await;
@@ -637,7 +658,7 @@ async fn keeper_cycle_rejects_non_hex_order_key() {
 
 /// Helper: state with one cached price pointing at the mock RPC.
 async fn state_with_price(rpc_url: &str) -> Arc<AppState> {
-    let config = test_config(rpc_url, "http://127.0.0.1:9");
+    let config = test_config_with_tokens(rpc_url, "http://127.0.0.1:9", vec![test_token()]);
     let state = Arc::new(AppState::new(config));
     // Pre-populate the price cache so the cycle reaches get_account_sequence.
     state
@@ -645,7 +666,7 @@ async fn state_with_price(rpc_url: &str) -> Arc<AppState> {
         .write()
         .await
         .prices
-        .insert("TUSDC".to_string(), test_cached_price());
+        .insert(TUSDC_KEY.to_string(), fresh_cached_price());
     state
 }
 
@@ -770,7 +791,7 @@ macro_rules! mount_simulate_error {
 }
 
 #[tokio::test]
-async fn simulate_contract_call_rpc_error_field_propagates() {
+async fn simulate_contract_call_rpc_error_field_is_contained() {
     let server = MockServer::start().await;
     mount_simulate_error!(
         server,
@@ -782,12 +803,15 @@ async fn simulate_contract_call_rpc_error_field_propagates() {
 
     let state = state_with_price(&server.uri()).await;
     let result = oracle::keeper_loop::run_keeper_cycle(state).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Simulation error"));
+    // The simulation error is warned about and the affected work type skipped;
+    // it must not take the whole cycle down.
+    let summary = result.expect("simulation errors must not abort the cycle");
+    assert_eq!(summary.orders_executed, 0);
+    assert_eq!(summary.errors, 0);
 }
 
 #[tokio::test]
-async fn simulate_contract_call_missing_result_field_propagates() {
+async fn simulate_contract_call_missing_result_field_is_contained() {
     let server = MockServer::start().await;
     // A 200 response whose body has neither "result" nor "error".
     mount_simulate_error!(
@@ -800,6 +824,7 @@ async fn simulate_contract_call_missing_result_field_propagates() {
 
     let state = state_with_price(&server.uri()).await;
     let result = oracle::keeper_loop::run_keeper_cycle(state).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Missing result"));
+    let summary = result.expect("a malformed simulate response must not abort the cycle");
+    assert_eq!(summary.orders_executed, 0);
+    assert_eq!(summary.errors, 0);
 }

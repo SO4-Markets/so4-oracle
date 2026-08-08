@@ -7,9 +7,10 @@ use tracing::{error, info, warn};
 
 use crate::chain::scval;
 use crate::chain::tx_builder;
-use crate::state::{AppState, CachedPrice, FailedSubmission, KeeperExecution, MAX_CONSECUTIVE_FREEZE_FAILURES};
+use crate::state::{
+    AppState, CachedPrice, FailedSubmission, KeeperExecution, MAX_CONSECUTIVE_FREEZE_FAILURES,
+};
 
-const KEEPER_TX_FEE: u32 = 2_000_000;
 const ACCOUNT_SEQUENCE_RETRY_ATTEMPTS: u32 = 3;
 const ACCOUNT_SEQUENCE_RETRY_BASE_DELAY_MS: u64 = 100;
 /// Hard cap on a single keeper cycle — closes #490.
@@ -116,50 +117,66 @@ pub struct CycleSummary {
     pub errors: usize,
 }
 
-fn is_parse_error(err: &str) -> bool {
-    err.contains("failed to parse result")
-        || err.contains("expected u32 value")
-        || err.contains("expected vector")
-        || err.contains("expected array")
-        || err.contains("expected ")
-}
-
 async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, String> {
-    let prices = state.price_cache.read().await.prices.clone();
-    if prices.is_empty() {
-        return Err("No prices available in cache".to_string());
+    // Get fresh (non-stale) prices from cache
+    let now = crate::current_timestamp_secs();
+    let fresh_prices = {
+        let cache = state.price_cache.read().await;
+        let tokens = &state.config.price_feed.tokens;
+
+        cache
+            .prices
+            .iter()
+            .filter_map(|(key, price)| {
+                tokens
+                    .iter()
+                    .find(|t| t.lookup_key() == *key)
+                    .and_then(|token| {
+                        if price.is_stale(token.stale_after_seconds, now) {
+                            tracing::debug!(
+                                symbol = %token.symbol,
+                                token = %token.stellar_address,
+                                cached_timestamp = price.timestamp,
+                                stale_after_seconds = token.stale_after_seconds,
+                                age_seconds = now.saturating_sub(price.timestamp),
+                                "skipping stale price in keeper cycle"
+                            );
+                            None
+                        } else {
+                            Some((key.clone(), price.clone()))
+                        }
+                    })
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+
+    if fresh_prices.is_empty() {
+        let cache = state.price_cache.read().await;
+        return Err(format!(
+            "No fresh prices available in cache (cache size: {}, all stale)",
+            cache.prices.len()
+        ));
     }
 
-    let order_keys = match get_pending_keys(&state, "get_order_count", "get_order_keys").await {
-        Ok(keys) => keys,
-        Err(e) => {
-            if !is_parse_error(&e) {
-                return Err(e);
-            }
+    let order_keys = get_pending_keys(&state, "get_order_count", "get_order_keys")
+        .await
+        .unwrap_or_else(|e| {
             warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
             Vec::new()
-        }
-    };
-    let deposit_keys = match get_pending_keys(&state, "get_deposit_count", "get_deposit_keys").await {
-        Ok(keys) => keys,
-        Err(e) => {
-            if !is_parse_error(&e) {
-                return Err(e);
-            }
+        });
+    let deposit_keys = get_pending_keys(&state, "get_deposit_count", "get_deposit_keys")
+        .await
+        .unwrap_or_else(|e| {
             warn!(error = %e, "get_pending_keys(deposits) failed, skipping deposits this cycle");
             Vec::new()
-        }
-    };
-    let withdrawal_keys = match get_pending_keys(&state, "get_withdrawal_count", "get_withdrawal_keys").await {
-        Ok(keys) => keys,
-        Err(e) => {
-            if !is_parse_error(&e) {
-                return Err(e);
-            }
-            warn!(error = %e, "get_pending_keys(withdrawals) failed, skipping withdrawals this cycle");
-            Vec::new()
-        }
-    };
+        });
+    let withdrawal_keys =
+        get_pending_keys(&state, "get_withdrawal_count", "get_withdrawal_keys")
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "get_pending_keys(withdrawals) failed, skipping withdrawals this cycle");
+                Vec::new()
+            });
 
     {
         let mut keeper_status = state.keeper_status.write().await;
@@ -182,10 +199,12 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         orders = order_keys.len(),
         deposits = deposit_keys.len(),
         withdrawals = withdrawal_keys.len(),
+        fresh_prices = fresh_prices.len(),
         "found_pending_work"
     );
 
-    let tx_hash = set_prices_on_chain(&state, &prices).await?;
+    // Submit prices on-chain - only fresh prices are included
+    let tx_hash = set_prices_on_chain(&state, &fresh_prices).await?;
     info!(hash = %tx_hash, "set_prices_confirmed");
     tokio::time::sleep(Duration::from_millis(5000)).await;
 
@@ -229,7 +248,11 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 state.in_flight_keys.lock().await.remove(order_key);
                 summary.orders_executed += 1;
                 // Clear any accumulated freeze-failure count on success.
-                state.freeze_failure_counts.lock().await.remove(order_key.as_str());
+                state
+                    .freeze_failure_counts
+                    .lock()
+                    .await
+                    .remove(order_key.as_str());
                 record_execution(
                     &state,
                     "execute_order",
@@ -244,13 +267,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 // Tx may still confirm on-chain; retain in-flight to prevent re-submission.
                 warn!(key = %order_key, %error, "order_poll_timeout_key_remains_in_flight");
                 summary.errors += 1;
-                record_error(
-                    &state,
-                    &format!("execute_order:{}", order_key),
-                    error,
-                    None,
-                )
-                .await;
+                record_error(&state, &format!("execute_order:{}", order_key), error, None).await;
                 record_execution(
                     &state,
                     "execute_order",
@@ -278,7 +295,11 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     {
                         Ok(_) => {
                             info!(key = %order_key, "order_frozen_budget_exceeded");
-                            state.freeze_failure_counts.lock().await.remove(order_key.as_str());
+                            state
+                                .freeze_failure_counts
+                                .lock()
+                                .await
+                                .remove(order_key.as_str());
                         }
                         Err(freeze_error) => {
                             let consecutive = {
@@ -343,7 +364,11 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             info!(key = %deposit_key, "skipping_in_flight_deposit_key");
             continue;
         }
-        state.in_flight_keys.lock().await.insert(deposit_key.clone());
+        state
+            .in_flight_keys
+            .lock()
+            .await
+            .insert(deposit_key.clone());
 
         match execute_handler(
             &state,
@@ -415,7 +440,11 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             info!(key = %withdrawal_key, "skipping_in_flight_withdrawal_key");
             continue;
         }
-        state.in_flight_keys.lock().await.insert(withdrawal_key.clone());
+        state
+            .in_flight_keys
+            .lock()
+            .await
+            .insert(withdrawal_key.clone());
 
         match execute_handler(
             &state,
@@ -520,7 +549,7 @@ async fn get_pending_keys(
     .await?;
 
     let keys = parse_bytes_vec_from_result(&keys_result)?;
-    
+
     // Cross-check parsed length against reported count to detect RPC/ABI drift
     if keys.len() != count as usize {
         tracing::warn!(
@@ -534,7 +563,7 @@ async fn get_pending_keys(
             keys.len()
         ));
     }
-    
+
     Ok(keys)
 }
 
@@ -545,14 +574,16 @@ async fn set_prices_on_chain(
     let prices_vec: Vec<&CachedPrice> = prices.values().collect();
     let prices_scval = scval::encode_prices_vec(&prices_vec)?;
 
-    let sequence = get_account_sequence(state).await.map_err(|e| e.to_string())?;
+    let sequence = get_account_sequence(state)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let tx = tx_builder::build_invoke_tx(
         &state.config.keeper_account_id,
         &state.config.oracle_contract_id,
         "set_prices",
         vec![prices_scval],
-        1_000_000,
+        state.config.set_prices_tx_fee,
         sequence,
         None,
     )?;
@@ -584,7 +615,9 @@ async fn execute_handler(
             .map_err(|e| format!("key bytes conversion failed: {e}"))?,
     ));
 
-    let sequence = get_account_sequence(state).await.map_err(|e| e.to_string())?;
+    let sequence = get_account_sequence(state)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let tx = tx_builder::build_invoke_tx(
         &state.config.keeper_account_id,
@@ -596,7 +629,7 @@ async fn execute_handler(
             )?),
             key_scval,
         ],
-        KEEPER_TX_FEE,
+        state.config.keeper_tx_fee,
         sequence,
         None,
     )?;
@@ -645,10 +678,9 @@ async fn get_account_sequence_once(state: &Arc<AppState>) -> Result<u64, Sequenc
         .map_err(|e| SequenceFetchError::Network(format!("getAccount request failed: {e}")))?;
 
     let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| SequenceFetchError::Network(format!("Failed to read getAccount response: {e}")))?;
+    let body = response.text().await.map_err(|e| {
+        SequenceFetchError::Network(format!("Failed to read getAccount response: {e}"))
+    })?;
 
     if !status.is_success() {
         return Err(SequenceFetchError::Network(format!(
@@ -657,23 +689,29 @@ async fn get_account_sequence_once(state: &Arc<AppState>) -> Result<u64, Sequenc
         )));
     }
 
-    let response_json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| SequenceFetchError::Network(format!("Failed to parse getAccount response: {e}")))?;
+    let response_json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        SequenceFetchError::Network(format!("Failed to parse getAccount response: {e}"))
+    })?;
 
     if let Some(error) = response_json.get("error") {
-        return Err(SequenceFetchError::Network(format!("getAccount error: {error}")));
+        return Err(SequenceFetchError::Network(format!(
+            "getAccount error: {error}"
+        )));
     }
 
     let seq_str = response_json
         .get("result")
         .and_then(|r| r.get("sequence"))
         .and_then(|s| s.as_str())
-        .ok_or_else(|| SequenceFetchError::MissingOrInvalid("Missing sequence in getAccount response".to_string()))?;
+        .ok_or_else(|| {
+            SequenceFetchError::MissingOrInvalid(
+                "Missing sequence in getAccount response".to_string(),
+            )
+        })?;
 
-    seq_str
-        .parse::<u64>()
-        .map(|seq| seq + 1)
-        .map_err(|e| SequenceFetchError::MissingOrInvalid(format!("failed to parse sequence '{seq_str}': {e}")))
+    seq_str.parse::<u64>().map(|seq| seq + 1).map_err(|e| {
+        SequenceFetchError::MissingOrInvalid(format!("failed to parse sequence '{seq_str}': {e}"))
+    })
 }
 
 async fn simulate_contract_call(
@@ -727,8 +765,8 @@ async fn simulate_contract_call(
         return Err(format!("RPC request returned HTTP {}", status.as_u16()));
     }
 
-    let response_json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse RPC response: {e}"))?;
+    let response_json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("Failed to parse RPC response: {e}"))?;
 
     if let Some(error) = response_json.get("error") {
         return Err(format!("Simulation error: {error}"));
@@ -871,6 +909,8 @@ mod tests {
             admin_api_token: None,
             pyth_api_key: None,
             min_keeper_balance_xlm: 0.0,
+            set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
+            keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
             price_loop_interval: Duration::from_millis(50),
             keeper_loop_interval: Duration::from_millis(50),
             price_feed: PriceFeedConfig { tokens: vec![] },
@@ -895,5 +935,58 @@ mod tests {
             completed.is_ok(),
             "run_keeper_loop must exit within 500 ms of shutdown_token cancellation"
         );
+    }
+
+    #[tokio::test]
+    async fn test_keeper_cycle_filters_stale_prices() {
+        let now = crate::current_timestamp_secs();
+        let stale_after = 60;
+
+        let fresh_price = CachedPrice {
+            token_address: "GAFRESH".to_string(),
+            symbol: "FRESH".to_string(),
+            display_symbol: "FRESH".to_string(),
+            keeper_index: 0,
+            min: 1000,
+            max: 1000,
+            median: 1000,
+            timestamp: now,
+            ledger_seq: 12345,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+
+        let stale_price = CachedPrice {
+            token_address: "GASTALE".to_string(),
+            symbol: "STALE".to_string(),
+            display_symbol: "STALE".to_string(),
+            keeper_index: 0,
+            min: 900,
+            max: 900,
+            median: 900,
+            timestamp: now - 100,
+            ledger_seq: 12344,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+
+        let mut prices = std::collections::BTreeMap::new();
+        prices.insert("GAFRESH".to_string(), fresh_price);
+        prices.insert("GASTALE".to_string(), stale_price);
+
+        let filtered_prices: Vec<_> = prices
+            .iter()
+            .filter(|(_, price)| !price.is_stale(stale_after, now))
+            .collect();
+
+        assert_eq!(filtered_prices.len(), 1);
+        assert_eq!(filtered_prices[0].1.symbol, "FRESH");
+
+        let stale_filtered: Vec<_> = prices
+            .iter()
+            .filter(|(_, price)| price.is_stale(stale_after, now))
+            .collect();
+        assert_eq!(stale_filtered.len(), 1);
+        assert_eq!(stale_filtered[0].1.symbol, "STALE");
     }
 }

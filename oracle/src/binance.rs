@@ -6,7 +6,7 @@ pub const FLOAT_PRECISION: i128 = 1_000_000_000_000_000_000_000_000_000_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinancePriceError {
     NetworkError(String),
-    HttpError(u16),
+    HttpError { status: u16, body: String },
     JsonError(String),
     PriceParseError(String),
 }
@@ -15,7 +15,13 @@ impl std::fmt::Display for BinancePriceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NetworkError(error) => write!(f, "Binance network error: {error}"),
-            Self::HttpError(status) => write!(f, "Binance returned HTTP {status}"),
+            Self::HttpError { status, body } => {
+                if body.is_empty() {
+                    write!(f, "Binance returned HTTP {status}")
+                } else {
+                    write!(f, "Binance returned HTTP {status}: {body}")
+                }
+            }
             Self::JsonError(error) => write!(f, "invalid Binance response: {error}"),
             Self::PriceParseError(error) => write!(f, "invalid Binance price: {error}"),
         }
@@ -29,7 +35,7 @@ impl crate::retry::Retryable for BinancePriceError {
         match self {
             // Network errors and 5xx HTTP errors are transient
             Self::NetworkError(_) => true,
-            Self::HttpError(status) => *status >= 500,
+            Self::HttpError { status, .. } => *status >= 500,
             // Parse/JSON errors are permanent failures
             Self::JsonError(_) | Self::PriceParseError(_) => false,
         }
@@ -77,7 +83,10 @@ pub fn parse_ticker_http_response(
     symbols: &[String],
 ) -> Result<Vec<(String, i128)>, BinancePriceError> {
     if status_code != 200 {
-        return Err(BinancePriceError::HttpError(status_code));
+        return Err(BinancePriceError::HttpError {
+            status: status_code,
+            body: crate::http::truncate_error_body(body),
+        });
     }
     parse_ticker_response_body(body, symbols)
 }
@@ -90,18 +99,26 @@ pub fn parse_ticker_http_result(
     parse_ticker_http_response(status_code, &body, symbols)
 }
 
+// Only exercised by the URL-shape tests below; the live fetch path builds its
+// query through reqwest instead.
+#[cfg(test)]
 fn build_spot_price_url(symbols: &[String]) -> String {
+    build_spot_price_url_for(BINANCE_TICKER_PRICE_URL, symbols)
+}
+
+fn build_spot_price_url_for(base_url: &str, symbols: &[String]) -> String {
     if symbols.len() == 1 {
-        format!("{}?symbol={}", BINANCE_TICKER_PRICE_URL, symbols[0])
+        format!("{}?symbol={}", base_url, symbols[0])
     } else {
         format!(
             "{}?symbols={}",
-            BINANCE_TICKER_PRICE_URL,
-            percent_encode_query_value(&serde_json::to_string(symbols).unwrap_or_default())
+            base_url,
+            serde_json::to_string(symbols).unwrap()
         )
     }
 }
 
+#[cfg(test)]
 fn percent_encode_query_value(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(value.len());
@@ -132,14 +149,9 @@ pub(crate) async fn fetch_spot_prices_with_url(
     base_url: &str,
     symbols: &[String],
 ) -> Result<Vec<(String, i128)>, BinancePriceError> {
-    let mut req = crate::http::client().get(base_url);
-    if symbols.len() == 1 {
-        req = req.query(&[("symbol", &symbols[0])]);
-    } else {
-        let symbols_json = serde_json::to_string(symbols).unwrap_or_default();
-        req = req.query(&[("symbols", &symbols_json)]);
-    }
-    let response = req
+    let url = build_spot_price_url_for(base_url, symbols);
+    let response = crate::http::client()
+        .get(&url)
         .send()
         .await
         .map_err(|err| BinancePriceError::NetworkError(err.to_string()))?;
@@ -175,10 +187,14 @@ pub fn parse_price_to_precision(raw: &str) -> Result<i128, BinancePriceError> {
 
     // Validate that whole and fractional parts contain only ASCII digits.
     if !whole.chars().all(|c| c.is_ascii_digit()) {
-        return Err(BinancePriceError::PriceParseError(format!("invalid whole part: {text}")));
+        return Err(BinancePriceError::PriceParseError(format!(
+            "invalid whole part: {text}"
+        )));
     }
     if !frac.chars().all(|c| c.is_ascii_digit()) && !frac.is_empty() {
-        return Err(BinancePriceError::PriceParseError(format!("invalid fractional part: {text}")));
+        return Err(BinancePriceError::PriceParseError(format!(
+            "invalid fractional part: {text}"
+        )));
     }
 
     let whole_val = whole
@@ -208,9 +224,23 @@ pub fn parse_price_to_precision(raw: &str) -> Result<i128, BinancePriceError> {
     let whole_scaled = whole_val
         .checked_mul(FLOAT_PRECISION)
         .ok_or_else(|| BinancePriceError::PriceParseError(format!("overflow for price: {text}")))?;
-    whole_scaled
+    let scaled = whole_scaled
         .checked_add(frac_val)
-        .ok_or_else(|| BinancePriceError::PriceParseError(format!("overflow for price: {text}")))
+        .ok_or_else(|| BinancePriceError::PriceParseError(format!("overflow for price: {text}")))?;
+
+    // #604 — a delisted or untraded symbol can report "0"/"0.00000000", and
+    // Coinbase can report a "USD" rate of "0" for a currency it cannot price.
+    // Reject it here like every other source does (FixedSource::new,
+    // fixed_price, validate_pyth_price) rather than feeding a zero into
+    // aggregation, where surviving deviation filtering depends entirely on the
+    // configured max_deviation_bps.
+    if scaled == 0 {
+        return Err(BinancePriceError::PriceParseError(
+            "price must be greater than zero".to_string(),
+        ));
+    }
+
+    Ok(scaled)
 }
 
 #[cfg(test)]
@@ -243,6 +273,28 @@ mod tests {
     #[test]
     fn parse_price_rejects_negative() {
         let err = parse_price_to_precision("-1.5").unwrap_err();
+        assert!(matches!(err, BinancePriceError::PriceParseError(_)));
+    }
+
+    // #604 — zero is an error too, matching FixedSource::new and fixed_price()
+    #[test]
+    fn parse_price_rejects_zero() {
+        let err = parse_price_to_precision("0").unwrap_err();
+        assert!(matches!(err, BinancePriceError::PriceParseError(_)));
+    }
+
+    #[test]
+    fn parse_price_rejects_zero_with_fractional_zeros() {
+        let err = parse_price_to_precision("0.00000000").unwrap_err();
+        assert!(matches!(err, BinancePriceError::PriceParseError(_)));
+    }
+
+    // #604 — the ticker body Binance returns for an untraded/delisted symbol
+    #[test]
+    fn parse_ticker_response_rejects_zero_priced_symbol() {
+        let body = r#"[{"symbol":"BTCUSDT","price":"0.00000000"}]"#;
+        let symbols = vec!["BTCUSDT".to_string()];
+        let err = parse_ticker_response_body(body, &symbols).unwrap_err();
         assert!(matches!(err, BinancePriceError::PriceParseError(_)));
     }
 
@@ -320,7 +372,10 @@ mod tests {
     fn parse_ticker_http_response_non_200_returns_error() {
         let symbols = vec!["BTCUSDT".to_string()];
         let err = parse_ticker_http_response(503, "[]", &symbols).unwrap_err();
-        assert_eq!(err, BinancePriceError::HttpError(503));
+        assert!(matches!(
+            err,
+            BinancePriceError::HttpError { status: 503, .. }
+        ));
     }
 
     #[test]
@@ -394,7 +449,10 @@ mod tests {
         let err = super::fetch_spot_prices_with_url(&server.uri(), &symbols)
             .await
             .unwrap_err();
-        assert_eq!(err, BinancePriceError::HttpError(404));
+        assert!(matches!(
+            err,
+            BinancePriceError::HttpError { status: 404, .. }
+        ));
     }
 
     #[tokio::test]
@@ -413,7 +471,10 @@ mod tests {
         let err = super::fetch_spot_prices_with_url(&server.uri(), &symbols)
             .await
             .unwrap_err();
-        assert_eq!(err, BinancePriceError::HttpError(500));
+        assert!(matches!(
+            err,
+            BinancePriceError::HttpError { status: 500, .. }
+        ));
     }
 
     #[test]

@@ -177,10 +177,7 @@ impl Metrics {
 
         output.push_str("# HELP oracle_orders_executed Total number of orders executed\n");
         output.push_str("# TYPE oracle_orders_executed counter\n");
-        output.push_str(&format!(
-            "oracle_orders_executed {}\n",
-            c.orders_executed
-        ));
+        output.push_str(&format!("oracle_orders_executed {}\n", c.orders_executed));
 
         output.push_str("# HELP oracle_deposits_executed Total number of deposits executed\n");
         output.push_str("# TYPE oracle_deposits_executed counter\n");
@@ -230,10 +227,7 @@ impl Metrics {
 
         output.push_str("# HELP oracle_submit_failures Total number of submit failures\n");
         output.push_str("# TYPE oracle_submit_failures counter\n");
-        output.push_str(&format!(
-            "oracle_submit_failures {}\n",
-            c.submit_failures
-        ));
+        output.push_str(&format!("oracle_submit_failures {}\n", c.submit_failures));
 
         output.push_str("# HELP oracle_last_metrics_update Timestamp of last metrics update\n");
         output.push_str("# TYPE oracle_last_metrics_update gauge\n");

@@ -13,6 +13,10 @@ pub const DEFAULT_TESTNET_HORIZON_URL: &str = "https://horizon-testnet.stellar.o
 pub const DEFAULT_MAINNET_HORIZON_URL: &str = "https://horizon.stellar.org";
 pub const DEFAULT_PRICE_LOOP_MS: u64 = 1_000;
 pub const DEFAULT_KEEPER_LOOP_MS: u64 = 1_500;
+/// Default inclusion fee (stroops) for `set_prices` transactions.
+pub const DEFAULT_SET_PRICES_TX_FEE: u32 = 1_000_000;
+/// Default inclusion fee (stroops) for keeper handler transactions.
+pub const DEFAULT_KEEPER_TX_FEE: u32 = 2_000_000;
 
 /// Oracle-specific view of a token feed config.
 /// Re-exports fields from `TokenConfig` for backward compatibility with
@@ -80,6 +84,10 @@ pub struct Config {
     /// API key used to authenticate requests to the production Hermes endpoint.
     pub pyth_api_key: Option<SecretString>,
     pub min_keeper_balance_xlm: f64,
+    /// Inclusion fee (stroops) for oracle `set_prices` transactions.
+    pub set_prices_tx_fee: u32,
+    /// Inclusion fee (stroops) for keeper handler execute/freeze transactions.
+    pub keeper_tx_fee: u32,
     pub price_loop_interval: Duration,
     pub keeper_loop_interval: Duration,
     pub price_feed: PriceFeedConfig,
@@ -177,20 +185,15 @@ impl Config {
             ),
             Network::Mainnet => (
                 MAINNET_PASSPHRASE.to_string(),
-                collect_or_default!(
-                    required(&mut lookup, "STELLAR_RPC_URL"),
-                    String::new()
-                ),
-                lookup("HORIZON_URL")
-                    .unwrap_or_else(|| DEFAULT_MAINNET_HORIZON_URL.to_string()),
+                collect_or_default!(required(&mut lookup, "STELLAR_RPC_URL"), String::new()),
+                lookup("HORIZON_URL").unwrap_or_else(|| DEFAULT_MAINNET_HORIZON_URL.to_string()),
             ),
         };
 
         let oracle_contract_id = match network {
-            Network::Mainnet => collect_or_default!(
-                required(&mut lookup, "ORACLE_CONTRACT_ID"),
-                String::new()
-            ),
+            Network::Mainnet => {
+                collect_or_default!(required(&mut lookup, "ORACLE_CONTRACT_ID"), String::new())
+            }
             Network::Testnet => collect_or_default!(
                 required_any(&mut lookup, "ORACLE_CONTRACT_ID", "ORACLE"),
                 String::new()
@@ -198,65 +201,49 @@ impl Config {
         };
 
         let price_feed = collect_or_default!(
-            load_price_feed_config(lookup("PRICE_FEED_CONFIG").as_deref()),
+            load_price_feed_config(lookup("PRICE_FEED_CONFIG").as_deref()).map_err(EnvError::from),
             PriceFeedConfig { tokens: vec![] }
         );
 
-        let role_store_contract_id = collect_or_default!(
-            required(&mut lookup, "ROLE_STORE"),
-            String::new()
-        );
-        let data_store_contract_id = collect_or_default!(
-            required(&mut lookup, "DATA_STORE"),
-            String::new()
-        );
-        let order_handler_contract_id = collect_or_default!(
-            required(&mut lookup, "ORDER_HANDLER"),
-            String::new()
-        );
-        let deposit_handler_contract_id = collect_or_default!(
-            required(&mut lookup, "DEPOSIT_HANDLER"),
-            String::new()
-        );
-        let withdrawal_handler_contract_id = collect_or_default!(
-            required(&mut lookup, "WITHDRAWAL_HANDLER"),
-            String::new()
-        );
-        let reader_contract_id = collect_or_default!(
-            required(&mut lookup, "READER"),
-            String::new()
-        );
+        let role_store_contract_id =
+            collect_or_default!(required(&mut lookup, "ROLE_STORE"), String::new());
+        let data_store_contract_id =
+            collect_or_default!(required(&mut lookup, "DATA_STORE"), String::new());
+        let order_handler_contract_id =
+            collect_or_default!(required(&mut lookup, "ORDER_HANDLER"), String::new());
+        let deposit_handler_contract_id =
+            collect_or_default!(required(&mut lookup, "DEPOSIT_HANDLER"), String::new());
+        let withdrawal_handler_contract_id =
+            collect_or_default!(required(&mut lookup, "WITHDRAWAL_HANDLER"), String::new());
+        let reader_contract_id =
+            collect_or_default!(required(&mut lookup, "READER"), String::new());
 
-        let keeper_private_key_raw = collect_or_default!(
-            required(&mut lookup, "KEEPER_PRIVATE_KEY"),
-            String::new()
-        );
+        let keeper_private_key_raw =
+            collect_or_default!(required(&mut lookup, "KEEPER_PRIVATE_KEY"), String::new());
         let keeper_private_key = if !keeper_private_key_raw.is_empty() {
             collect_or_default!(
-                validate_hex_key("KEEPER_PRIVATE_KEY", keeper_private_key_raw, 32).map(SecretString::new),
+                validate_hex_key("KEEPER_PRIVATE_KEY", keeper_private_key_raw, 32)
+                    .map(SecretString::new),
                 SecretString::new(String::new())
             )
         } else {
             SecretString::new(String::new())
         };
 
-        let keeper_secret_key_raw = collect_or_default!(
-            required(&mut lookup, "KEEPER_SECRET_KEY"),
-            String::new()
-        );
+        let keeper_secret_key_raw =
+            collect_or_default!(required(&mut lookup, "KEEPER_SECRET_KEY"), String::new());
         let keeper_secret_key = if !keeper_secret_key_raw.is_empty() {
             collect_or_default!(
-                validate_strkey("KEEPER_SECRET_KEY", keeper_secret_key_raw, 'S').map(SecretString::new),
+                validate_strkey("KEEPER_SECRET_KEY", keeper_secret_key_raw, 'S')
+                    .map(SecretString::new),
                 SecretString::new(String::new())
             )
         } else {
             SecretString::new(String::new())
         };
 
-        let keeper_account_id_raw = collect_or_default!(
-            required(&mut lookup, "KEEPER_ACCOUNT_ID"),
-            String::new()
-        );
+        let keeper_account_id_raw =
+            collect_or_default!(required(&mut lookup, "KEEPER_ACCOUNT_ID"), String::new());
         let keeper_account_id = if !keeper_account_id_raw.is_empty() {
             collect_or_default!(
                 validate_strkey("KEEPER_ACCOUNT_ID", keeper_account_id_raw, 'G'),
@@ -266,10 +253,8 @@ impl Config {
             String::new()
         };
 
-        let keeper_index = collect_or_default!(
-            parse_or_default(&mut lookup, "KEEPER_INDEX", "0"),
-            0u32
-        );
+        let keeper_index =
+            collect_or_default!(parse_or_default(&mut lookup, "KEEPER_INDEX", "0"), 0u32);
 
         let admin_api_token = lookup("ADMIN_API_TOKEN")
             .filter(|value| !value.trim().is_empty())
@@ -294,6 +279,42 @@ impl Config {
                 Ok(value)
             })(),
             DEFAULT_MIN_KEEPER_BALANCE_XLM
+        );
+
+        let set_prices_tx_fee: u32 = collect_or_default!(
+            (|| {
+                let fee: u32 = parse_or_default(
+                    &mut lookup,
+                    "SET_PRICES_TX_FEE",
+                    &DEFAULT_SET_PRICES_TX_FEE.to_string(),
+                )?;
+                if fee == 0 {
+                    return Err(EnvError::InvalidVar {
+                        var: "SET_PRICES_TX_FEE",
+                        reason: "must be greater than 0".to_string(),
+                    });
+                }
+                Ok(fee)
+            })(),
+            DEFAULT_SET_PRICES_TX_FEE
+        );
+
+        let keeper_tx_fee: u32 = collect_or_default!(
+            (|| {
+                let fee: u32 = parse_or_default(
+                    &mut lookup,
+                    "KEEPER_TX_FEE",
+                    &DEFAULT_KEEPER_TX_FEE.to_string(),
+                )?;
+                if fee == 0 {
+                    return Err(EnvError::InvalidVar {
+                        var: "KEEPER_TX_FEE",
+                        reason: "must be greater than 0".to_string(),
+                    });
+                }
+                Ok(fee)
+            })(),
+            DEFAULT_KEEPER_TX_FEE
         );
 
         let price_loop_interval = collect_or_default!(
@@ -356,6 +377,8 @@ impl Config {
             admin_api_token,
             pyth_api_key,
             min_keeper_balance_xlm,
+            set_prices_tx_fee,
+            keeper_tx_fee,
             price_loop_interval,
             keeper_loop_interval,
             price_feed,
@@ -574,6 +597,8 @@ impl Config {
             admin_api_token: None,
             pyth_api_key: None,
             min_keeper_balance_xlm: 1.0,
+            set_prices_tx_fee: DEFAULT_SET_PRICES_TX_FEE,
+            keeper_tx_fee: DEFAULT_KEEPER_TX_FEE,
             price_loop_interval: std::time::Duration::from_secs(10),
             keeper_loop_interval: std::time::Duration::from_secs(10),
             price_feed: PriceFeedConfig { tokens: vec![] },
@@ -1108,7 +1133,10 @@ mod tests {
             }
         }
 
-        assert!(err.0.iter().any(|e| matches!(e, EnvError::MissingVar("KEEPER_PRIVATE_KEY"))));
+        assert!(err
+            .0
+            .iter()
+            .any(|e| matches!(e, EnvError::MissingVar("KEEPER_PRIVATE_KEY"))));
     }
 
     #[test]

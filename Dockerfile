@@ -1,5 +1,7 @@
 # Build stage
-FROM rust:1.76-slim as builder
+# Must stay >= the highest MSRV in Cargo.lock — stellar-rpc-client 27 requires
+# Rust 1.93, jsonrpsee 0.26 requires 1.85, axum 0.8 requires 1.80.
+FROM rust:1.95-slim AS builder
 
 WORKDIR /app
 

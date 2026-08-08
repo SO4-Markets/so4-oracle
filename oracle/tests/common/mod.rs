@@ -9,6 +9,14 @@ use oracle::config::{Config, Network, PriceFeedConfig, SecretString};
 use oracle::state::AppState;
 
 pub fn test_config(rpc_url: &str, horizon_url: &str) -> Arc<Config> {
+    test_config_with_tokens(rpc_url, horizon_url, vec![])
+}
+
+pub fn test_config_with_tokens(
+    rpc_url: &str,
+    horizon_url: &str,
+    tokens: Vec<TokenConfig>,
+) -> Arc<Config> {
     Arc::new(Config {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         network: Network::Testnet,
@@ -37,9 +45,11 @@ pub fn test_config(rpc_url: &str, horizon_url: &str) -> Arc<Config> {
         keeper_index: 0,
         admin_api_token: Some(SecretString::new("test-admin-token".to_string())),
         min_keeper_balance_xlm: 10.0,
+        set_prices_tx_fee: oracle::config::DEFAULT_SET_PRICES_TX_FEE,
+        keeper_tx_fee: oracle::config::DEFAULT_KEEPER_TX_FEE,
         price_loop_interval: Duration::from_millis(1000),
         keeper_loop_interval: Duration::from_millis(1500),
-        price_feed: PriceFeedConfig { tokens: vec![] },
+        price_feed: PriceFeedConfig { tokens },
         pyth_api_key: None,
     })
 }
@@ -110,6 +120,8 @@ pub fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
         keeper_index: 0,
         admin_api_token: None,
         min_keeper_balance_xlm: 0.0,
+        set_prices_tx_fee: oracle::config::DEFAULT_SET_PRICES_TX_FEE,
+        keeper_tx_fee: oracle::config::DEFAULT_KEEPER_TX_FEE,
         price_loop_interval: Duration::from_millis(1000),
         keeper_loop_interval: Duration::from_millis(1000),
         price_feed: PriceFeedConfig { tokens },

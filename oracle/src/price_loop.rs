@@ -21,6 +21,12 @@ pub enum PriceSourceError {
     Unsupported(String),
 }
 
+impl CachedPrice {
+    pub fn is_stale(&self, stale_after_seconds: u64, now: u64) -> bool {
+        now.saturating_sub(self.timestamp) >= stale_after_seconds
+    }
+}
+
 impl std::fmt::Display for PriceSourceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -76,6 +82,9 @@ pub async fn run_price_cycle(state: Arc<AppState>) {
 
     let mut tokens_ok = 0usize;
     let mut tokens_failed = 0usize;
+    let mut tokens_stale = 0usize;
+    let now = crate::current_timestamp_secs();
+
     let ledger_seq =
         match crate::stellar_rpc::get_latest_ledger_sequence(&state.config.stellar_rpc_url).await {
             Ok(ledger_seq) => ledger_seq,
@@ -115,28 +124,98 @@ pub async fn run_price_cycle(state: Arc<AppState>) {
     };
 
     let mut new_prices = std::collections::BTreeMap::new();
-    for token in &state.config.price_feed.tokens {
-        match build_cached_price(&state, token, ledger_seq, &pyth_prices).await {
-            Ok(price) => {
-                new_prices.insert(token.lookup_key(), price);
-                tokens_ok += 1;
+
+    // First, check for stale entries in the existing cache
+    {
+        let cache = state.price_cache.read().await;
+        for token in &state.config.price_feed.tokens {
+            let key = token.lookup_key();
+            if let Some(cached) = cache.prices.get(&key) {
+                if cached.is_stale(token.stale_after_seconds, now) {
+                    tracing::warn!(
+                        symbol = %token.symbol,
+                        token = %token.stellar_address,
+                        cached_timestamp = cached.timestamp,
+                        stale_after_seconds = token.stale_after_seconds,
+                        age_seconds = now.saturating_sub(cached.timestamp),
+                        "evicting stale cached price"
+                    );
+                    tokens_stale += 1;
+                    // Mark this token for removal by not adding it to new_prices
+                    continue;
+                }
             }
-            Err(error) => {
-                tokens_failed += 1;
-                let ctx = ErrorContext {
-                    token: token.stellar_address.clone(),
-                    symbol: token.symbol.clone(),
-                };
-                record_error_with_context(&state, format!("price:{}", token.symbol), error, ctx)
+            // Token is either not in cache or not stale, try to fetch fresh price
+            match build_cached_price(&state, token, ledger_seq, &pyth_prices).await {
+                Ok(price) => {
+                    new_prices.insert(key, price);
+                    tokens_ok += 1;
+                }
+                Err(error) => {
+                    tokens_failed += 1;
+                    let ctx = ErrorContext {
+                        token: token.stellar_address.clone(),
+                        symbol: token.symbol.clone(),
+                    };
+                    record_error_with_context(
+                        &state,
+                        format!("price:{}", token.symbol),
+                        error,
+                        ctx,
+                    )
                     .await;
+
+                    // If the token had a cached entry that we already checked wasn't stale,
+                    // we might want to keep it. But we're building new_prices from scratch,
+                    // so we need to decide whether to keep the old entry or not.
+                    // For safety, we keep the old entry if it exists and wasn't stale.
+                    let cache = state.price_cache.read().await;
+                    if let Some(cached) = cache.prices.get(&key) {
+                        // Re-check staleness (it might have become stale during the fetch)
+                        if !cached
+                            .is_stale(token.stale_after_seconds, crate::current_timestamp_secs())
+                        {
+                            tracing::debug!(
+                                symbol = %token.symbol,
+                                "keeping existing non-stale cached price due to fetch failure"
+                            );
+                            new_prices.insert(key, cached.clone());
+                            tokens_ok += 1; // Count as OK since we have a valid cached price
+                        } else {
+                            tracing::warn!(
+                                symbol = %token.symbol,
+                                "cached price became stale during fetch, removing"
+                            );
+                            tokens_stale += 1;
+                        }
+                    }
+                }
             }
         }
     }
 
-    if tokens_ok > 0 {
+    // Update the cache with fresh and preserved entries
+    if !new_prices.is_empty() {
         let mut cache = state.price_cache.write().await;
         cache.prices = new_prices;
         cache.last_updated = Some(SystemTime::now());
+
+        if tokens_stale > 0 {
+            tracing::info!(
+                tokens_ok,
+                tokens_failed,
+                tokens_stale,
+                "price cycle completed with stale entries evicted"
+            );
+        }
+    } else {
+        // If we have no valid prices at all, clear the cache to avoid serving stale data
+        let mut cache = state.price_cache.write().await;
+        cache.prices.clear();
+        cache.last_updated = None;
+        tracing::warn!(
+            "all price sources failed and no valid cached prices available, cache cleared"
+        );
     }
 
     finish_cycle(&state, started, tokens_ok, tokens_failed).await;
@@ -410,6 +489,8 @@ mod tests {
             admin_api_token: None,
             pyth_api_key: None,
             min_keeper_balance_xlm: 0.0,
+            set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
+            keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
             price_loop_interval: Duration::from_millis(1),
             keeper_loop_interval: Duration::from_millis(1),
             price_feed: PriceFeedConfig {
@@ -444,6 +525,8 @@ mod tests {
             admin_api_token: None,
             pyth_api_key: None,
             min_keeper_balance_xlm: 0.0,
+            set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
+            keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
             price_loop_interval: Duration::from_millis(50),
             keeper_loop_interval: Duration::from_millis(50),
             price_feed: PriceFeedConfig { tokens: vec![] },
@@ -491,7 +574,9 @@ mod tests {
         };
 
         let state = test_state(token.clone());
-        let cached = build_cached_price(&state, &token, 123, &std::collections::HashMap::new()).await.unwrap();
+        let cached = build_cached_price(&state, &token, 123, &std::collections::HashMap::new())
+            .await
+            .unwrap();
         let configured_price = token.fixed_price.as_ref().unwrap().parse::<i128>().unwrap();
         let spread = configured_price * token.max_deviation_bps as i128 / 10_000;
 
@@ -509,5 +594,103 @@ mod tests {
         assert_eq!(cached.sources_used, vec!["fixed"]);
         assert_eq!(cached.signature.len(), 128);
         assert!(cached.timestamp > 0, "timestamp should be positive");
+    }
+
+    #[test]
+    fn test_cached_price_is_stale() {
+        let price = CachedPrice {
+            token_address: "test".to_string(),
+            symbol: "TEST".to_string(),
+            display_symbol: "TEST".to_string(),
+            keeper_index: 0,
+            min: 100,
+            max: 100,
+            median: 100,
+            timestamp: 1000,
+            ledger_seq: 12345,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+
+        assert!(!price.is_stale(60, 1050));
+        assert!(!price.is_stale(60, 1059));
+
+        // Stale (exceeded or equal to stale_after)
+        assert!(price.is_stale(60, 1060));
+        assert!(price.is_stale(60, 1061));
+        assert!(price.is_stale(60, 1100));
+
+        // Edge cases
+        assert!(!price.is_stale(60, 1000));
+        assert!(!price.is_stale(60, 0));
+        assert!(price.is_stale(0, 1001));
+        assert!(price.is_stale(0, 1000));
+    }
+
+    #[test]
+    fn test_cached_price_is_stale_saturating_sub() {
+        let price = CachedPrice {
+            token_address: "test".to_string(),
+            symbol: "TEST".to_string(),
+            display_symbol: "TEST".to_string(),
+            keeper_index: 0,
+            min: 100,
+            max: 100,
+            median: 100,
+            timestamp: u64::MAX,
+            ledger_seq: 12345,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+
+        // Should not overflow due to saturating_sub
+        assert!(!price.is_stale(60, 1000));
+    }
+
+    #[test]
+    fn test_fresh_vs_stale_price_selection() {
+        let now = 1000;
+        let stale_after = 60;
+
+        let fresh_price = CachedPrice {
+            token_address: "GAFRESH".to_string(),
+            symbol: "FRESH".to_string(),
+            display_symbol: "FRESH".to_string(),
+            keeper_index: 0,
+            min: 100,
+            max: 100,
+            median: 100,
+            timestamp: now - 30,
+            ledger_seq: 12345,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+
+        let stale_price = CachedPrice {
+            token_address: "GASTALE".to_string(),
+            symbol: "STALE".to_string(),
+            display_symbol: "STALE".to_string(),
+            keeper_index: 0,
+            min: 90,
+            max: 90,
+            median: 90,
+            timestamp: now - 100,
+            ledger_seq: 12344,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+
+        // Verify freshness detection
+        assert!(!fresh_price.is_stale(stale_after, now));
+        assert!(stale_price.is_stale(stale_after, now));
+
+        // Verify prices are correctly identified
+        let fresh_prices: Vec<_> = vec![fresh_price.clone(), stale_price.clone()]
+            .into_iter()
+            .filter(|p| !p.is_stale(stale_after, now))
+            .collect();
+
+        assert_eq!(fresh_prices.len(), 1);
+        assert_eq!(fresh_prices[0].symbol, "FRESH");
     }
 }

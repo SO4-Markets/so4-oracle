@@ -534,6 +534,49 @@ mod tests {
             .contains("insufficient sources after filtering"));
     }
 
+    // #510 — aggregate_prices length-mismatch and empty-input error branches
+
+    #[test]
+    fn aggregate_prices_length_mismatch_returns_error() {
+        let sources = vec!["binance".to_string()];
+        let err = aggregate_prices(&[100, 200], &sources, 0, 100).unwrap_err();
+        assert_eq!(err, "prices and sources length mismatch");
+    }
+
+    #[test]
+    fn aggregate_prices_empty_input_with_zero_min_sources_returns_error() {
+        // min_sources = 0 bypasses the earlier `prices.len() < min_sources`
+        // guard. #510 named the expected error as "cannot aggregate empty
+        // price list", but no such string exists anywhere in aggregate_prices
+        // or its helpers as currently implemented (confirmed via grep) — the
+        // empty case instead falls through filter_outliers (which returns an
+        // empty result for empty input, not an error) into
+        // compute_confidence_interval_with_spread, which is what actually
+        // rejects it. #510's premise was stale by the time this was worked;
+        // asserting the real error here rather than one that was never
+        // producible.
+        let prices: Vec<i128> = vec![];
+        let sources: Vec<String> = vec![];
+        let err = aggregate_prices(&prices, &sources, 0, 100).unwrap_err();
+        assert_eq!(err, "cannot compute confidence interval");
+    }
+
+    // #510's third scenario ("construct two sources both outside
+    // max_deviation_bps of the median with min_sources=0" to make
+    // filter_outliers reject every source, reaching "cannot compute
+    // confidence interval" via an empty filtered list) turns out not to be
+    // reachable through filter_outliers as currently implemented.
+    // filter_outliers's MAD/stddev thresholds are themselves derived from
+    // the same input set, so whichever price sits at (or ties for) the
+    // median is always within its own computed deviation bound — verified
+    // empirically across several 2-9-source inputs (symmetric pairs,
+    // clustered-plus-one-extreme-outlier, evenly-spaced runs): at least one
+    // source always survives filtering in every case tried. The
+    // "cannot compute confidence interval" error is still real and still
+    // covered — see the empty-input test above, which reaches the same
+    // error via prices.is_empty() short-circuiting filter_outliers itself
+    // rather than via every source being rejected by it.
+
     #[test]
     fn test_issue_380_explicit_percentile_validation() {
         // Input of 3 sources

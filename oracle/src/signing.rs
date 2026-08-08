@@ -49,7 +49,16 @@ pub fn build_price_message(
 }
 
 /// Sign a price update message using the ed25519 keeper key.
-//Fix size implementation for i128 and u64 to ensure correct byte representation
+///
+/// Layout: `network_passphrase || ledger_seq || token_strkey || min || max || timestamp`
+///
+/// Data types:
+/// - `network_passphrase`: UTF-8 bytes
+/// - `ledger_seq`: u32 Big-Endian
+/// - `token_strkey`: UTF-8 bytes
+/// - `min`: i128 Big-Endian
+/// - `max`: i128 Big-Endian
+/// - `timestamp`: u64 Big-Endian
 pub fn sign_price(
     private_key_hex: &str,
     network_passphrase: &str,

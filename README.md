@@ -72,6 +72,9 @@ KEEPER_SECRET_KEY=<S...-strkey seed>
 KEEPER_ACCOUNT_ID=<G...-public key>
 KEEPER_INDEX=0
 MIN_KEEPER_BALANCE_XLM=10
+# Optional inclusion fees (stroops); defaults match historical hardcoded values
+SET_PRICES_TX_FEE=1000000
+KEEPER_TX_FEE=2000000
 
 # API configuration
 BIND_ADDR=0.0.0.0:8080

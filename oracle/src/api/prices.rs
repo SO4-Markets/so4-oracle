@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Query, State};
+use axum::extract::{FromRequestParts, Query, State};
+use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,24 @@ const READY_BALANCE_RETRY_BASE_DELAY_MS: u64 = 100;
 pub struct FailedSubmissionsQuery {
     pub operation: Option<String>,
     pub limit: Option<usize>,
+}
+
+// #602 — axum's built-in `Query` rejection renders as a bare text/plain body,
+// which breaks the `{"error": "..."}` envelope every other endpoint returns.
+// Extracting through this impl maps the rejection onto `ApiError` so a malformed
+// `?limit=` value stays parseable for clients that unconditionally read JSON.
+impl FromRequestParts<Arc<AppState>> for FailedSubmissionsQuery {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        Query::<Self>::from_request_parts(parts, state)
+            .await
+            .map(|Query(query)| query)
+            .map_err(|rejection| ApiError::new(rejection.status(), rejection.body_text()))
+    }
 }
 
 // #497 — extended health response exposes last-cycle timestamps and failure
@@ -244,7 +263,7 @@ pub async fn prices(
 
 pub async fn failed_submissions(
     _auth: AdminAuth,
-    Query(query): Query<FailedSubmissionsQuery>,
+    query: FailedSubmissionsQuery,
     State(state): State<Arc<AppState>>,
 ) -> Json<FailuresResponse> {
     let all_failures = state.failures.lock().await;

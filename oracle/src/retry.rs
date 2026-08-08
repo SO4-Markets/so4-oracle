@@ -68,7 +68,12 @@ impl Retryable for String {}
 // str errors are always retryable (legacy behavior)
 impl Retryable for &str {}
 
-fn log_retry_failure<E: std::fmt::Debug>(attempt: u32, max_attempts: u32, error: &E, retryable: bool) {
+fn log_retry_failure<E: std::fmt::Debug>(
+    attempt: u32,
+    max_attempts: u32,
+    error: &E,
+    retryable: bool,
+) {
     tracing::warn!(
         attempt,
         max_attempts,

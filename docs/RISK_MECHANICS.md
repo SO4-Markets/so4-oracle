@@ -1,5 +1,35 @@
 # Risk Mechanics — Liquidation, ADL, Insurance Fund
 
+> [!IMPORTANT]
+> **Nothing described in this document is implemented in `so4-oracle`.**
+>
+> This is reference material for the **external SO4 perps Soroban contracts**,
+> which live in a separate repository (the `contracts/` workspace of the SO4
+> market project — `order_handler`, `liquidation_handler`, `position_*`; see
+> the contract paths listed in
+> [ORACLE_UPDATE_IMPLEMENTATION_PLAN.md](ORACLE_UPDATE_IMPLEMENTATION_PLAN.md)).
+> Every symbol referenced below — `position_handler::is_liquidatable`,
+> `order_handler::execute_liquidation`, `position_utils::is_adl_triggered`,
+> `order_handler::execute_adl`, `maintenance_margin_factor`, `max_pnl_factor`,
+> the insurance fund — belongs to those contracts. A repo-wide search of
+> `so4-oracle` returns zero matches for all of them.
+>
+> **This service performs no liquidation monitoring, no ADL execution, and no
+> insurance-fund accounting.** The keeper cycle in
+> [`oracle/src/keeper_loop.rs`](../oracle/src/keeper_loop.rs) invokes exactly
+> five contract entrypoints — `set_prices`, `execute_order`, `freeze_order`,
+> `execute_deposit`, `execute_withdrawal` — and never reads liquidation or ADL
+> state. The only `order_handler` here is `order_handler_contract_id`, an opaque
+> address pointing at one of those externally-deployed contracts.
+>
+> The `PRECISION = 1_000_000` used in the margin math below is the contracts'
+> margin precision. It is unrelated to this repo's only fixed-point constant,
+> `FLOAT_PRECISION = 1e30`, which scales prices
+> ([`oracle/src/binance.rs`](../oracle/src/binance.rs)).
+>
+> Read this as background on the system the keeper submits to — never as a
+> specification of `so4-oracle` behaviour.
+
 ## 1. Liquidation
 
 ### Formula
@@ -55,7 +85,7 @@ MaintenanceMargin   = 500
 600 >= 500  →  NOT liquidatable ✓
 ```
 
-### Keeper Workflow
+### Keeper Workflow (external perps contracts — not so4-oracle)
 
 1. Monitor open positions via `position_handler::is_liquidatable(position_key)`.
 2. If `true`, call `order_handler::execute_liquidation(caller, position_key)`.
@@ -94,7 +124,7 @@ Above:    500,001 * 1,000,000 >= 1,000,000 * 500,000  →  500,001,000,000 >= 50
 
 **Net PnL** accounts for both sides: `total_pnl = long_pnl - short_losses`. ADL fires only when this net value is positive and meets the threshold.
 
-### Keeper Workflow
+### Keeper Workflow (external perps contracts — not so4-oracle)
 
 1. Compute `total_pnl` by summing position PnLs for the winning side.
 2. Read `pool_value` from the liquidity handler.

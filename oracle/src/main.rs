@@ -33,8 +33,8 @@ async fn main() {
         }
     };
 
-    let mut price_loop = tokio::spawn(oracle::price_loop::run_price_loop(Arc::clone(&state)));
-    let mut keeper_loop = tokio::spawn(oracle::keeper_loop::run_keeper_loop(Arc::clone(&state)));
+    let price_loop = tokio::spawn(oracle::price_loop::run_price_loop(Arc::clone(&state)));
+    let keeper_loop = tokio::spawn(oracle::keeper_loop::run_keeper_loop(Arc::clone(&state)));
 
     tracing::info!(
         %bind_addr,

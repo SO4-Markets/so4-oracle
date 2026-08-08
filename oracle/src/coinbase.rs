@@ -6,20 +6,34 @@ pub const COINBASE_EXCHANGE_RATES_URL: &str =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoinbasePriceError {
     NetworkError(String),
-    HttpError(u16),
+    HttpError { status: u16, body: String },
     JsonError(String),
     PriceParseError(String),
     MissingUsdRate,
+    CurrencyMismatch { expected: String, got: String },
 }
 
 impl std::fmt::Display for CoinbasePriceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NetworkError(error) => write!(f, "Coinbase network error: {error}"),
-            Self::HttpError(status) => write!(f, "Coinbase returned HTTP {status}"),
+            Self::HttpError { status, body } => {
+                if body.is_empty() {
+                    write!(f, "Coinbase returned HTTP {status}")
+                } else {
+                    write!(f, "Coinbase returned HTTP {status}: {body}")
+                }
+            }
             Self::JsonError(error) => write!(f, "invalid Coinbase response: {error}"),
             Self::PriceParseError(error) => write!(f, "invalid Coinbase price: {error}"),
             Self::MissingUsdRate => f.write_str("Coinbase response has no USD rate"),
+            Self::CurrencyMismatch { expected, got } => {
+                write!(
+                    f,
+                    "Coinbase currency mismatch: expected '{}', got '{}'",
+                    expected, got
+                )
+            }
         }
     }
 }
@@ -31,9 +45,11 @@ impl crate::retry::Retryable for CoinbasePriceError {
         match self {
             // Network errors and 5xx HTTP errors are transient
             Self::NetworkError(_) => true,
-            Self::HttpError(status) => *status >= 500,
+            Self::HttpError { status, .. } => *status >= 500,
             // Parse/JSON/config errors are permanent failures
             Self::JsonError(_) | Self::PriceParseError(_) | Self::MissingUsdRate => false,
+            // Currency mismatch should not be retried - it's a data integrity issue
+            Self::CurrencyMismatch { .. } => false,
         }
     }
 }
@@ -45,12 +61,29 @@ pub struct CoinbaseRates {
 
 #[derive(Debug, Deserialize)]
 pub struct CoinbaseResponse {
-    pub data: CoinbaseRates,
+    pub data: CoinbaseResponseData,
 }
 
-pub fn parse_coinbase_response_body(body: &str) -> Result<i128, CoinbasePriceError> {
+#[derive(Debug, Deserialize)]
+pub struct CoinbaseResponseData {
+    pub currency: String,
+    pub rates: std::collections::HashMap<String, String>,
+}
+
+pub fn parse_coinbase_response_body(
+    body: &str,
+    expected_currency: &str,
+) -> Result<i128, CoinbasePriceError> {
     let resp: CoinbaseResponse =
         serde_json::from_str(body).map_err(|err| CoinbasePriceError::JsonError(err.to_string()))?;
+
+    // Validate that the returned currency matches what we requested
+    if resp.data.currency.to_uppercase() != expected_currency.to_uppercase() {
+        return Err(CoinbasePriceError::CurrencyMismatch {
+            expected: expected_currency.to_string(),
+            got: resp.data.currency,
+        });
+    }
 
     let usd_price_str = resp
         .data
@@ -70,18 +103,23 @@ pub fn parse_coinbase_response_body(body: &str) -> Result<i128, CoinbasePriceErr
 pub fn parse_coinbase_http_response(
     status_code: u16,
     body: &str,
+    expected_currency: &str,
 ) -> Result<i128, CoinbasePriceError> {
     if status_code != 200 {
-        return Err(CoinbasePriceError::HttpError(status_code));
+        return Err(CoinbasePriceError::HttpError {
+            status: status_code,
+            body: crate::http::truncate_error_body(body),
+        });
     }
-    parse_coinbase_response_body(body)
+    parse_coinbase_response_body(body, expected_currency)
 }
 
 pub fn parse_coinbase_http_result(
     response: Result<(u16, String), String>,
+    expected_currency: &str,
 ) -> Result<i128, CoinbasePriceError> {
     let (status_code, body) = response.map_err(CoinbasePriceError::NetworkError)?;
-    parse_coinbase_http_response(status_code, &body)
+    parse_coinbase_http_response(status_code, &body, expected_currency)
 }
 
 pub async fn fetch_spot_price(symbol: &str) -> Result<i128, CoinbasePriceError> {
@@ -102,11 +140,17 @@ pub(crate) async fn fetch_spot_price_with_url(
         .filter(|stripped| !stripped.is_empty())
         .unwrap_or(symbol);
 
-    let (clean_url, use_query) = if base_url.contains("currency=") || base_url.contains("exchange-rates") {
-        (base_url.trim_end_matches("?currency=").trim_end_matches("&currency="), true)
-    } else {
-        (base_url, false)
-    };
+    let (clean_url, use_query) =
+        if base_url.contains("currency=") || base_url.contains("exchange-rates") {
+            (
+                base_url
+                    .trim_end_matches("?currency=")
+                    .trim_end_matches("&currency="),
+                true,
+            )
+        } else {
+            (base_url, false)
+        };
 
     let response = if use_query {
         crate::http::client()
@@ -126,7 +170,7 @@ pub(crate) async fn fetch_spot_price_with_url(
         .await
         .map_err(|err| CoinbasePriceError::NetworkError(err.to_string()))?;
 
-    parse_coinbase_http_result(Ok((status, body)))
+    parse_coinbase_http_result(Ok((status, body)), base_currency)
 }
 
 #[cfg(test)]
@@ -146,7 +190,7 @@ mod tests {
             }
         }"#;
 
-        let parsed = parse_coinbase_response_body(body).unwrap();
+        let parsed = parse_coinbase_response_body(body, "BTC").unwrap();
         assert_eq!(parsed, 60000 * FLOAT_PRECISION + (FLOAT_PRECISION / 2));
     }
 
@@ -161,25 +205,64 @@ mod tests {
             }
         }"#;
 
-        let err = parse_coinbase_response_body(body).unwrap_err();
+        let err = parse_coinbase_response_body(body, "BTC").unwrap_err();
         assert_eq!(err, CoinbasePriceError::MissingUsdRate);
     }
 
     #[test]
+    fn test_parse_coinbase_response_body_currency_mismatch() {
+        let body = r#"{
+            "data": {
+                "currency": "ETH",
+                "rates": {
+                    "USD": "50000.00"
+                }
+            }
+        }"#;
+
+        let err = parse_coinbase_response_body(body, "BTC").unwrap_err();
+        assert!(matches!(
+            err,
+            CoinbasePriceError::CurrencyMismatch { expected, got }
+            if expected == "BTC" && got == "ETH"
+        ));
+    }
+
+    // #604 — Coinbase reuses binance::parse_price_to_precision, so a "USD" rate
+    // of exactly zero must surface as a parse error, not a valid price of 0.
+    #[test]
+    fn test_parse_coinbase_response_body_rejects_zero_usd_rate() {
+        let body = r#"{
+            "data": {
+                "currency": "BTC",
+                "rates": {
+                    "USD": "0"
+                }
+            }
+        }"#;
+
+        let err = parse_coinbase_response_body(body, "BTC").unwrap_err();
+        assert!(matches!(err, CoinbasePriceError::PriceParseError(_)));
+    }
+
+    #[test]
     fn test_parse_coinbase_response_body_invalid_json() {
-        let err = parse_coinbase_response_body("not json").unwrap_err();
+        let err = parse_coinbase_response_body("not json", "BTC").unwrap_err();
         assert!(matches!(err, CoinbasePriceError::JsonError(_)));
     }
 
     #[test]
     fn test_parse_coinbase_http_response_non_200() {
-        let err = parse_coinbase_http_response(404, "{}").unwrap_err();
-        assert_eq!(err, CoinbasePriceError::HttpError(404));
+        let err = parse_coinbase_http_response(404, "{}", "BTC").unwrap_err();
+        assert!(matches!(
+            err,
+            CoinbasePriceError::HttpError { status: 404, .. }
+        ));
     }
 
     #[test]
     fn test_parse_coinbase_http_result_network_failure() {
-        let err = parse_coinbase_http_result(Err("timeout".to_string())).unwrap_err();
+        let err = parse_coinbase_http_result(Err("timeout".to_string()), "BTC").unwrap_err();
         assert_eq!(err, CoinbasePriceError::NetworkError("timeout".to_string()));
     }
 
@@ -197,7 +280,7 @@ mod tests {
                 "rates": { "USD": "50000.0" }
             }
         }"#;
-        let result = parse_coinbase_response_body(body).unwrap();
+        let result = parse_coinbase_response_body(body, "BTC").unwrap();
         assert_eq!(result, 50000 * FLOAT_PRECISION);
     }
 
@@ -210,7 +293,7 @@ mod tests {
                 "rates": { "USD": "3000.0" }
             }
         }"#;
-        let result = parse_coinbase_response_body(body).unwrap();
+        let result = parse_coinbase_response_body(body, "ETH").unwrap();
         assert_eq!(result, 3000 * FLOAT_PRECISION);
     }
 
@@ -226,7 +309,7 @@ mod tests {
                 }
             }
         }"#;
-        let result = parse_coinbase_response_body(body).unwrap();
+        let result = parse_coinbase_response_body(body, "XLM").unwrap();
         assert_eq!(result, FLOAT_PRECISION);
     }
 
@@ -242,7 +325,7 @@ mod tests {
                 "rates": { "USD": "1.0" }
             }
         }"#;
-        let result = parse_coinbase_response_body(body).unwrap();
+        let result = parse_coinbase_response_body(body, "USDT").unwrap();
         assert_eq!(result, FLOAT_PRECISION);
     }
 
@@ -256,7 +339,7 @@ mod tests {
                 "rates": { "USD": "1.0" }
             }
         }"#;
-        let result = parse_coinbase_response_body(body).unwrap();
+        let result = parse_coinbase_response_body(body, "USD").unwrap();
         assert_eq!(result, FLOAT_PRECISION);
     }
 
@@ -290,15 +373,57 @@ mod tests {
     #[test]
     fn test_coinbase_parse_rejects_missing_usd_rate() {
         let body = r#"{
+        "data": {
+            "currency": "XLM",
+            "rates": {
+                "EUR": "0.9"
+            }
+        }
+    }"#;
+        let err = parse_coinbase_response_body(body, "XLM").unwrap_err();
+        assert_eq!(err, CoinbasePriceError::MissingUsdRate);
+    }
+
+    /// Test that case-insensitive currency validation works
+    #[test]
+    fn test_coinbase_currency_case_insensitive() {
+        let body = r#"{
             "data": {
-                "currency": "XLM",
-                "rates": {
-                    "EUR": "0.9"
-                }
+                "currency": "btc",
+                "rates": { "USD": "50000.0" }
             }
         }"#;
-        let err = parse_coinbase_response_body(body).unwrap_err();
-        assert_eq!(err, CoinbasePriceError::MissingUsdRate);
+        let result = parse_coinbase_response_body(body, "BTC").unwrap();
+        assert_eq!(result, 50000 * FLOAT_PRECISION);
+    }
+
+    /// Test that parse_coinbase_http_response validates currency
+    #[test]
+    fn test_parse_coinbase_http_response_currency_validation() {
+        let body = r#"{
+            "data": {
+                "currency": "BTC",
+                "rates": { "USD": "50000.0" }
+            }
+        }"#;
+        let result = parse_coinbase_http_response(200, body, "BTC").unwrap();
+        assert_eq!(result, 50000 * FLOAT_PRECISION);
+    }
+
+    #[test]
+    fn test_parse_coinbase_http_response_wrong_currency() {
+        let body = r#"{
+            "data": {
+                "currency": "ETH",
+                "rates": { "USD": "50000.0" }
+            }
+        }"#;
+        let err = parse_coinbase_http_response(200, body, "BTC").unwrap_err();
+        assert!(matches!(
+            err,
+            CoinbasePriceError::CurrencyMismatch { expected, got }
+            if expected == "BTC" && got == "ETH"
+        ));
     }
 
     // ── HTTP-level wiremock tests ─────────────────────────────────────────────
@@ -398,7 +523,10 @@ mod tests {
         let err = super::fetch_spot_price_with_url(&base_url, "BTC")
             .await
             .unwrap_err();
-        assert_eq!(err, CoinbasePriceError::HttpError(404));
+        assert!(matches!(
+            err,
+            CoinbasePriceError::HttpError { status: 404, .. }
+        ));
     }
 
     #[tokio::test]
@@ -417,6 +545,9 @@ mod tests {
         let err = super::fetch_spot_price_with_url(&base_url, "BTC")
             .await
             .unwrap_err();
-        assert_eq!(err, CoinbasePriceError::HttpError(500));
+        assert!(matches!(
+            err,
+            CoinbasePriceError::HttpError { status: 500, .. }
+        ));
     }
 }

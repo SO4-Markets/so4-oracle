@@ -139,11 +139,19 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
         return Err(ConfigError::EmptyTokenList);
     }
 
+    let mut symbols_seen = std::collections::HashSet::new();
     for token in &tokens {
         if token.symbol.is_empty() {
             return Err(ConfigError::InvalidToken {
                 symbol: "(empty)".to_string(),
                 reason: "symbol must not be empty".to_string(),
+            });
+        }
+        let lower_symbol = token.symbol.to_lowercase();
+        if !symbols_seen.insert(lower_symbol) {
+            return Err(ConfigError::InvalidToken {
+                symbol: token.symbol.clone(),
+                reason: "duplicate symbol (case-insensitive)".to_string(),
             });
         }
         // stellar_address and sources are optional for the API server path,
@@ -153,7 +161,9 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
                 "binance" => {
                     if let Some(ref sym) = token.binance_symbol {
                         if sym.is_empty()
-                            || !sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                            || !sym
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
                         {
                             return Err(ConfigError::InvalidToken {
                                 symbol: token.symbol.clone(),
@@ -165,7 +175,9 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
                 "coinbase" => {
                     if let Some(ref sym) = token.coinbase_symbol {
                         if sym.is_empty()
-                            || !sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                            || !sym
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
                         {
                             return Err(ConfigError::InvalidToken {
                                 symbol: token.symbol.clone(),
@@ -282,6 +294,22 @@ mod tests {
         let json = r#"[{"symbol":"","stellar_address":"CADDR","sources":["binance"]}]"#;
         let err = parse_token_configs(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }));
+    }
+
+    #[test]
+    fn reject_case_colliding_symbols() {
+        let json = r#"[
+            {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance"],"min":44000.0,"max":46000.0},
+            {"symbol":"btc","stellar_address":"CETHADDR","sources":["binance"],"min":2400.0,"max":2600.0}
+        ]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        match err {
+            ConfigError::InvalidToken { symbol, reason } => {
+                assert_eq!(symbol, "btc");
+                assert_eq!(reason, "duplicate symbol (case-insensitive)");
+            }
+            _ => panic!("expected ConfigError::InvalidToken"),
+        }
     }
 
     #[test]

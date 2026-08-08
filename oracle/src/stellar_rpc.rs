@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, PartialEq, Clone)]
 pub enum RpcError {
     NetworkError(String),
-    HttpError(u16),
+    HttpError { status: u16, body: String },
     JsonError(String),
     RpcFault { code: i64, message: String },
     BalanceBelowMinimum { balance_xlm: f64, min_xlm: f64 },
@@ -18,7 +18,7 @@ impl crate::retry::Retryable for RpcError {
     fn is_retryable(&self) -> bool {
         match self {
             RpcError::NetworkError(_) => true,
-            RpcError::HttpError(code) => *code >= 500 || *code == 429,
+            RpcError::HttpError { status, .. } => *status >= 500 || *status == 429,
             RpcError::JsonError(_) => false,
             RpcError::RpcFault { .. } => false,
             RpcError::BalanceBelowMinimum { .. } => false,
@@ -30,7 +30,13 @@ impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RpcError::NetworkError(msg) => write!(f, "network error: {msg}"),
-            RpcError::HttpError(code) => write!(f, "HTTP {code}"),
+            RpcError::HttpError { status, body } => {
+                if body.is_empty() {
+                    write!(f, "HTTP {status}")
+                } else {
+                    write!(f, "HTTP {status}: {body}")
+                }
+            }
             RpcError::JsonError(msg) => write!(f, "JSON parse error: {msg}"),
             RpcError::RpcFault { code, message } => {
                 write!(f, "RPC fault {code}: {message}")
@@ -138,7 +144,10 @@ pub(crate) async fn rpc_post(rpc_url: &str, payload: String) -> Result<String, R
         .map_err(|e| RpcError::NetworkError(e.to_string()))?;
 
     if status != 200 {
-        return Err(RpcError::HttpError(status));
+        return Err(RpcError::HttpError {
+            status,
+            body: crate::http::truncate_error_body(&body),
+        });
     }
 
     Ok(body)
@@ -200,7 +209,10 @@ pub async fn get_account_balance_stroops(
         .map_err(|e| RpcError::NetworkError(e.to_string()))?;
 
     if status != 200 {
-        return Err(RpcError::HttpError(status));
+        return Err(RpcError::HttpError {
+            status,
+            body: crate::http::truncate_error_body(&body),
+        });
     }
 
     parse_account_balance_response(&body)
@@ -335,7 +347,7 @@ mod tests {
         let err = get_account_balance_stroops(&server.uri(), "GNOT_FOUND")
             .await
             .unwrap_err();
-        assert_eq!(err, RpcError::HttpError(404));
+        assert!(matches!(err, RpcError::HttpError { status: 404, .. }));
     }
 
     #[tokio::test]
@@ -354,6 +366,6 @@ mod tests {
         let err = get_account_balance_stroops(&server.uri(), "GABC")
             .await
             .unwrap_err();
-        assert_eq!(err, RpcError::HttpError(500));
+        assert!(matches!(err, RpcError::HttpError { status: 500, .. }));
     }
 }

@@ -178,6 +178,57 @@ mod tests {
         }
     }
 
+    // #522 — account_strkey_to_muxed direct coverage, including error branch
+
+    #[test]
+    fn test_account_strkey_to_muxed_valid_account() {
+        let addr = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let muxed = account_strkey_to_muxed(addr).unwrap();
+        match muxed {
+            stellar_xdr::MuxedAccount::Ed25519(stellar_xdr::Uint256(bytes)) => {
+                // Round-trip the key bytes back to a strkey to prove the
+                // MuxedAccount carries the same underlying public key.
+                let roundtrip = stellar_strkey::ed25519::PublicKey(bytes).to_string();
+                assert_eq!(roundtrip, addr);
+            }
+            other => panic!("expected MuxedAccount::Ed25519, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_account_strkey_to_muxed_rejects_contract_strkey() {
+        let contract = "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY";
+        let err = account_strkey_to_muxed(contract).unwrap_err();
+        assert!(
+            err.starts_with("expected G... account strkey"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_account_strkey_to_muxed_rejects_muxed_strkey() {
+        let pk = stellar_strkey::ed25519::PublicKey::from_string(
+            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+        )
+        .unwrap();
+        let muxed_strkey = stellar_strkey::ed25519::MuxedAccount {
+            ed25519: pk.0,
+            id: 1,
+        }
+        .to_string();
+        let err = account_strkey_to_muxed(&muxed_strkey).unwrap_err();
+        assert!(
+            err.starts_with("expected G... account strkey"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_account_strkey_to_muxed_rejects_malformed_strkey() {
+        let err = account_strkey_to_muxed("GAUHMCMUP5FZO5675").unwrap_err();
+        assert!(err.starts_with("invalid strkey"), "unexpected error: {err}");
+    }
+
     #[test]
     fn test_encode_signed_price_non_hex_signature() {
         let price = CachedPrice {

@@ -175,7 +175,6 @@ impl AppState {
             frozen_order_blacklist: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-
 }
 
 #[cfg(test)]

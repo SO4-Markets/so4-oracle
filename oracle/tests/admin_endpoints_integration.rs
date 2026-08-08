@@ -240,6 +240,41 @@ async fn failed_submissions_respects_limit() {
     assert_eq!(json["total_count"], 5);
 }
 
+// #602 — a malformed `limit` must still come back as the API's JSON error
+// envelope rather than axum's default text/plain query rejection.
+#[tokio::test]
+async fn failed_submissions_rejects_non_numeric_limit_as_json() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/oracle/failed-submissions?limit=abc")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["error"].is_string());
+}
+
 // ── #433 — GET /keeper/balance ───────────────────────────────────────────────
 
 #[tokio::test]
