@@ -1,0 +1,15 @@
+# Default reviewers for the entire repository
+* @SO4-Markets/oracle-team
+
+# Oracle core
+/oracle/ @SO4-Markets/oracle-team
+
+# Shared config
+/shared/ @SO4-Markets/oracle-team
+
+# CI and infrastructure
+/.github/ @SO4-Markets/infra-team
+/Dockerfile @SO4-Markets/infra-team
+/fly.toml @SO4-Markets/infra-team
+/railway.json @SO4-Markets/infra-team
+/deny.toml @SO4-Markets/infra-team

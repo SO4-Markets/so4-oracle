@@ -8,7 +8,10 @@ pub const FLOAT_PRECISION: i128 = 1_000_000_000_000_000_000_000_000_000_000;
 #[derive(Debug, Clone, PartialEq)]
 pub enum PythPriceError {
     NetworkError(String),
-    HttpError { status: u16, body: String },
+    HttpError {
+        status: u16,
+        body: String,
+    },
     JsonError(String),
     PriceParseError(String),
     MissingFeedId(String),
@@ -706,10 +709,7 @@ mod tests {
         let err = super::fetch_pyth_price_with_url(&server.uri(), "feed-1", 60, 50)
             .await
             .unwrap_err();
-        assert!(matches!(
-            err,
-            PythPriceError::HttpError { status: 404, .. }
-        ));
+        assert!(matches!(err, PythPriceError::HttpError { status: 404, .. }));
     }
 
     #[tokio::test]
@@ -727,10 +727,7 @@ mod tests {
         let err = super::fetch_pyth_price_with_url(&server.uri(), "feed-1", 60, 50)
             .await
             .unwrap_err();
-        assert!(matches!(
-            err,
-            PythPriceError::HttpError { status: 500, .. }
-        ));
+        assert!(matches!(err, PythPriceError::HttpError { status: 500, .. }));
     }
 
     // #532 — array branch must match the requested feed_id, not blindly pop

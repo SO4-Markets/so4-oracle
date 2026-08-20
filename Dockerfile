@@ -20,7 +20,7 @@ COPY oracle ./oracle
 COPY config ./config
 
 # Build the binary
-RUN cargo build --release --bin oracle
+RUN cargo build --release --locked --bin oracle
 
 # Runtime stage
 FROM debian:bookworm-slim

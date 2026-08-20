@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["0xsteins"]
 license = "MIT"
+rust-version.workspace = true
 
 [lints]
 workspace = true

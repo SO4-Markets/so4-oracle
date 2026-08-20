@@ -106,6 +106,7 @@ fn build_spot_price_url(symbols: &[String]) -> String {
     build_spot_price_url_for(BINANCE_TICKER_PRICE_URL, symbols)
 }
 
+// Binance symbols are strictly [A-Z0-9] — no percent-encoding needed.
 fn build_spot_price_url_for(base_url: &str, symbols: &[String]) -> String {
     if symbols.len() == 1 {
         format!("{}?symbol={}", base_url, symbols[0])
@@ -116,27 +117,6 @@ fn build_spot_price_url_for(base_url: &str, symbols: &[String]) -> String {
             serde_json::to_string(symbols).unwrap()
         )
     }
-}
-
-#[cfg(test)]
-fn percent_encode_query_value(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::with_capacity(value.len());
-
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(byte as char);
-            }
-            _ => {
-                encoded.push('%');
-                encoded.push(HEX[(byte >> 4) as usize] as char);
-                encoded.push(HEX[(byte & 0x0f) as usize] as char);
-            }
-        }
-    }
-
-    encoded
 }
 
 pub async fn fetch_spot_prices(

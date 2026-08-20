@@ -2,6 +2,9 @@
 members = ["oracle", "shared/config"]
 resolver = "2"
 
+[workspace.package]
+rust-version = "1.95"
+
 [workspace.lints.rust]
 mismatched_lifetime_syntaxes = "allow"
 
