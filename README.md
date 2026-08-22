@@ -18,6 +18,7 @@ so4-oracle  (single statically-deployed binary)
 │     GET /prices                      public   serves in-memory PriceCache (frontend)
 │     GET /oracle/status               admin    last cycle, balance, per-token state
 │     GET /keeper/status               admin    pending work + last N executions
+│     GET /keeper/balance              admin    Current keeper account XLM balance
 │     GET /oracle/failed-submissions   admin    ring buffer of failures
 │     GET /metrics                     admin    Prometheus metrics
 ├── task: price_loop   tokio::interval(~1s)
@@ -169,6 +170,7 @@ railway up
 | `/prices` | GET | No | Current price feeds (CORS-enabled) |
 | `/oracle/status` | GET | Admin | Oracle status and recent errors |
 | `/keeper/status` | GET | Admin | Keeper status and execution history |
+| `/keeper/balance` | GET | Admin | Current keeper account XLM balance |
 | `/oracle/failed-submissions` | GET | Admin | Failed submission history |
 | `/metrics` | GET | Admin | Prometheus metrics |
 

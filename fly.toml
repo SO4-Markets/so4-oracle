@@ -46,5 +46,5 @@ primary_region = 'iad'
     port = 8080
     type = 'http'
     interval = '10s'
-    timeout = '3s'
+    timeout = '15s'
     path = '/ready'

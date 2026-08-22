@@ -1,3 +1,5 @@
+pub const MAX_BACKOFF_DELAY_MS: u64 = 30_000;
+
 /// Retry an async fallible closure with exponential backoff (resolves #356, #585).
 ///
 /// Doubles the delay after every failure, starting at `base_delay_ms`, and

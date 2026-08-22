@@ -54,6 +54,8 @@ impl std::fmt::Display for RpcError {
     }
 }
 
+impl std::error::Error for RpcError {}
+
 // ── JSON-RPC wire types ──────────────────────────────────────────────────────
 
 #[derive(Serialize)]

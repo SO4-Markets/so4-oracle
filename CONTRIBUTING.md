@@ -36,7 +36,7 @@ Key variables (see `oracle/src/config.rs` for the full list):
 | `PRICE_FEED_CONFIG` | JSON array of `TokenConfig` entries (see `config/tokens.json` for the schema) |
 | `STELLAR_RPC_URL` | Soroban RPC endpoint |
 | `HORIZON_URL` | Stellar Horizon endpoint |
-| `NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` (testnet) or mainnet equivalent |
+| `STELLAR_NETWORK` | `testnet` or `mainnet` (network passphrase is automatically selected) |
 | `KEEPER_SECRET_KEY` | Stellar secret key for the keeper account |
 | `ORACLE_CONTRACT_ID` | Deployed oracle contract address |
 | `ADMIN_API_TOKEN` | Bearer token for admin routes (`/oracle/status`, `/metrics`, etc.) |
@@ -80,7 +80,7 @@ so4-oracle/
 │   └── config/src/lib.rs    TokenConfig struct + parse_token_configs() — shared by oracle
 ├── config/
 │   └── tokens.json          Example token config for local development
-└── tests/                   Integration tests
+└── oracle/tests/            Integration tests
 ```
 
 There is **no** Cloudflare Worker, `wrangler.toml`, or `apis/` crate in this repository. The oracle is a plain Axum binary deployed via Docker (see `Dockerfile`) on Fly.io / Railway (see `fly.toml`, `railway.json`).
@@ -158,7 +158,7 @@ Before starting, leave a comment on the issue so no one duplicates effort.
 ## Testing
 
 - Unit tests go in the same file: `#[cfg(test)] mod tests { ... }`.
-- Integration tests go in `tests/` at the workspace root.
+- Integration tests go in `oracle/tests/`, never a root-level `tests/` directory — the root manifest is virtual and Cargo silently ignores anything placed there (see CI's `fmt` job for the guard against this).
 - For HTTP endpoint tests, use `axum::test` or `reqwest` against a spawned server.
 
 ---

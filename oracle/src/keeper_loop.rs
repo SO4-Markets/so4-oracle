@@ -30,6 +30,8 @@ impl std::fmt::Display for SequenceFetchError {
     }
 }
 
+impl std::error::Error for SequenceFetchError {}
+
 impl crate::retry::Retryable for SequenceFetchError {
     fn is_retryable(&self) -> bool {
         matches!(self, Self::Network(_))
@@ -653,7 +655,7 @@ async fn get_account_sequence(state: &Arc<AppState>) -> Result<u64, SequenceFetc
         || async { get_account_sequence_once(state).await },
         ACCOUNT_SEQUENCE_RETRY_ATTEMPTS,
         ACCOUNT_SEQUENCE_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await
 }
