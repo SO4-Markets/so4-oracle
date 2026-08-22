@@ -213,9 +213,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(prices::failed_submissions),
         )
         .with_state(state.clone())
+        // Order matters and is easy to read backwards. Chained Router::layer() calls make the
+        // LAST one added the OUTERMOST, so the request reaches them bottom-up: track_metrics,
+        // then SetRequestId, then trace_layer, then Propagate.
+        //
+        // SetRequestId has to come after trace_layer here so it runs BEFORE it. When it was listed
+        // first, make_span_with read the extension SetRequestId had not written yet, so every span
+        // carried request_id = "" — while the response header kept working, because Propagate only
+        // needs the id by the time the response is built.
         .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(trace_layer)
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(axum::middleware::from_fn_with_state(state, track_metrics))
 }
 

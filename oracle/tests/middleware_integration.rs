@@ -134,3 +134,96 @@ async fn test_promtool_validation() {
         println!("promtool not found, skipping validation test");
     }
 }
+
+/// The request ID has to reach the SPAN, not just the response header.
+///
+/// `test_request_id_and_completion_logs` above asserts the header, which is produced by
+/// `PropagateRequestIdLayer` and worked even while every span carried `request_id = ""` — so the
+/// header assertion cannot see this bug at all (#790, and the README claim in #813).
+///
+/// Captures the span's own field rather than parsing formatted output, so it does not depend on the
+/// log format staying JSON.
+#[tokio::test]
+async fn request_id_reaches_the_trace_span_not_only_the_response_header() {
+    use std::sync::{Arc as StdArc, Mutex};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::Layer;
+
+    #[derive(Default)]
+    struct Captured(StdArc<Mutex<Vec<String>>>);
+
+    struct CaptureRequestId(StdArc<Mutex<Vec<String>>>);
+
+    struct Visitor(StdArc<Mutex<Vec<String>>>);
+    impl tracing::field::Visit for Visitor {
+        // The span records `request_id = %request_id`, i.e. a Display value, which reaches a
+        // visitor through record_debug rather than record_str. Both are implemented so the test
+        // does not silently stop seeing the field if that changes.
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if "request_id" == field.name() {
+                let rendered = format!("{value:?}");
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(rendered.trim_matches('"').to_string());
+            }
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if "request_id" == field.name() {
+                self.0.lock().unwrap().push(value.to_string());
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for CaptureRequestId {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: Context<'_, S>,
+        ) {
+            attrs.record(&mut Visitor(StdArc::clone(&self.0)));
+        }
+    }
+
+    let seen = Captured::default().0;
+    let subscriber = tracing_subscriber::registry().with(CaptureRequestId(StdArc::clone(&seen)));
+
+    let mock_server = MockServer::start().await;
+    let config = test_config(&mock_server.uri(), "http://127.0.0.1:9");
+    let app = build_router(Arc::new(AppState::new(config)));
+
+    let response = tracing::subscriber::with_default(subscriber, || {
+        futures::executor::block_on(async {
+            app.oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header("x-request-id", "req-from-the-caller")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        })
+    });
+
+    let header = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let ids = seen.lock().unwrap().clone();
+    // Guards the guard: no span recorded means the assertion below would pass for free.
+    assert!(!ids.is_empty(), "no request span was recorded at all");
+    assert!(
+        ids.iter().any(|id| !id.is_empty()),
+        "every span carried an empty request_id — the trace layer ran before SetRequestIdLayer"
+    );
+    assert!(
+        ids.contains(&header),
+        "the span's request_id {ids:?} does not match the response header {header:?}"
+    );
+}
