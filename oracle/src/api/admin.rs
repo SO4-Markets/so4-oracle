@@ -71,9 +71,10 @@ pub async fn keeper_status(
 
     let last_executions: Vec<_> = keeper_status
         .last_executions
-        .into_iter()
+        .iter()
         .rev()
         .take(50)
+        .cloned()
         .collect();
 
     Json(KeeperStatusResponse {

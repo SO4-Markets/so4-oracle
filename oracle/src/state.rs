@@ -49,12 +49,29 @@ pub struct CycleStatus {
     pub last_keeper_cycle_latency_ms: Option<u64>,
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
+/// Keeper executions retained for the admin endpoint. Unchanged from the manual trim this
+/// replaced; the endpoint still returns the most recent 50 of them.
+pub const KEEPER_EXECUTION_RING_CAPACITY: usize = 100;
+
+#[derive(Debug, Clone, Serialize)]
 pub struct KeeperStatus {
     pub pending_orders: usize,
     pub pending_deposits: usize,
     pub pending_withdrawals: usize,
-    pub last_executions: Vec<KeeperExecution>,
+    pub last_executions: RingBuffer<KeeperExecution>,
+}
+
+// Hand-written rather than derived: `RingBuffer::default()` is FAILURE_RING_CAPACITY, which is the
+// failures list's 256, not this list's 100.
+impl Default for KeeperStatus {
+    fn default() -> Self {
+        Self {
+            pending_orders: 0,
+            pending_deposits: 0,
+            pending_withdrawals: 0,
+            last_executions: RingBuffer::new(KEEPER_EXECUTION_RING_CAPACITY),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -127,6 +144,17 @@ impl<T> Default for RingBuffer<T> {
     }
 }
 
+// Oldest first, like the `Vec` this replaced, so anything serializing a struct that holds one sees
+// the same JSON array it saw before.
+impl<T: Serialize> Serialize for RingBuffer<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_seq(self.items.iter())
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ReadyCache {
     pub last_checked: Option<std::time::Instant>,
@@ -179,7 +207,11 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::RingBuffer;
+    use super::{
+        KeeperExecution, KeeperStatus, RingBuffer, FAILURE_RING_CAPACITY,
+        KEEPER_EXECUTION_RING_CAPACITY,
+    };
+    use std::time::SystemTime;
 
     #[test]
     fn ring_buffer_evicts_oldest_items_at_capacity() {
@@ -202,5 +234,57 @@ mod tests {
         buffer.push(3);
 
         assert_eq!(buffer.iter().count(), 0);
+    }
+
+    #[test]
+    fn keeper_status_keeps_only_the_most_recent_executions() {
+        // The bound the manual `Vec::remove(0)` trim used to enforce, now enforced by the buffer.
+        // Nothing covered it before, so a capacity change would have gone unnoticed.
+        let mut status = KeeperStatus::default();
+        for i in 0..KEEPER_EXECUTION_RING_CAPACITY + 25 {
+            status.last_executions.push(KeeperExecution {
+                timestamp: SystemTime::now(),
+                operation: format!("op-{i}"),
+                key: String::new(),
+                tx_hash: None,
+                success: true,
+                error: None,
+            });
+        }
+
+        assert_eq!(
+            status.last_executions.iter().count(),
+            KEEPER_EXECUTION_RING_CAPACITY
+        );
+        // Oldest evicted, newest retained, order preserved.
+        assert_eq!(
+            status.last_executions.iter().next().unwrap().operation,
+            format!("op-{}", 25)
+        );
+        assert_eq!(
+            status.last_executions.iter().next_back().unwrap().operation,
+            format!("op-{}", KEEPER_EXECUTION_RING_CAPACITY + 24)
+        );
+    }
+
+    #[test]
+    fn keeper_status_default_uses_its_own_capacity_not_the_failure_ring() {
+        // RingBuffer::default() is FAILURE_RING_CAPACITY (256). If KeeperStatus ever goes back to a
+        // derived Default, this list silently grows to 256 and this test is what says so.
+        let mut status = KeeperStatus::default();
+        for i in 0..FAILURE_RING_CAPACITY {
+            status.last_executions.push(KeeperExecution {
+                timestamp: SystemTime::now(),
+                operation: format!("op-{i}"),
+                key: String::new(),
+                tx_hash: None,
+                success: true,
+                error: None,
+            });
+        }
+        assert_eq!(
+            status.last_executions.iter().count(),
+            KEEPER_EXECUTION_RING_CAPACITY
+        );
     }
 }
