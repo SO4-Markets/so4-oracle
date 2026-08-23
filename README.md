@@ -18,6 +18,7 @@ so4-oracle  (single statically-deployed binary)
 │     GET /prices                      public   serves in-memory PriceCache (frontend)
 │     GET /oracle/status               admin    last cycle, balance, per-token state
 │     GET /keeper/status               admin    pending work + last N executions
+│     GET /keeper/balance              admin    current keeper account XLM balance
 │     GET /oracle/failed-submissions   admin    ring buffer of failures
 │     GET /metrics                     admin    Prometheus metrics
 ├── task: price_loop   tokio::interval(~1s)
