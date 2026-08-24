@@ -187,6 +187,12 @@ impl Metrics {
     /// Stamp the last-update time as part of the same locked critical
     /// section as the counters it accompanies, instead of a separate
     /// unsynchronized atomic store.
+    ///
+    /// Called by the price and keeper cycle recorders only. The HTTP recorders
+    /// deliberately do not: `oracle_last_metrics_update` is a freshness signal for the
+    /// cycles, and folding request traffic into it would make it advance whenever anything
+    /// hit the service, which is the opposite of what it is watched for. Its HELP text says
+    /// so — if that ever changes, change both.
     fn stamp(c: &mut Counters) {
         c.last_metrics_update = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -309,7 +315,13 @@ impl Metrics {
             c.submit_failures
         ));
 
-        output.push_str("# HELP oracle_last_metrics_update Timestamp of last metrics update\n");
+        // Scope named explicitly. "last metrics update" reads as any metrics activity, but only
+        // the price/keeper cycle recorders call stamp() — the four HTTP recorders never have. An
+        // operator reading it as whole-service liveness would see it advancing from cycle activity
+        // while the HTTP layer was stalled, and conclude the service was healthy.
+        output.push_str(
+            "# HELP oracle_last_metrics_update Unix timestamp of the last price or keeper cycle metric update (does not track HTTP request metrics)\n",
+        );
         output.push_str("# TYPE oracle_last_metrics_update gauge\n");
         output.push_str(&format!(
             "oracle_last_metrics_update {}\n",
