@@ -36,9 +36,6 @@ RUN apt-get update && apt-get install -y \
 # Copy the binary from builder
 COPY --from=builder /app/target/release/oracle /app/oracle
 
-# Copy configuration files
-COPY config/tokens.json /app/config/tokens.json
-
 # Create non-root user
 RUN useradd -r -s /bin/false oracle
 USER oracle

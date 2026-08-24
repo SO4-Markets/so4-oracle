@@ -21,6 +21,8 @@ impl std::fmt::Display for SigningError {
     }
 }
 
+impl std::error::Error for SigningError {}
+
 /// Layout: `network_passphrase || ledger_seq || token_strkey || min || max || timestamp`
 ///
 /// Data types:

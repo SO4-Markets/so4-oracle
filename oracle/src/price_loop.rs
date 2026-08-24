@@ -40,6 +40,8 @@ impl std::fmt::Display for PriceSourceError {
     }
 }
 
+impl std::error::Error for PriceSourceError {}
+
 impl crate::retry::Retryable for PriceSourceError {
     fn is_retryable(&self) -> bool {
         match self {
@@ -308,7 +310,7 @@ async fn fetch_source_with_retry(
         || async { fetch_source_price(source, token, pyth_api_key, pyth_prices).await },
         SOURCE_RETRY_ATTEMPTS,
         SOURCE_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await
 }

@@ -21,7 +21,6 @@ EnvironmentFile=/opt/oracle/.env
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/oracle
 
 # Logging
 StandardOutput=journal
