@@ -668,50 +668,145 @@ mod tests {
         assert!(!price.is_stale(60, 1000));
     }
 
-    #[test]
-    fn test_fresh_vs_stale_price_selection() {
-        let now = 1000;
-        let stale_after = 60;
+    /// Exercises `run_price_cycle`'s cache eviction path (#816): a pre-populated
+    /// cache with one fresh and one stale entry must retain only the fresh token
+    /// after the cycle (stale entries are omitted from `new_prices`).
+    #[tokio::test]
+    async fn test_fresh_vs_stale_price_selection() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let fresh_price = CachedPrice {
-            token_address: "GAFRESH".to_string(),
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "id": "abc", "sequence": 12345, "protocolVersion": "22" }
+            })))
+            .mount(&mock)
+            .await;
+
+        let fresh_addr = "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES";
+        let stale_addr = "CSTA1EADDR11111111111111111111111111111111111111111111111";
+        let fresh_token = TokenConfig {
             symbol: "FRESH".to_string(),
-            display_symbol: "FRESH".to_string(),
-            keeper_index: 0,
-            min: 100,
-            max: 100,
-            median: 100,
-            timestamp: now - 30,
-            ledger_seq: 12345,
-            sources_used: vec!["test".to_string()],
-            signature: "sig".to_string(),
+            display_symbol: Some("FRESH".to_string()),
+            stellar_address: fresh_addr.to_string(),
+            sources: vec!["fixed".to_string()],
+            binance_symbol: None,
+            coinbase_symbol: None,
+            pyth_feed_id: None,
+            fixed_price: Some("1000000000000000000000000000000".to_string()),
+            min_sources: 1,
+            max_deviation_bps: 100,
+            stale_after_seconds: 60,
+            submit_threshold_bps: 10,
+            min: 0.0,
+            max: 0.0,
+            sources_used: vec![],
         };
-
-        let stale_price = CachedPrice {
-            token_address: "GASTALE".to_string(),
+        let stale_token = TokenConfig {
             symbol: "STALE".to_string(),
-            display_symbol: "STALE".to_string(),
-            keeper_index: 0,
-            min: 90,
-            max: 90,
-            median: 90,
-            timestamp: now - 100,
-            ledger_seq: 12344,
-            sources_used: vec!["test".to_string()],
-            signature: "sig".to_string(),
+            display_symbol: Some("STALE".to_string()),
+            stellar_address: stale_addr.to_string(),
+            sources: vec!["fixed".to_string()],
+            binance_symbol: None,
+            coinbase_symbol: None,
+            pyth_feed_id: None,
+            fixed_price: Some("900000000000000000000000000000".to_string()),
+            min_sources: 1,
+            max_deviation_bps: 100,
+            stale_after_seconds: 60,
+            submit_threshold_bps: 10,
+            min: 0.0,
+            max: 0.0,
+            sources_used: vec![],
         };
 
-        // Verify freshness detection
-        assert!(!fresh_price.is_stale(stale_after, now));
-        assert!(stale_price.is_stale(stale_after, now));
+        let config = Config {
+            bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            network: Network::Testnet,
+            network_passphrase: "Test SDF Network ; September 2015".to_string(),
+            stellar_rpc_url: mock.uri(),
+            horizon_url: "http://localhost:0".to_string(),
+            oracle_contract_id: "CORACLE".to_string(),
+            role_store_contract_id: "CROLE".to_string(),
+            data_store_contract_id: "CDATA".to_string(),
+            order_handler_contract_id: "CORDER".to_string(),
+            deposit_handler_contract_id: "CDEPOSIT".to_string(),
+            withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
+            reader_contract_id: "CREADER".to_string(),
+            keeper_private_key: SecretString::new(
+                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            ),
+            keeper_secret_key: SecretString::new("SSECRET".to_string()),
+            keeper_account_id: "GACCOUNT".to_string(),
+            keeper_index: 0,
+            admin_api_token: None,
+            pyth_api_key: None,
+            min_keeper_balance_xlm: 0.0,
+            set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
+            keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
+            price_loop_interval: Duration::from_millis(1),
+            keeper_loop_interval: Duration::from_millis(1),
+            price_feed: PriceFeedConfig {
+                tokens: vec![fresh_token.clone(), stale_token.clone()],
+            },
+        };
+        let state = Arc::new(AppState::new(Arc::new(config)));
 
-        // Verify prices are correctly identified
-        let fresh_prices: Vec<_> = vec![fresh_price.clone(), stale_price.clone()]
-            .into_iter()
-            .filter(|p| !p.is_stale(stale_after, now))
-            .collect();
+        let now = crate::current_timestamp_secs();
+        let fresh_key = fresh_token.lookup_key();
+        let stale_key = stale_token.lookup_key();
 
-        assert_eq!(fresh_prices.len(), 1);
-        assert_eq!(fresh_prices[0].symbol, "FRESH");
+        {
+            let mut cache = state.price_cache.write().await;
+            cache.prices.insert(
+                fresh_key.clone(),
+                CachedPrice {
+                    token_address: fresh_addr.to_string(),
+                    symbol: "FRESH".to_string(),
+                    display_symbol: "FRESH".to_string(),
+                    keeper_index: 0,
+                    min: 100,
+                    max: 100,
+                    median: 100,
+                    timestamp: now - 30,
+                    ledger_seq: 100,
+                    sources_used: vec!["fixed".to_string()],
+                    signature: "old-fresh".to_string(),
+                },
+            );
+            cache.prices.insert(
+                stale_key.clone(),
+                CachedPrice {
+                    token_address: stale_addr.to_string(),
+                    symbol: "STALE".to_string(),
+                    display_symbol: "STALE".to_string(),
+                    keeper_index: 0,
+                    min: 90,
+                    max: 90,
+                    median: 90,
+                    timestamp: now - 120,
+                    ledger_seq: 50,
+                    sources_used: vec!["fixed".to_string()],
+                    signature: "old-stale".to_string(),
+                },
+            );
+        }
+
+        run_price_cycle(Arc::clone(&state)).await;
+
+        let cache = state.price_cache.read().await;
+        assert!(
+            cache.prices.contains_key(&fresh_key),
+            "fresh token must survive run_price_cycle eviction"
+        );
+        assert!(
+            !cache.prices.contains_key(&stale_key),
+            "stale token must be evicted by run_price_cycle"
+        );
+        assert_eq!(cache.prices.len(), 1);
+        assert_eq!(cache.prices.get(&fresh_key).unwrap().symbol, "FRESH");
     }
 }
