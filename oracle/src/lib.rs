@@ -1,5 +1,3 @@
-pub mod price;
-
 pub mod auth;
 pub mod binance;
 pub mod chain;

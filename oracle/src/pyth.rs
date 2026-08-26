@@ -84,12 +84,6 @@ impl crate::retry::Retryable for PythPriceError {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct PythPrice {
-    pub price: PythPriceData,
-    pub id: String,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct PythPriceData {
     pub price: String,

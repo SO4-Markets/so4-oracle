@@ -14,6 +14,10 @@ use crate::state::{
 
 const ACCOUNT_SEQUENCE_RETRY_ATTEMPTS: u32 = 3;
 const ACCOUNT_SEQUENCE_RETRY_BASE_DELAY_MS: u64 = 100;
+/// Retry budget for `simulate_contract_call` — same transient-RPC-blip class
+/// `get_account_sequence` already retries for (#799).
+const SIMULATE_RETRY_ATTEMPTS: u32 = 3;
+const SIMULATE_RETRY_BASE_DELAY_MS: u64 = 100;
 /// Hard cap on a single keeper cycle — closes #490.
 const KEEPER_CYCLE_TIMEOUT_SECS: u64 = 50;
 
@@ -30,6 +34,8 @@ impl std::fmt::Display for SequenceFetchError {
         }
     }
 }
+
+impl std::error::Error for SequenceFetchError {}
 
 impl crate::retry::Retryable for SequenceFetchError {
     fn is_retryable(&self) -> bool {
@@ -741,7 +747,26 @@ async fn get_account_sequence_once(state: &Arc<AppState>) -> Result<u64, Sequenc
     })
 }
 
+/// Retry wrapper around [`simulate_contract_call_once`]: a single transient
+/// RPC failure on either of `get_pending_keys`' two simulate calls otherwise
+/// makes the keeper treat "no pending work" as the result for the whole
+/// cycle. Matches `get_account_sequence`'s `retry_with_backoff` usage (#799).
 async fn simulate_contract_call(
+    state: &Arc<AppState>,
+    contract_id: &str,
+    method: &str,
+    args: &[&str],
+) -> Result<String, String> {
+    crate::retry::retry_with_backoff(
+        || async { simulate_contract_call_once(state, contract_id, method, args).await },
+        SIMULATE_RETRY_ATTEMPTS,
+        SIMULATE_RETRY_BASE_DELAY_MS,
+        30_000,
+    )
+    .await
+}
+
+async fn simulate_contract_call_once(
     state: &Arc<AppState>,
     contract_id: &str,
     method: &str,

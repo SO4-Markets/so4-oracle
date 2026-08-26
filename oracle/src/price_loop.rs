@@ -42,6 +42,8 @@ impl std::fmt::Display for PriceSourceError {
     }
 }
 
+impl std::error::Error for PriceSourceError {}
+
 impl crate::retry::Retryable for PriceSourceError {
     fn is_retryable(&self) -> bool {
         match self {

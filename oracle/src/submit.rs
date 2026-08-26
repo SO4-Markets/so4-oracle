@@ -75,6 +75,8 @@ impl std::fmt::Display for SubmitError {
     }
 }
 
+impl std::error::Error for SubmitError {}
+
 impl From<RpcError> for SubmitError {
     fn from(err: RpcError) -> Self {
         SubmitError::Rpc(err)
