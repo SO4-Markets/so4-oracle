@@ -889,9 +889,6 @@ async fn record_execution(
         success,
         error,
     });
-    if keeper_status.last_executions.len() > 100 {
-        keeper_status.last_executions.remove(0);
-    }
 }
 
 #[cfg(test)]
