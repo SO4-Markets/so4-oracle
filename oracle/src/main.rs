@@ -8,7 +8,7 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() {
     init_tracing();
-    dotenvy::dotenv().ok();
+    load_dotenv();
 
     let config = match Config::from_env() {
         Ok(config) => Arc::new(config),
@@ -82,6 +82,28 @@ async fn main() {
     state.shutdown_token.cancel();
 }
 
+/// Load `.env`, and say so when one exists but does not parse.
+///
+/// `dotenvy::dotenv()` returns `Err` for two very different situations: no `.env` file at all,
+/// which is the normal case for a deployment that sets real environment variables, and a `.env`
+/// that exists but fails to parse — an unescaped quote, a line with no `=`, a BOM. `.ok()` threw
+/// both away, so a typo in `.env` meant the file was silently ignored and the operator's only clue
+/// was `Config::from_env()` complaining that some unrelated variable was missing.
+///
+/// A missing file stays silent. A parse failure is a `warn!`, not an `error!`: the process can
+/// still start from the real environment, and exiting here would turn a stray character in an
+/// optional file into an outage.
+fn load_dotenv() {
+    match dotenvy::dotenv() {
+        Ok(_) => {}
+        // `Io` is "no such file" in practice, and a deployment without a `.env` is normal.
+        Err(dotenvy::Error::Io(_)) => {}
+        Err(error) => {
+            tracing::warn!(%error, "ignored a .env file that could not be parsed");
+        }
+    }
+}
+
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
@@ -122,4 +144,34 @@ async fn shutdown_signal(token: CancellationToken) {
     }
 
     token.cancel();
+}
+
+#[cfg(test)]
+mod tests {
+    /// The premise `load_dotenv` matches on: `Io` means "no file", anything else means the file was
+    /// there and the parser rejected it. Asserted rather than assumed, because the whole change is
+    /// that those two stop being treated the same.
+    #[test]
+    fn dotenvy_distinguishes_a_missing_file_from_an_unparseable_one() {
+        let dir = std::env::temp_dir().join(format!("so4-dotenv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let missing = dir.join("does-not-exist.env");
+        match dotenvy::from_path(&missing) {
+            Err(dotenvy::Error::Io(_)) => {}
+            other => panic!("a missing file should be Io, got {other:?}"),
+        }
+
+        let malformed = dir.join("malformed.env");
+        std::fs::write(&malformed, "this line has no equals sign\n").expect("write");
+        match dotenvy::from_path(&malformed) {
+            Err(dotenvy::Error::Io(_)) => {
+                panic!("a malformed file must not look like a missing one")
+            }
+            Err(_) => {}
+            Ok(()) => panic!("a line with no '=' should not parse"),
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
