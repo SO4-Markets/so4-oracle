@@ -828,3 +828,187 @@ async fn simulate_contract_call_missing_result_field_is_contained() {
     assert_eq!(summary.orders_executed, 0);
     assert_eq!(summary.errors, 0);
 }
+
+// ── #803: any repeated execute_order failure (not just budget-exceeded) is
+//         eventually abandoned so it can't burn a keeper fee every cycle ─────
+
+/// hex key returned by get_order_keys in the tests below.
+const REPEAT_FAIL_KEY: &str =
+    "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233";
+
+/// Parse the `nth` submission index back out of a `submission_hash(nth)`.
+fn submission_index(hash: &str) -> usize {
+    hash.trim_start_matches('0').parse().unwrap_or(0)
+}
+
+/// wiremock handler: one pending order whose `execute_order` submission always
+/// fails on-chain with a NON-budget diagnostic; `set_prices` and `freeze_order`
+/// succeed. `execute_order` is always the odd-numbered submission of a cycle
+/// (set_prices is 0/even, freeze — when attempted — comes after).
+fn mount_order_exec_always_fails(mock_server_uri_submissions: Arc<AtomicUsize>) -> impl Fn(&Request) -> ResponseTemplate + Send + Sync {
+    move |req: &Request| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        match body["method"].as_str().unwrap_or("") {
+            "simulateTransaction" => {
+                let op = body["params"]["transaction"]["operations"][0].clone();
+                let contract = op["contract_id"].as_str().unwrap_or("");
+                let method_name = op["method"].as_str().unwrap_or("");
+                if contract == "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC" {
+                    if method_name == "get_order_count" {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1, "result": 1
+                        }))
+                    } else if method_name == "get_order_keys" {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1,
+                            "result": { "vec": [{"bytes": REPEAT_FAIL_KEY}] }
+                        }))
+                    } else {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1, "result": 0
+                        }))
+                    }
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1, "result": 0
+                    }))
+                }
+            }
+            "getAccount" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {
+                    "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                    "sequence": "100",
+                    "subentries": 0, "inflationDestination": "", "homeDomain": "",
+                    "thresholds": {"low":1,"med":1,"high":1},
+                    "signers": [], "data": {}, "balances": []
+                }
+            })),
+            "sendTransaction" => {
+                let nth = mock_server_uri_submissions.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": { "status": "PENDING", "hash": submission_hash(nth) }
+                }))
+            }
+            "getTransaction" => {
+                let body_obj: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let tx_hash = body_obj["params"]["hash"].as_str().unwrap_or("");
+                // Odd submission of each cycle == execute_order → deterministic
+                // non-budget on-chain failure. Everything else succeeds.
+                if submission_index(tx_hash) % 2 == 1 {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": {
+                            "status": "FAILED",
+                            "ledger": 50001,
+                            "diagnosticEventsXdr": ["HostError: Error(Contract, #7) order rejected"]
+                        }
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": { "status": "SUCCESS", "ledger": 50002, "diagnosticEventsXdr": [] }
+                    }))
+                }
+            }
+            _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": {"code": -1, "message": "unknown method"}
+            })),
+        }
+    }
+}
+
+#[tokio::test]
+async fn keeper_cycle_blacklists_order_after_repeated_non_budget_execution_failures() {
+    let mock_server = MockServer::start().await;
+    let submissions = Arc::new(AtomicUsize::new(0));
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(mount_order_exec_always_fails(Arc::clone(&submissions)))
+        .mount(&mock_server)
+        .await;
+
+    let config = test_config_with_tokens(&mock_server.uri(), "http://127.0.0.1:9", vec![test_token()]);
+    let state = Arc::new(AppState::new(config));
+    state
+        .price_cache
+        .write()
+        .await
+        .prices
+        .insert(TUSDC_KEY.to_string(), fresh_cached_price());
+
+    // One short of the abandon threshold — this cycle's failure crosses it.
+    state.execution_failure_counts.lock().await.insert(
+        REPEAT_FAIL_KEY.to_string(),
+        oracle::state::MAX_CONSECUTIVE_EXECUTION_FAILURES - 1,
+    );
+
+    let summary = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state))
+        .await
+        .expect("cycle must not abort on a failing order");
+    assert_eq!(summary.errors, 1);
+    assert_eq!(summary.orders_executed, 0);
+
+    assert!(
+        state
+            .frozen_order_blacklist
+            .lock()
+            .await
+            .contains_key(REPEAT_FAIL_KEY),
+        "a persistently-failing non-budget order must be blacklisted, not retried forever"
+    );
+    assert!(
+        !state
+            .execution_failure_counts
+            .lock()
+            .await
+            .contains_key(REPEAT_FAIL_KEY),
+        "the failure tally is cleared once the key is abandoned"
+    );
+}
+
+#[tokio::test]
+async fn keeper_cycle_does_not_blacklist_order_on_a_single_non_budget_failure() {
+    let mock_server = MockServer::start().await;
+    let submissions = Arc::new(AtomicUsize::new(0));
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(mount_order_exec_always_fails(Arc::clone(&submissions)))
+        .mount(&mock_server)
+        .await;
+
+    let config = test_config_with_tokens(&mock_server.uri(), "http://127.0.0.1:9", vec![test_token()]);
+    let state = Arc::new(AppState::new(config));
+    state
+        .price_cache
+        .write()
+        .await
+        .prices
+        .insert(TUSDC_KEY.to_string(), fresh_cached_price());
+
+    let summary = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state))
+        .await
+        .expect("cycle must not abort on a failing order");
+    assert_eq!(summary.errors, 1);
+
+    assert!(
+        !state
+            .frozen_order_blacklist
+            .lock()
+            .await
+            .contains_key(REPEAT_FAIL_KEY),
+        "one failure is not enough to abandon an order"
+    );
+    assert_eq!(
+        state
+            .execution_failure_counts
+            .lock()
+            .await
+            .get(REPEAT_FAIL_KEY)
+            .copied(),
+        Some(1),
+        "the consecutive-failure counter advances by one"
+    );
+}

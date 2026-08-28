@@ -10,7 +10,7 @@ use crate::chain::scval;
 use crate::chain::tx_builder;
 use crate::state::{
     AppState, CachedPrice, FailedSubmission, KeeperExecution, IN_FLIGHT_EXPIRY,
-    MAX_CONSECUTIVE_FREEZE_FAILURES,
+    MAX_CONSECUTIVE_EXECUTION_FAILURES, MAX_CONSECUTIVE_FREEZE_FAILURES,
 };
 
 const ACCOUNT_SEQUENCE_RETRY_ATTEMPTS: u32 = 3;
@@ -289,9 +289,14 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             Ok(tx_hash) => {
                 state.in_flight_keys.lock().await.remove(order_key);
                 summary.orders_executed += 1;
-                // Clear any accumulated freeze-failure count on success.
+                // Clear any accumulated failure counts on success.
                 state
                     .freeze_failure_counts
+                    .lock()
+                    .await
+                    .remove(order_key.as_str());
+                state
+                    .execution_failure_counts
                     .lock()
                     .await
                     .remove(order_key.as_str());
@@ -343,6 +348,14 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                                 .lock()
                                 .await
                                 .remove(order_key.as_str());
+                            // Order is frozen on-chain and won't be re-fetched
+                            // as pending — drop its execution-failure tally too
+                            // so the map doesn't retain a stale entry (#803).
+                            state
+                                .execution_failure_counts
+                                .lock()
+                                .await
+                                .remove(order_key.as_str());
                         }
                         Err(freeze_error) => {
                             let consecutive = {
@@ -379,6 +392,74 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                                 );
                             }
                         }
+                    }
+                }
+
+                // Generalized consecutive-failure guard (#803). The
+                // budget-exceeded case above is only one of many ways an
+                // order can fail deterministically on every cycle (malformed
+                // params, a contract invariant, insufficient collateral, …).
+                // Any such order is re-fetched as pending and re-submitted
+                // every KEEPER_LOOP_MS, burning a keeper_tx_fee each time,
+                // forever. Track consecutive execute_order failures of *any*
+                // kind and abandon the key once it's clearly permanently
+                // broken.
+                let consecutive_exec_failures = {
+                    let mut counts = state.execution_failure_counts.lock().await;
+                    let count = counts.entry(order_key.clone()).or_insert(0);
+                    *count += 1;
+                    *count
+                };
+                if consecutive_exec_failures >= MAX_CONSECUTIVE_EXECUTION_FAILURES {
+                    let already_blacklisted = state
+                        .frozen_order_blacklist
+                        .lock()
+                        .await
+                        .contains_key(order_key.as_str());
+                    if !already_blacklisted {
+                        // Best-effort freeze so the contract also stops
+                        // returning the key as pending; blacklist regardless
+                        // of the outcome so the keeper stops re-submitting it.
+                        match execute_handler(
+                            &state,
+                            &state.config.order_handler_contract_id,
+                            "freeze_order",
+                            order_key,
+                            &mut sequence_cache,
+                        )
+                        .await
+                        {
+                            Ok(_) => info!(
+                                key = %order_key,
+                                "order_frozen_after_repeated_execution_failures"
+                            ),
+                            Err(freeze_error) => {
+                                warn!(
+                                    key = %order_key,
+                                    %freeze_error,
+                                    "freeze_order_failed_while_abandoning_broken_order"
+                                );
+                                record_error(&state, "freeze_order", &freeze_error, None).await;
+                            }
+                        }
+                        state
+                            .frozen_order_blacklist
+                            .lock()
+                            .await
+                            .insert(order_key.clone(), consecutive_exec_failures);
+                        state
+                            .execution_failure_counts
+                            .lock()
+                            .await
+                            .remove(order_key.as_str());
+                        error!(
+                            key = %order_key,
+                            consecutive_failures = consecutive_exec_failures,
+                            max = MAX_CONSECUTIVE_EXECUTION_FAILURES,
+                            "ALERT: order_key blacklisted after {} consecutive execute_order \
+                             failures — manual intervention required to clear",
+                            MAX_CONSECUTIVE_EXECUTION_FAILURES
+                        );
                     }
                 }
 

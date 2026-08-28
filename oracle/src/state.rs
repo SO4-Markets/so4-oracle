@@ -138,6 +138,12 @@ pub struct ReadyCache {
 /// skipped and a loud alert is emitted (#498).
 pub const MAX_CONSECUTIVE_FREEZE_FAILURES: u32 = 3;
 
+/// Number of consecutive `execute_order` failures (of *any* kind — not just
+/// the budget-exceeded case #498 handled) before a key is abandoned: the
+/// keeper stops re-submitting a permanently-broken order that would otherwise
+/// re-fail and burn a transaction fee on every cycle forever (#803).
+pub const MAX_CONSECUTIVE_EXECUTION_FAILURES: u32 = 5;
+
 /// Maximum time a key can remain "in flight" after a poll timeout before it
 /// is automatically evicted with a warning (#801). 5 minutes is generous
 /// enough for Stellar confirmations but short enough to unblock silently
@@ -161,8 +167,13 @@ pub struct AppState {
     /// `frozen_order_blacklist` and never retried again (#498).
     pub freeze_failure_counts: Arc<Mutex<HashMap<String, u32>>>,
     /// Order keys that have been permanently abandoned after too many
-    /// consecutive freeze failures (#498).
+    /// consecutive freeze failures (#498) or execute failures of any other
+    /// kind (#803).
     pub frozen_order_blacklist: Arc<Mutex<HashMap<String, u32>>>,
+    /// Per-order-key count of consecutive `execute_order` failures of any
+    /// kind. Reset on the first success. Once a key reaches
+    /// MAX_CONSECUTIVE_EXECUTION_FAILURES it is blacklisted (#803).
+    pub execution_failure_counts: Arc<Mutex<HashMap<String, u32>>>,
     /// Tracks whether the keeper balance is currently below the minimum.
     /// Scoped to AppState instead of a bare process-global to avoid races
     /// between concurrent /ready and /keeper/balance checks (#737).
@@ -189,6 +200,7 @@ impl AppState {
             shutdown_token: CancellationToken::new(),
             freeze_failure_counts: Arc::new(Mutex::new(HashMap::new())),
             frozen_order_blacklist: Arc::new(Mutex::new(HashMap::new())),
+            execution_failure_counts: Arc::new(Mutex::new(HashMap::new())),
             keeper_balance_below_min: Arc::new(AtomicBool::new(false)),
             keeper_cycle_generation: Arc::new(AtomicU64::new(0)),
         }

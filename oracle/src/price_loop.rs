@@ -663,7 +663,7 @@ mod tests {
         };
 
         let state = test_state(token.clone());
-        let cached = build_cached_price(&state, &token, 123, &std::collections::HashMap::new())
+        let cached = build_cached_price(&state, &token, 123, &std::collections::HashMap::new(), false)
             .await
             .unwrap();
         let configured_price = token.fixed_price.as_ref().unwrap().parse::<i128>().unwrap();

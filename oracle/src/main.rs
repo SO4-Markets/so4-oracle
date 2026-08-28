@@ -8,7 +8,17 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() {
     init_tracing();
-    dotenvy::dotenv().ok();
+    // A missing .env is the normal case for a production deployment that sets
+    // env vars directly — stay quiet for it. A .env that *exists but fails to
+    // parse* is an operator mistake that would otherwise surface only as a
+    // confusing downstream "required env var X not set" (#809).
+    if let Err(error) = dotenvy::dotenv() {
+        if error.not_found() {
+            tracing::debug!("no .env file found; using process environment only");
+        } else {
+            tracing::warn!(%error, "failed to load .env file; using process environment only");
+        }
+    }
 
     let config = match Config::from_env() {
         Ok(config) => Arc::new(config),
@@ -33,8 +43,8 @@ async fn main() {
         }
     };
 
-    let price_loop = tokio::spawn(oracle::price_loop::run_price_loop(Arc::clone(&state)));
-    let keeper_loop = tokio::spawn(oracle::keeper_loop::run_keeper_loop(Arc::clone(&state)));
+    let mut price_loop = tokio::spawn(oracle::price_loop::run_price_loop(Arc::clone(&state)));
+    let mut keeper_loop = tokio::spawn(oracle::keeper_loop::run_keeper_loop(Arc::clone(&state)));
 
     tracing::info!(
         %bind_addr,
@@ -46,23 +56,34 @@ async fn main() {
     let server_future =
         axum::serve(listener, app).with_graceful_shutdown(shutdown_signal(shutdown_token.clone()));
 
+    // How long to wait for the background loops to finish their in-progress
+    // cycle once shutdown has been signalled. A keeper cycle can legitimately
+    // run for KEEPER_CYCLE_TIMEOUT_SECS (50s) and a price cycle longer, so
+    // without a bound `tokio::join!` below can block well past the
+    // orchestrator's SIGTERM grace period (Docker 10s, Kubernetes 30s) — the
+    // process then gets SIGKILLed mid-loop, which is exactly what the bounded
+    // server shutdown above exists to prevent (#552, #807).
+    let drain_timeout = std::time::Duration::from_secs(30);
+
     // If either background task panics or returns unexpectedly while the
     // server is still running, trigger a full shutdown so an external
     // restart policy can take over rather than serving a half-dead process.
-    tokio::select! {
-        result = price_loop => {
+    let exited_early = tokio::select! {
+        result = &mut price_loop => {
             match result {
                 Ok(()) => tracing::error!("price_loop exited unexpectedly"),
                 Err(e) => tracing::error!(error = %e, "price_loop panicked"),
             }
             state.shutdown_token.cancel();
+            Some(BackgroundTask::Price)
         }
-        result = keeper_loop => {
+        result = &mut keeper_loop => {
             match result {
                 Ok(()) => tracing::error!("keeper_loop exited unexpectedly"),
                 Err(e) => tracing::error!(error = %e, "keeper_loop panicked"),
             }
             state.shutdown_token.cancel();
+            Some(BackgroundTask::Keeper)
         }
         result = tokio::time::timeout(std::time::Duration::from_secs(30), server_future) => {
             match result {
@@ -75,11 +96,44 @@ async fn main() {
                     tracing::warn!("server shutdown timed out after 30s, canceling background tasks");
                 }
             }
+            None
         }
-    }
+    };
 
     tracing::info!("shutdown initiated, draining...");
     state.shutdown_token.cancel();
+
+    // Bounded drain of whichever loops are still running, matching the
+    // server-shutdown bound above. If they don't finish in time, abort them
+    // and let the process exit rather than blocking indefinitely (#807).
+    let drain = async {
+        match exited_early {
+            Some(BackgroundTask::Price) => {
+                let _ = (&mut keeper_loop).await;
+            }
+            Some(BackgroundTask::Keeper) => {
+                let _ = (&mut price_loop).await;
+            }
+            None => {
+                let _ = tokio::join!(&mut price_loop, &mut keeper_loop);
+            }
+        }
+    };
+    if tokio::time::timeout(drain_timeout, drain).await.is_err() {
+        tracing::warn!(
+            timeout_secs = drain_timeout.as_secs(),
+            "background tasks did not drain in time; aborting and exiting"
+        );
+        price_loop.abort();
+        keeper_loop.abort();
+    } else {
+        tracing::info!("background tasks drained");
+    }
+}
+
+enum BackgroundTask {
+    Price,
+    Keeper,
 }
 
 fn init_tracing() {
