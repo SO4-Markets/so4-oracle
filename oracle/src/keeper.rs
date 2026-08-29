@@ -202,5 +202,4 @@ mod tests {
         let err = check_keeper_balance(&cfg, &below_min).await.unwrap_err();
         assert!(matches!(err, RpcError::NetworkError(_)));
     }
-
 }

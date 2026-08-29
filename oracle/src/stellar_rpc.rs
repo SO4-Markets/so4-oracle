@@ -3,10 +3,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, PartialEq, Clone)]
 pub enum RpcError {
     NetworkError(String),
-    HttpError { status: u16, body: String },
+    HttpError {
+        status: u16,
+        body: String,
+    },
     JsonError(String),
-    RpcFault { code: i64, message: String },
-    BalanceBelowMinimum { balance_stroops: i64, balance_xlm: f64, min_xlm: f64 },
+    RpcFault {
+        code: i64,
+        message: String,
+    },
+    BalanceBelowMinimum {
+        balance_stroops: i64,
+        balance_xlm: f64,
+        min_xlm: f64,
+    },
 }
 
 impl Eq for RpcError {}

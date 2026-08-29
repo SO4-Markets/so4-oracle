@@ -71,7 +71,13 @@ pub async fn run_price_loop(state: Arc<AppState>) {
                 break;
             }
         }
-        run_price_cycle(Arc::clone(&state)).await;
+        tokio::select! {
+            _ = state.shutdown_token.cancelled() => {
+                tracing::info!("price_loop shutting down");
+                break;
+            }
+            _ = run_price_cycle(Arc::clone(&state)) => {}
+        }
     }
 }
 
@@ -93,8 +99,8 @@ pub async fn run_price_cycle(state: Arc<AppState>) {
     .await;
 
     match result {
-        Ok((tokens_ok, tokens_stale)) => {
-            finish_cycle(&state, started, tokens_ok, 0, tokens_stale).await;
+        Ok((tokens_ok, tokens_failed, tokens_stale)) => {
+            finish_cycle(&state, started, tokens_ok, tokens_failed, tokens_stale).await;
         }
         Err(_) => {
             tracing::error!(
@@ -107,8 +113,9 @@ pub async fn run_price_cycle(state: Arc<AppState>) {
 }
 
 /// Inner price cycle logic, bounded by PRICE_CYCLE_TIMEOUT_SECS.
-async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize) {
+async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
     let mut tokens_ok = 0usize;
+    let mut tokens_failed = 0usize;
     let mut tokens_stale = 0usize;
     let now = crate::current_timestamp_secs();
 
@@ -130,7 +137,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize) {
                 "price cycle aborted: failed to fetch latest ledger sequence from RPC after retries"
             );
             record_error(&state, "get_latest_ledger", error.to_string()).await;
-            return (0, 0);
+            return (0, 1, 0);
         }
     };
 
@@ -144,7 +151,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize) {
         .filter(|token| token.sources.iter().any(|source| source == "pyth"))
         .filter_map(|token| token.pyth_feed_id.as_deref())
         .collect();
-    
+
     // Track whether the batch request succeeded or failed
     let (pyth_prices, batch_failed) = match crate::pyth::fetch_pyth_prices(
         &pyth_feed_ids,
@@ -223,7 +230,10 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize) {
                                 "cached price became stale during fetch, removing"
                             );
                             tokens_stale += 1;
+                            tokens_failed += 1;
                         }
+                    } else {
+                        tokens_failed += 1;
                     }
                 }
             }
@@ -253,7 +263,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize) {
         );
     }
 
-    (tokens_ok, tokens_stale)
+    (tokens_ok, tokens_failed, tokens_stale)
 }
 
 /// Finalizes the cycle timing and updates `CycleStatus` state flags (Resolves Issue #394).
@@ -370,7 +380,9 @@ async fn fetch_source_with_retry(
     pyth_batch_failed: bool,
 ) -> Result<i128, PriceSourceError> {
     crate::retry::retry_with_backoff(
-        || async { fetch_source_price(source, token, pyth_api_key, pyth_prices, pyth_batch_failed).await },
+        || async {
+            fetch_source_price(source, token, pyth_api_key, pyth_prices, pyth_batch_failed).await
+        },
         SOURCE_RETRY_ATTEMPTS,
         SOURCE_RETRY_BASE_DELAY_MS,
         30_000,
@@ -432,11 +444,13 @@ async fn fetch_source_price(
                         feed_id = %feed_id,
                         "skipping Pyth price fetch due to batch failure"
                     );
-                    return Err(PriceSourceError::Pyth(crate::pyth::PythPriceError::NetworkError(
-                        "batch request failed, skipping individual fallback".to_string()
-                    )));
+                    return Err(PriceSourceError::Pyth(
+                        crate::pyth::PythPriceError::NetworkError(
+                            "batch request failed, skipping individual fallback".to_string(),
+                        ),
+                    ));
                 }
-                
+
                 tracing::warn!(
                     symbol = %token.symbol,
                     feed_id = %feed_id,
@@ -663,9 +677,15 @@ mod tests {
         };
 
         let state = test_state(token.clone());
-        let cached = build_cached_price(&state, &token, 123, &std::collections::HashMap::new(), false)
-            .await
-            .unwrap();
+        let cached = build_cached_price(
+            &state,
+            &token,
+            123,
+            &std::collections::HashMap::new(),
+            false,
+        )
+        .await
+        .unwrap();
         let configured_price = token.fixed_price.as_ref().unwrap().parse::<i128>().unwrap();
         let spread = configured_price * token.max_deviation_bps as i128 / 10_000;
 

@@ -114,7 +114,9 @@ async fn test_promtool_validation() {
     {
         Ok(child) => child,
         Err(_) if std::env::var("CI").is_ok() => {
-            panic!("promtool not found in CI — install it in the test job to validate /metrics output");
+            panic!(
+                "promtool not found in CI — install it in the test job to validate /metrics output"
+            );
         }
         Err(_) => {
             println!("promtool not found, skipping validation test");

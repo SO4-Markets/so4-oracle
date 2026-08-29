@@ -160,8 +160,7 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
         // Reject duplicate source entries so one config source cannot be
         // double-counted in price aggregation (#755).
         {
-            let unique_sources: std::collections::HashSet<_> =
-                token.sources.iter().collect();
+            let unique_sources: std::collections::HashSet<_> = token.sources.iter().collect();
             if unique_sources.len() != token.sources.len() {
                 return Err(ConfigError::InvalidToken {
                     symbol: token.symbol.clone(),

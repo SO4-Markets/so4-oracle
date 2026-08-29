@@ -618,6 +618,12 @@ mod tests {
     ]"#;
 
     #[test]
+    fn network_as_str_returns_expected_wire_values() {
+        assert_eq!(Network::Testnet.as_str(), "testnet");
+        assert_eq!(Network::Mainnet.as_str(), "mainnet");
+    }
+
+    #[test]
     fn parse_or_default_uses_value_when_set() {
         let mut env = HashMap::new();
         env.insert("TEST_VAR".to_string(), "42".to_string());

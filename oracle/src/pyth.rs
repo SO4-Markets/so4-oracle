@@ -196,24 +196,7 @@ pub fn validate_pyth_price(
     Ok(price)
 }
 
-pub async fn fetch_pyth_price(
-    feed_id: &str,
-    stale_after_seconds: u64,
-    max_confidence_bps: u32,
-) -> Result<i128, PythPriceError> {
-    let mut prices = fetch_pyth_prices(&[feed_id], None).await?;
-    let feed = prices
-        .remove(feed_id)
-        .ok_or_else(|| PythPriceError::MissingFeedId(feed_id.to_string()))?;
-    validate_pyth_price(
-        &feed.price,
-        crate::current_timestamp_secs(),
-        stale_after_seconds,
-        max_confidence_bps,
-    )
-}
-
-// URL-injecting twin of `fetch_pyth_price`, used by the mock-server tests below.
+// URL-injecting twin of the batched fetch path, used by the mock-server tests below.
 #[cfg(test)]
 pub(crate) async fn fetch_pyth_price_with_url(
     base_url: &str,
@@ -563,7 +546,7 @@ mod tests {
         assert_eq!(err, PythPriceError::InvalidPublishTime(-1));
     }
 
-    // #349 — fetch_pyth_price handles both array and wrapped Hermes response formats
+    // #349 — the Hermes response parser handles both array and wrapped formats
 
     #[test]
     fn hermes_response_deserializes_array_format() {

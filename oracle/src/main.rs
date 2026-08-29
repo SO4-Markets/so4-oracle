@@ -7,7 +7,6 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
-    init_tracing();
     // A missing .env is the normal case for a production deployment that sets
     // env vars directly — stay quiet for it. A .env that *exists but fails to
     // parse* is an operator mistake that would otherwise surface only as a
@@ -19,6 +18,7 @@ async fn main() {
             tracing::warn!(%error, "failed to load .env file; using process environment only");
         }
     }
+    init_tracing();
 
     let config = match Config::from_env() {
         Ok(config) => Arc::new(config),

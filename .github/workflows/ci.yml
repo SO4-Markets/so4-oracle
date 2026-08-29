@@ -128,5 +128,10 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install promtool
+        run: |
+          wget -q https://github.com/prometheus/prometheus/releases/download/v2.53.1/prometheus-2.53.1.linux-amd64.tar.gz
+          tar xzf prometheus-2.53.1.linux-amd64.tar.gz
+          sudo cp prometheus-2.53.1.linux-amd64/promtool /usr/local/bin/
       - run: cargo llvm-cov --all --fail-under-lines 85
       - run: cargo llvm-cov report >> $GITHUB_STEP_SUMMARY

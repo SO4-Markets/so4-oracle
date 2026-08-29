@@ -142,10 +142,7 @@ pub async fn clear_blacklisted_key(
     state.freeze_failure_counts.lock().await.remove(&key);
 
     info!(key = %key, "blacklisted order key cleared via admin API");
-    Ok(Json(ClearBlacklistResponse {
-        key,
-        cleared: true,
-    }))
+    Ok(Json(ClearBlacklistResponse { key, cleared: true }))
 }
 
 pub async fn metrics(_auth: AdminAuth, State(state): State<Arc<AppState>>) -> Response {

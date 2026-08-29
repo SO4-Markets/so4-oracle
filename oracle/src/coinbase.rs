@@ -54,7 +54,6 @@ impl crate::retry::Retryable for CoinbasePriceError {
     }
 }
 
-
 #[derive(Debug, Deserialize)]
 pub struct CoinbaseResponse {
     pub data: CoinbaseResponseData,

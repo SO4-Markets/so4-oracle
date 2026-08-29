@@ -66,7 +66,9 @@ pub async fn run_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     // are both updated below (in different critical sections); bumping here and
     // again at the end lets `AppState::keeper_status_snapshot` detect a reader
     // whose two-lock read straddled this cycle and retry (#797).
-    state.keeper_cycle_generation.fetch_add(1, Ordering::Release);
+    state
+        .keeper_cycle_generation
+        .fetch_add(1, Ordering::Release);
     {
         let mut status = state.cycle_status.write().await;
         status.keeper_cycle_running = true;
@@ -117,7 +119,9 @@ pub async fn run_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
 
     // Close the generation window: all keeper_status / cycle_status writes for
     // this cycle are now visible (#797).
-    state.keeper_cycle_generation.fetch_add(1, Ordering::Release);
+    state
+        .keeper_cycle_generation
+        .fetch_add(1, Ordering::Release);
     result
 }
 
