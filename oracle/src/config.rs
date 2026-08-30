@@ -202,10 +202,11 @@ impl Config {
             ),
         };
 
-        let price_feed = collect_or_default!(
-            load_price_feed_config(lookup("PRICE_FEED_CONFIG").as_deref()).map_err(EnvError::from),
+               let price_feed = collect_or_default!(
+            load_price_feed_config(lookup(ENV_KEY).as_deref()).map_err(EnvError::from),
             PriceFeedConfig { tokens: vec![] }
         );
+
 
         let role_store_contract_id =
             collect_or_default!(required(&mut lookup, "ROLE_STORE"), String::new());
