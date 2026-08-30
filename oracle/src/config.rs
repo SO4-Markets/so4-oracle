@@ -17,6 +17,8 @@ pub const DEFAULT_KEEPER_LOOP_MS: u64 = 1_500;
 pub const DEFAULT_SET_PRICES_TX_FEE: u32 = 1_000_000;
 /// Default inclusion fee (stroops) for keeper handler transactions.
 pub const DEFAULT_KEEPER_TX_FEE: u32 = 2_000_000;
+/// Default timeout in seconds for graceful shutdown of background tasks.
+pub const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
 /// Oracle-specific view of a token feed config.
 /// Re-exports fields from `TokenConfig` for backward compatibility with
@@ -518,13 +520,13 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
                         reason: "coinbase_symbol is required for coinbase source".to_string(),
                     });
                 }
-                "pyth" if token.pyth_feed_id.is_none() => {
+                "pyth" if token.pyth_feed_id.as_deref().unwrap_or("").is_empty() => {
                     return Err(ConfigError::InvalidToken {
                         symbol: token.symbol.clone(),
                         reason: "pyth_feed_id is required for pyth source".to_string(),
                     });
                 }
-                "fixed" if token.fixed_price.is_none() => {
+                "fixed" if token.fixed_price.as_deref().unwrap_or("").is_empty() => {
                     return Err(ConfigError::InvalidToken {
                         symbol: token.symbol.clone(),
                         reason: "fixed_price is required for fixed source".to_string(),
@@ -796,8 +798,22 @@ mod tests {
     }
 
     #[test]
+    fn reject_empty_pyth_feed_id() {
+        let json = r#"[{"symbol":"TWBTC","stellar_address":"CADDR","sources":["pyth"],"pyth_feed_id":""}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }));
+    }
+
+    #[test]
     fn reject_missing_fixed_price() {
         let json = r#"[{"symbol":"TUSDC","stellar_address":"CADDR","sources":["fixed"]}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }));
+    }
+
+    #[test]
+    fn reject_empty_fixed_price() {
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CADDR","sources":["fixed"],"fixed_price":""}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
