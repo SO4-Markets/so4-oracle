@@ -86,12 +86,25 @@ pub fn parse_coinbase_response_body(
         .get("USD")
         .ok_or(CoinbasePriceError::MissingUsdRate)?;
 
-    // We can reuse the precision parsing from binance, but map the error
+    // We reuse the precision parsing from binance, remapping its error.
+    // `parse_price_to_precision` is a pure parser: every one of its error
+    // paths returns `BinancePriceError::PriceParseError`. The network/HTTP/JSON
+    // variants only ever come from binance's HTTP-fetch functions, which this
+    // module never calls — so the catch-all arm below is unreachable and only
+    // exists to keep the match exhaustive. `debug_assert` makes it loud if
+    // that contract is ever widened without updating this call site (#704).
     crate::binance::parse_price_to_precision(usd_price_str).map_err(|err| match err {
         crate::binance::BinancePriceError::PriceParseError(msg) => {
             CoinbasePriceError::PriceParseError(msg)
         }
-        _ => CoinbasePriceError::PriceParseError("unknown parse error".to_string()),
+        other => {
+            debug_assert!(
+                false,
+                "binance::parse_price_to_precision returned a non-parse error: {other:?} — \
+                 its error contract widened; update this remap",
+            );
+            CoinbasePriceError::PriceParseError(format!("unexpected parse error: {other:?}"))
+        }
     })
 }
 
