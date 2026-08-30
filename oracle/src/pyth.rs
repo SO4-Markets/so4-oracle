@@ -137,18 +137,23 @@ pub fn normalize_pyth_price(price_str: &str, exponent: i32) -> Result<i128, Pyth
         ));
     }
 
+    // The range check above bounds `exponent` to `[-SCALE_DIGITS, 0]`, so
+    // `exponent_diff` is always in `[0, SCALE_DIGITS]` — the scaling is a pure
+    // multiplication and there is no division path (#703). If the range check
+    // is ever loosened this assertion fires loudly instead of silently
+    // truncating a fractional result.
     let exponent_diff = crate::SCALE_DIGITS as i32 + exponent;
+    debug_assert!(
+        (0..=crate::SCALE_DIGITS as i32).contains(&exponent_diff),
+        "exponent_diff {exponent_diff} outside [0, {}] — the exponent range check is out of sync",
+        crate::SCALE_DIGITS,
+    );
 
-    if exponent_diff >= 0 {
-        price_int
-            .checked_mul(10i128.pow(exponent_diff as u32))
-            .ok_or_else(|| {
-                PythPriceError::PriceParseError("price overflow during normalization".to_string())
-            })
-    } else {
-        let divisor = 10i128.pow((-exponent_diff) as u32);
-        Ok(price_int / divisor)
-    }
+    price_int
+        .checked_mul(10i128.pow(exponent_diff.max(0) as u32))
+        .ok_or_else(|| {
+            PythPriceError::PriceParseError("price overflow during normalization".to_string())
+        })
 }
 
 pub fn validate_pyth_price(
