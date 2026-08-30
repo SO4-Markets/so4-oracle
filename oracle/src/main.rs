@@ -63,7 +63,8 @@ async fn main() {
     // orchestrator's SIGTERM grace period (Docker 10s, Kubernetes 30s) — the
     // process then gets SIGKILLed mid-loop, which is exactly what the bounded
     // server shutdown above exists to prevent (#552, #807).
-    let drain_timeout = std::time::Duration::from_secs(30);
+    let drain_timeout =
+        std::time::Duration::from_secs(oracle::config::DEFAULT_SHUTDOWN_TIMEOUT_SECS);
 
     // If either background task panics or returns unexpectedly while the
     // server is still running, trigger a full shutdown so an external
@@ -85,7 +86,7 @@ async fn main() {
             state.shutdown_token.cancel();
             Some(BackgroundTask::Keeper)
         }
-        result = tokio::time::timeout(std::time::Duration::from_secs(30), server_future) => {
+        result = tokio::time::timeout(drain_timeout, server_future) => {
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
@@ -93,7 +94,10 @@ async fn main() {
                     std::process::exit(1);
                 }
                 Err(_) => {
-                    tracing::warn!("server shutdown timed out after 30s, canceling background tasks");
+                    tracing::warn!(
+                        timeout_secs = drain_timeout.as_secs(),
+                        "server shutdown timed out, canceling background tasks"
+                    );
                 }
             }
             None

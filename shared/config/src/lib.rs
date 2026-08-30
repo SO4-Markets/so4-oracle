@@ -73,9 +73,9 @@ impl Default for TokenConfig {
     }
 }
 
-/// Canonical token address for lookups.  Returns `stellar_address` if set,
-/// otherwise falls back to the lowercased symbol.
 impl TokenConfig {
+    /// Canonical token address for lookups.  Returns `stellar_address` if set,
+    /// otherwise falls back to the lowercased symbol.
     pub fn lookup_key(&self) -> String {
         if self.stellar_address.is_empty() {
             self.symbol.to_lowercase()
@@ -84,8 +84,13 @@ impl TokenConfig {
         }
     }
 
+    /// Returns the configured `display_symbol`, or falls back to `symbol`
+    /// if unset or empty.
     pub fn display_symbol(&self) -> &str {
-        self.display_symbol.as_deref().unwrap_or(&self.symbol)
+        self.display_symbol
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.symbol)
     }
 }
 
@@ -376,6 +381,20 @@ mod tests {
         assert!(map.contains_key("upper"));
         assert!(!map.contains_key("MIXEDcase"));
         assert!(!map.contains_key("UPPER"));
+    }
+
+    #[test]
+    fn display_symbol_falls_back_to_symbol_when_empty() {
+        let json = r#"[{"symbol":"BTC","display_symbol":"","sources":["binance"]}]"#;
+        let tokens = parse_token_configs(json).unwrap();
+        assert_eq!(tokens[0].display_symbol(), "BTC");
+    }
+
+    #[test]
+    fn display_symbol_returns_configured_value() {
+        let json = r#"[{"symbol":"BTC","display_symbol":"XBTC","sources":["binance"]}]"#;
+        let tokens = parse_token_configs(json).unwrap();
+        assert_eq!(tokens[0].display_symbol(), "XBTC");
     }
 
     // #504 — deny_unknown_fields: typo'd keys must be rejected, not silently ignored.
