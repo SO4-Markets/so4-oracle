@@ -175,7 +175,7 @@ impl Config {
 
         let bind_addr = collect_or_default!(
             parse_or_default(&mut lookup, "BIND_ADDR", DEFAULT_BIND_ADDR),
-            "0.0.0.0:8080".parse().unwrap()
+            DEFAULT_BIND_ADDR.parse().unwrap()
         );
         let (network_passphrase, stellar_rpc_url, horizon_url) = match network {
             Network::Testnet => (
@@ -201,7 +201,7 @@ impl Config {
         };
 
         let price_feed = collect_or_default!(
-            load_price_feed_config(lookup("PRICE_FEED_CONFIG").as_deref()).map_err(EnvError::from),
+            load_price_feed_config(lookup(ENV_KEY).as_deref()).map_err(EnvError::from),
             PriceFeedConfig { tokens: vec![] }
         );
 
@@ -449,8 +449,10 @@ fn validate_hex_key(
 
 /// Validate a Stellar strkey (account `G…` / secret seed `S…`) for shape only:
 /// 56-char base32 with the expected version prefix. This catches typos and
-/// swapped vars at boot; it does not verify the CRC16 or that a secret derives
-/// the configured account (those are wired with the keeper in #3).
+/// swapped vars at boot; it does not verify the CRC16 checksum or that a
+/// secret derives the configured account — these are known limitations of
+/// the boot-time shape check (full keypair verification happens in the
+/// keeper runtime, not at config load).
 fn validate_strkey(var: &'static str, value: String, prefix: char) -> Result<String, EnvError> {
     let invalid = |reason: String| EnvError::InvalidVar { var, reason };
     if value.len() != 56 {
@@ -934,6 +936,22 @@ mod tests {
             Duration::from_millis(DEFAULT_PRICE_LOOP_MS)
         );
         assert!(!cfg.price_feed.tokens.is_empty());
+    }
+
+    /// Closes #675: when `BIND_ADDR` is unset, `Config::from_lookup` must
+    /// resolve to `DEFAULT_BIND_ADDR` (not a duplicated literal), so a future
+    /// edit to the constant stays in sync with the fallback.
+    #[test]
+    fn config_from_lookup_bind_addr_defaults_to_constant() {
+        let mut env = valid_env();
+        env.remove("BIND_ADDR");
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(
+            cfg.bind_addr,
+            DEFAULT_BIND_ADDR.parse::<std::net::SocketAddr>().unwrap()
+        );
     }
 
     #[test]

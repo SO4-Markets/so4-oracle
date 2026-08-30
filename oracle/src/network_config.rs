@@ -6,7 +6,6 @@
 pub const TESTNET_RPC_URL: &str = "https://soroban-testnet.stellar.org";
 pub const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
 
-pub const MAINNET_RPC_URL: &str = "https://soroban.stellar.org";
 pub const MAINNET_PASSPHRASE: &str = "Public Global Stellar Network ; September 2015";
 
 #[cfg(test)]
