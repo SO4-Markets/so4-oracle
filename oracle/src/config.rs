@@ -405,7 +405,10 @@ fn required_any(
     lookup(primary)
         .filter(|value| !value.trim().is_empty())
         .or_else(|| lookup(fallback).filter(|value| !value.trim().is_empty()))
-        .ok_or(EnvError::MissingVar(primary))
+                         .ok_or(EnvError::MissingVar("ORACLE_CONTRACT_ID' (or fallback alias 'ORACLE')"))
+
+
+
 }
 
 fn parse_or_default<T>(
