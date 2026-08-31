@@ -140,13 +140,28 @@ enum BackgroundTask {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let (filter, invalid_rust_log) = match std::env::var("RUST_LOG") {
+        Ok(raw) => match EnvFilter::try_new(&raw) {
+            Ok(filter) => (filter, None),
+            Err(error) => (EnvFilter::new("info"), Some((raw, error))),
+        },
+        Err(_) => (EnvFilter::new("info"), None),
+    };
+
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(filter)
         .with_current_span(true)
         .with_span_list(true)
         .init();
+
+    if let Some((raw, error)) = invalid_rust_log {
+        tracing::warn!(
+            %error,
+            invalid_rust_log = %raw,
+            "failed to parse RUST_LOG environment variable; falling back to 'info'"
+        );
+    }
 }
 
 async fn shutdown_signal(token: CancellationToken) {
