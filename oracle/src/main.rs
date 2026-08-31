@@ -34,7 +34,6 @@ async fn main() {
     let state = Arc::new(AppState::new(Arc::clone(&config)));
     let app = api::build_router(Arc::clone(&state));
 
-    #[allow(unused_mut)]
     let listener = match TcpListener::bind(bind_addr).await {
         Ok(listener) => listener,
         Err(error) => {
