@@ -177,7 +177,7 @@ impl Config {
 
         let bind_addr = collect_or_default!(
             parse_or_default(&mut lookup, "BIND_ADDR", DEFAULT_BIND_ADDR),
-            "0.0.0.0:8080".parse().unwrap()
+            DEFAULT_BIND_ADDR.parse().unwrap()
         );
         let (network_passphrase, stellar_rpc_url, horizon_url) = match network {
             Network::Testnet => (
@@ -202,11 +202,10 @@ impl Config {
             ),
         };
 
-               let price_feed = collect_or_default!(
+        let price_feed = collect_or_default!(
             load_price_feed_config(lookup(ENV_KEY).as_deref()).map_err(EnvError::from),
             PriceFeedConfig { tokens: vec![] }
         );
-
 
         let role_store_contract_id =
             collect_or_default!(required(&mut lookup, "ROLE_STORE"), String::new());
@@ -406,10 +405,9 @@ fn required_any(
     lookup(primary)
         .filter(|value| !value.trim().is_empty())
         .or_else(|| lookup(fallback).filter(|value| !value.trim().is_empty()))
-                         .ok_or(EnvError::MissingVar("ORACLE_CONTRACT_ID' (or fallback alias 'ORACLE')"))
-
-
-
+        .ok_or(EnvError::MissingVar(
+            "ORACLE_CONTRACT_ID' (or fallback alias 'ORACLE')",
+        ))
 }
 
 fn parse_or_default<T>(
@@ -693,6 +691,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.port(), 3000);
+    }
+
+    #[test]
+    fn config_from_lookup_uses_default_bind_addr_when_unset() {
+        let env = valid_env();
+        assert!(!env.contains_key("BIND_ADDR"));
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(
+            cfg.bind_addr,
+            DEFAULT_BIND_ADDR.parse::<std::net::SocketAddr>().unwrap()
+        );
     }
 
     #[test]
