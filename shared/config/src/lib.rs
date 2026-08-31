@@ -4,8 +4,6 @@
 //! `config/tokens.json` remains as a checked-in example for local setup.
 
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::path::Path;
 
 // ── Unified token config ─────────────────────────────────────────────────────
 
@@ -99,8 +97,6 @@ impl TokenConfig {
 /// Error type for configuration loading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
-    /// The `PRICE_FEED_CONFIG` env var is missing.
-    MissingEnvVar,
     /// JSON parsing failed.
     MalformedJson(String),
     /// The token list is empty.
@@ -114,9 +110,6 @@ pub enum ConfigError {
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConfigError::MissingEnvVar => {
-                write!(f, "required env var 'PRICE_FEED_CONFIG' is not set")
-            }
             ConfigError::MalformedJson(msg) => {
                 write!(f, "PRICE_FEED_CONFIG is not valid JSON: {msg}")
             }
@@ -251,30 +244,6 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
     Ok(tokens)
 }
 
-/// Load tokens from the `PRICE_FEED_CONFIG` env var (JSON string).
-/// Returns `None` if the var is not set (caller can fall back to file).
-pub fn load_from_env_var(env_value: Option<&str>) -> Result<Option<Vec<TokenConfig>>, ConfigError> {
-    match env_value {
-        Some(raw) => parse_token_configs(raw).map(Some),
-        None => Ok(None),
-    }
-}
-
-/// Load tokens from a JSON file on disk.
-pub fn load_from_file(path: &Path) -> Result<Vec<TokenConfig>, ConfigError> {
-    let raw = std::fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
-    parse_token_configs(&raw)
-}
-
-/// Build a lookup map keyed by lowercased symbol.
-pub fn build_lookup(tokens: &[TokenConfig]) -> HashMap<String, &TokenConfig> {
-    let mut map = HashMap::new();
-    for token in tokens {
-        map.insert(token.symbol.to_lowercase(), token);
-    }
-    map
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -331,18 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn load_from_env_var_returns_none_when_unset() {
-        let result = load_from_env_var(None).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn load_from_env_var_parses_json() {
-        let result = load_from_env_var(Some(VALID_JSON)).unwrap().unwrap();
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
     fn lookup_key_uses_stellar_address() {
         let tokens = parse_token_configs(VALID_JSON).unwrap();
         assert_eq!(tokens[0].lookup_key(), "cbtcaddr");
@@ -353,34 +310,6 @@ mod tests {
         let json = r#"[{"symbol":"BTC","sources":["binance"]}]"#;
         let tokens = parse_token_configs(json).unwrap();
         assert_eq!(tokens[0].lookup_key(), "btc");
-    }
-
-    #[test]
-    fn build_lookup_creates_lowercase_map() {
-        let tokens = parse_token_configs(VALID_JSON).unwrap();
-        let map = build_lookup(&tokens);
-        assert!(map.contains_key("btc"));
-        assert!(map.contains_key("eth"));
-        assert!(!map.contains_key("BTC"));
-    }
-
-    #[test]
-    fn build_lookup_returns_correct_references() {
-        let tokens = parse_token_configs(VALID_JSON).unwrap();
-        let map = build_lookup(&tokens);
-        assert_eq!(map.get("btc").unwrap().symbol, "BTC");
-        assert_eq!(map.get("eth").unwrap().symbol, "ETH");
-    }
-
-    #[test]
-    fn build_lookup_keys_are_lowercased_symbol() {
-        let json = r#"[{"symbol":"MIXEDcase","sources":["binance"]},{"symbol":"UPPER","sources":["fixed"],"fixed_price":"1"}]"#;
-        let tokens = parse_token_configs(json).unwrap();
-        let map = build_lookup(&tokens);
-        assert!(map.contains_key("mixedcase"));
-        assert!(map.contains_key("upper"));
-        assert!(!map.contains_key("MIXEDcase"));
-        assert!(!map.contains_key("UPPER"));
     }
 
     #[test]
