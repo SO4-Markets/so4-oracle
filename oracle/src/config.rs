@@ -66,32 +66,53 @@ impl fmt::Debug for SecretString {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Address and port the HTTP server binds to. Env: `BIND_ADDR`, default `0.0.0.0:8080`.
     pub bind_addr: SocketAddr,
+    /// Stellar network to connect to. Env: `STELLAR_NETWORK`, default `testnet`.
     pub network: Network,
+    /// Stellar network passphrase for transaction signing.
     pub network_passphrase: String,
+    /// Stellar RPC node URL. Env: `STELLAR_RPC_URL` (defaults to public testnet RPC).
     pub stellar_rpc_url: String,
+    /// Horizon server URL for account queries. Env: `HORIZON_URL`.
     pub horizon_url: String,
+    /// On-chain oracle contract address. Env: `ORACLE_CONTRACT_ID`.
     pub oracle_contract_id: String,
+    /// On-chain role-store contract address. Env: `ROLE_STORE`.
     pub role_store_contract_id: String,
+    /// On-chain data-store contract address. Env: `DATA_STORE`.
     pub data_store_contract_id: String,
+    /// On-chain order-handler contract address. Env: `ORDER_HANDLER`.
     pub order_handler_contract_id: String,
+    /// On-chain deposit-handler contract address. Env: `DEPOSIT_HANDLER`.
     pub deposit_handler_contract_id: String,
+    /// On-chain withdrawal-handler contract address. Env: `WITHDRAWAL_HANDLER`.
     pub withdrawal_handler_contract_id: String,
+    /// On-chain reader contract address. Env: `READER`.
     pub reader_contract_id: String,
+    /// Keeper ed25519 private key (hex-encoded 32 bytes). Env: `KEEPER_PRIVATE_KEY`.
     pub keeper_private_key: SecretString,
+    /// Keeper Stellar strkey secret seed (S-prefixed). Env: `KEEPER_SECRET_KEY`.
     pub keeper_secret_key: SecretString,
+    /// Keeper Stellar account ID (G-prefixed strkey). Env: `KEEPER_ACCOUNT_ID`.
     pub keeper_account_id: String,
+    /// Index of this keeper instance (for multi-keeper sharding). Env: `KEEPER_INDEX`, default `0`.
     pub keeper_index: u32,
+    /// Optional bearer token for admin API endpoints. Env: `ADMIN_API_TOKEN`.
     pub admin_api_token: Option<SecretString>,
     /// API key used to authenticate requests to the production Hermes endpoint.
     pub pyth_api_key: Option<SecretString>,
+    /// Minimum keeper XLM balance before halting (in XLM, not stroops). Env: `MIN_KEEPER_BALANCE_XLM`.
     pub min_keeper_balance_xlm: f64,
     /// Inclusion fee (stroops) for oracle `set_prices` transactions.
     pub set_prices_tx_fee: u32,
     /// Inclusion fee (stroops) for keeper handler execute/freeze transactions.
     pub keeper_tx_fee: u32,
+    /// Interval between price-feed refresh cycles. Env: `PRICE_LOOP_MS`, default 1000ms.
     pub price_loop_interval: Duration,
+    /// Interval between keeper execution cycles. Env: `KEEPER_LOOP_MS`, default 1500ms.
     pub keeper_loop_interval: Duration,
+    /// Token feed configuration (symbols, sources, addresses).
     pub price_feed: PriceFeedConfig,
 }
 
@@ -122,9 +143,9 @@ impl From<ConfigError> for EnvError {
 
 /// A collection of one or more environment-variable configuration errors.
 ///
-/// Returned by [`Config::from_lookup`] and [`Config::from_env`] when multiple
-/// fields are invalid or missing, allowing the caller to report every problem
-/// in a single pass rather than failing on the first one.
+/// Returned by [`Config::from_env`] when multiple fields are invalid or
+/// missing, allowing the caller to report every problem in a single pass
+/// rather than failing on the first one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvErrors(pub Vec<EnvError>);
 
@@ -202,11 +223,10 @@ impl Config {
             ),
         };
 
-               let price_feed = collect_or_default!(
+        let price_feed = collect_or_default!(
             load_price_feed_config(lookup(ENV_KEY).as_deref()).map_err(EnvError::from),
             PriceFeedConfig { tokens: vec![] }
         );
-
 
         let role_store_contract_id =
             collect_or_default!(required(&mut lookup, "ROLE_STORE"), String::new());
@@ -406,10 +426,9 @@ fn required_any(
     lookup(primary)
         .filter(|value| !value.trim().is_empty())
         .or_else(|| lookup(fallback).filter(|value| !value.trim().is_empty()))
-                         .ok_or(EnvError::MissingVar("ORACLE_CONTRACT_ID' (or fallback alias 'ORACLE')"))
-
-
-
+        .ok_or(EnvError::MissingVar(
+            "ORACLE_CONTRACT_ID' (or fallback alias 'ORACLE')",
+        ))
 }
 
 fn parse_or_default<T>(
