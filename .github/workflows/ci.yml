@@ -13,8 +13,6 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
   MSRV: "1.95"
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   # ── MSRV enforcement ────────────────────────────────────────────────────
@@ -22,7 +20,7 @@ jobs:
     name: MSRV check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.MSRV }}
@@ -43,29 +41,22 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          workspaces: |
-            .
-            oracle
+          components: rustfmt
       - run: |
           if [ -d "tests" ]; then
             echo "Error: tests/ directory found in the virtual manifest root. Cargo ignores this. Please place integration tests in oracle/tests/."
             exit 1
           fi
-      - name: Install promtool
-        run: |
-          wget https://github.com/prometheus/prometheus/releases/download/v2.53.1/prometheus-2.53.1.linux-amd64.tar.gz
-          tar xvfz prometheus-2.53.1.linux-amd64.tar.gz
-          sudo cp prometheus-2.53.1.linux-amd64/promtool /usr/local/bin/
-      - run: cargo test --all
+      - run: cargo fmt --all -- --check
 
   clippy:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -76,7 +67,7 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -90,12 +81,21 @@ jobs:
           sudo cp prometheus-2.53.1.linux-amd64/promtool /usr/local/bin/
       - run: cargo test --all --locked
 
+  build:
+    name: release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --all --locked
+
   # ── Supply-chain scanning ───────────────────────────────────────────────
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@cargo-audit
       - run: cargo audit
 
@@ -103,27 +103,24 @@ jobs:
     name: cargo deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans licenses sources
 
-  # ── Docker image build + push to GHCR ──────────────────────────────────
+  # Docker image build
   docker:
     name: docker build
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build -t so4-oracle .
 
   coverage:
     name: coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview

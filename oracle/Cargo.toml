@@ -21,7 +21,6 @@ axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "test-util"] }
 tokio-util = "0.7"
 tower-http = { version = "0.7", features = ["cors", "trace", "request-id"] }
-uuid = { version = "1", features = ["v4", "fast-rng"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "query"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -30,7 +29,7 @@ hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
-shared-config = { path = "../shared/config" }
+shared-config = { version = "0.1.0", path = "../shared/config" }
 stellar-rpc-client = "27.0.0"
 # All base64 encoding/decoding in this crate goes through the standalone
 # `base64` crate below (see chain/tx_builder.rs); stellar-xdr's own
