@@ -39,7 +39,7 @@ stellar-xdr = { version = "27", features = ["std"] }
 stellar-strkey = "0.0.18"
 base64 = "0.22"
 sha2 = "0.10"
-digest = "0.10"
+digest = "0.11"
 rand = "0.8"
 
 
