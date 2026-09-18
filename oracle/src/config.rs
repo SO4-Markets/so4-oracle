@@ -119,6 +119,10 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvError {
     MissingVar(&'static str),
+    MissingVarAny {
+        primary: &'static str,
+        fallback: &'static str,
+    },
     InvalidVar { var: &'static str, reason: String },
     TokenConfig(ConfigError),
 }
@@ -127,6 +131,12 @@ impl fmt::Display for EnvError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EnvError::MissingVar(var) => write!(f, "required env var '{var}' is not set"),
+            EnvError::MissingVarAny { primary, fallback } => {
+                write!(
+                    f,
+                    "required env var '{primary}' (or fallback alias '{fallback}') is not set"
+                )
+            }
             EnvError::InvalidVar { var, reason } => write!(f, "invalid env var '{var}': {reason}"),
             EnvError::TokenConfig(error) => write!(f, "invalid PRICE_FEED_CONFIG: {error}"),
         }
@@ -426,9 +436,7 @@ fn required_any(
     lookup(primary)
         .filter(|value| !value.trim().is_empty())
         .or_else(|| lookup(fallback).filter(|value| !value.trim().is_empty()))
-        .ok_or(EnvError::MissingVar(
-            "ORACLE_CONTRACT_ID' (or fallback alias 'ORACLE')",
-        ))
+        .ok_or(EnvError::MissingVarAny { primary, fallback })
 }
 
 fn parse_or_default<T>(
@@ -1260,6 +1268,28 @@ mod tests {
             err.0.len() >= 2,
             "expected at least 2 errors, got {}",
             err.0.len()
+        );
+    }
+
+    #[test]
+    fn required_any_returns_generic_missing_var_any_and_formats_without_artifacts() {
+        let mut lookup = |_var: &str| None;
+        let err = required_any(&mut lookup, "PRIMARY_KEY", "FALLBACK_KEY").unwrap_err();
+        match err {
+            EnvError::MissingVarAny { primary, fallback } => {
+                assert_eq!(primary, "PRIMARY_KEY");
+                assert_eq!(fallback, "FALLBACK_KEY");
+            }
+            other => panic!("expected MissingVarAny, got: {:?}", other),
+        }
+        let formatted = err.to_string();
+        assert_eq!(
+            formatted,
+            "required env var 'PRIMARY_KEY' (or fallback alias 'FALLBACK_KEY') is not set"
+        );
+        assert!(
+            !formatted.contains("''") && !formatted.contains(")'"),
+            "formatted string must not have dangling quote artifacts: {formatted}"
         );
     }
 }
