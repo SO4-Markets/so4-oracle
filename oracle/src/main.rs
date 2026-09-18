@@ -48,6 +48,7 @@ async fn main() {
     tracing::info!(
         %bind_addr,
         network = config.network.as_str(),
+        ?config,
         "oracle server listening"
     );
 
