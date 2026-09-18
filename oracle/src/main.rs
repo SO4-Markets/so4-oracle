@@ -62,8 +62,9 @@ async fn main() {
     // orchestrator's SIGTERM grace period (Docker 10s, Kubernetes 30s) — the
     // process then gets SIGKILLed mid-loop, which is exactly what the bounded
     // server shutdown above exists to prevent (#552, #807).
-    let drain_timeout =
+    let total_shutdown_timeout =
         std::time::Duration::from_secs(oracle::config::DEFAULT_SHUTDOWN_TIMEOUT_SECS);
+    let shutdown_start = std::time::Instant::now();
 
     // If either background task panics or returns unexpectedly while the
     // server is still running, trigger a full shutdown so an external
@@ -85,7 +86,7 @@ async fn main() {
             state.shutdown_token.cancel();
             Some(BackgroundTask::Keeper)
         }
-        result = tokio::time::timeout(drain_timeout, server_future) => {
+        result = tokio::time::timeout(total_shutdown_timeout, server_future) => {
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
@@ -94,7 +95,7 @@ async fn main() {
                 }
                 Err(_) => {
                     tracing::warn!(
-                        timeout_secs = drain_timeout.as_secs(),
+                        timeout_secs = total_shutdown_timeout.as_secs(),
                         "server shutdown timed out, canceling background tasks"
                     );
                 }
@@ -106,9 +107,11 @@ async fn main() {
     tracing::info!("shutdown initiated, draining...");
     state.shutdown_token.cancel();
 
-    // Bounded drain of whichever loops are still running, matching the
-    // server-shutdown bound above. If they don't finish in time, abort them
-    // and let the process exit rather than blocking indefinitely (#807).
+    let remaining_drain_timeout = total_shutdown_timeout.saturating_sub(shutdown_start.elapsed());
+
+    // Bounded drain of whichever loops are still running, sharing the overall
+    // shutdown timeout budget so total shutdown time does not exceed
+    // DEFAULT_SHUTDOWN_TIMEOUT_SECS (#870).
     let drain = async {
         match exited_early {
             Some(BackgroundTask::Price) => {
@@ -122,9 +125,9 @@ async fn main() {
             }
         }
     };
-    if tokio::time::timeout(drain_timeout, drain).await.is_err() {
+    if tokio::time::timeout(remaining_drain_timeout, drain).await.is_err() {
         tracing::warn!(
-            timeout_secs = drain_timeout.as_secs(),
+            timeout_secs = remaining_drain_timeout.as_secs(),
             "background tasks did not drain in time; aborting and exiting"
         );
         price_loop.abort();
