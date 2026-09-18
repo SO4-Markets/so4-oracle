@@ -138,6 +138,7 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
     }
 
     let mut symbols_seen = std::collections::HashSet::new();
+    let mut addresses_seen = std::collections::HashSet::new();
     for token in &tokens {
         if token.symbol.is_empty() {
             return Err(ConfigError::InvalidToken {
@@ -151,6 +152,15 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
                 symbol: token.symbol.clone(),
                 reason: "duplicate symbol (case-insensitive)".to_string(),
             });
+        }
+        if !token.stellar_address.is_empty() {
+            let lower_address = token.stellar_address.to_lowercase();
+            if !addresses_seen.insert(lower_address) {
+                return Err(ConfigError::InvalidToken {
+                    symbol: token.symbol.clone(),
+                    reason: "duplicate stellar_address (case-insensitive)".to_string(),
+                });
+            }
         }
         // stellar_address and sources are optional for the API server path,
         // but required for the oracle path — the oracle validates separately.
@@ -294,6 +304,22 @@ mod tests {
             ConfigError::InvalidToken { symbol, reason } => {
                 assert_eq!(symbol, "btc");
                 assert_eq!(reason, "duplicate symbol (case-insensitive)");
+            }
+            _ => panic!("expected ConfigError::InvalidToken"),
+        }
+    }
+
+    #[test]
+    fn reject_duplicate_stellar_address() {
+        let json = r#"[
+            {"symbol":"TWBTC","stellar_address":"CADDR123","sources":["binance"],"min":44000.0,"max":46000.0},
+            {"symbol":"TWETH","stellar_address":"caddr123","sources":["binance"],"min":2400.0,"max":2600.0}
+        ]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        match err {
+            ConfigError::InvalidToken { symbol, reason } => {
+                assert_eq!(symbol, "TWETH");
+                assert_eq!(reason, "duplicate stellar_address (case-insensitive)");
             }
             _ => panic!("expected ConfigError::InvalidToken"),
         }
