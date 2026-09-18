@@ -20,6 +20,7 @@ so4-oracle  (single statically-deployed binary)
 │     GET /keeper/status               admin    pending work + last N executions
 │     GET /keeper/balance              admin    live keeper account XLM balance
 │     GET /oracle/failed-submissions   admin    ring buffer of failures
+│     DELETE /keeper/blacklist/{key}   admin    reset blacklist failure counters
 │     GET /metrics                     admin    Prometheus metrics
 ├── task: price_loop   tokio::interval(~1s)
 │     fetch sources → validate → aggregate min/max → sign → write PriceCache
@@ -172,6 +173,7 @@ railway up
 | `/keeper/status` | GET | Admin | Keeper status and execution history |
 | `/keeper/balance` | GET | Admin | Live keeper account XLM balance |
 | `/oracle/failed-submissions` | GET | Admin | Failed submission history |
+| `/keeper/blacklist/{key}` | DELETE | Admin | Clears blacklisted order/deposit/withdrawal key |
 | `/metrics` | GET | Admin | Prometheus metrics |
 
 ## Observability
