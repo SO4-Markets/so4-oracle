@@ -62,9 +62,29 @@ pub async fn oracle_status(
         .collect();
     let recent_errors = state.failures.lock().await.iter().rev().cloned().collect();
 
+    let keeper_cfg = crate::keeper::KeeperBalanceConfig {
+        horizon_url: state.config.horizon_url.clone(),
+        account_id: state.config.keeper_account_id.clone(),
+        min_balance_xlm: state.config.min_keeper_balance_xlm,
+    };
+    let keeper_balance = match crate::keeper::check_keeper_balance(
+        &keeper_cfg,
+        &state.keeper_balance_below_min,
+    )
+    .await
+    {
+        Ok(stroops) => {
+            Some(crate::keeper::build_balance_response(&keeper_cfg, stroops).balance_xlm)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to check keeper balance for oracle status");
+            None
+        }
+    };
+
     Json(OracleStatusResponse {
         last_cycle_time,
-        keeper_balance: None,
+        keeper_balance,
         prices,
         recent_errors,
     })
