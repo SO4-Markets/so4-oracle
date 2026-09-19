@@ -101,6 +101,7 @@ Once running, the oracle exposes:
 | `GET /keeper/status` | Bearer | Pending keeper operations + recent executions |
 | `GET /keeper/balance` | Bearer | Current keeper account XLM balance |
 | `GET /oracle/failed-submissions` | Bearer | Ring buffer of failed on-chain submissions |
+| `DELETE /keeper/blacklist/{key}` | Bearer | Clears a permanently-blacklisted order/deposit/withdrawal key (404 if the key is not blacklisted) |
 
 ---
 
