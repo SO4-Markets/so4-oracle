@@ -192,13 +192,61 @@ pub fn parse_account_balance_response(body: &str) -> Result<i64, RpcError> {
         .find(|b| b.asset_type == "native")
         .ok_or_else(|| RpcError::JsonError("no native balance entry".to_string()))?;
 
-    // Horizon returns XLM as a decimal string "100.0000000" (7 decimal places).
-    let xlm: f64 = native
-        .balance
-        .parse()
-        .map_err(|_| RpcError::JsonError(format!("unparseable balance: {}", native.balance)))?;
+    parse_native_balance_stroops(&native.balance)
+}
 
-    Ok((xlm * 10_000_000.0) as i64)
+fn parse_native_balance_stroops(balance: &str) -> Result<i64, RpcError> {
+    let balance = balance.trim();
+    if balance.is_empty() {
+        return Err(RpcError::JsonError("empty balance string".to_string()));
+    }
+    if balance.starts_with('-') {
+        return Err(RpcError::JsonError(format!("negative balance: {}", balance)));
+    }
+
+    let parts: Vec<&str> = balance.split('.').collect();
+    match parts.as_slice() {
+        [whole_str] => {
+            let whole: i64 = whole_str
+                .parse()
+                .map_err(|_| RpcError::JsonError(format!("unparseable balance: {}", balance)))?;
+            whole
+                .checked_mul(10_000_000)
+                .ok_or_else(|| RpcError::JsonError(format!("balance overflow: {}", balance)))
+        }
+        [whole_str, frac_str] => {
+            if frac_str.len() > 7 {
+                return Err(RpcError::JsonError(format!(
+                    "unparseable balance: {} (more than 7 fractional digits)",
+                    balance
+                )));
+            }
+            let whole: i64 = if whole_str.is_empty() {
+                0
+            } else {
+                whole_str
+                    .parse()
+                    .map_err(|_| RpcError::JsonError(format!("unparseable balance: {}", balance)))?
+            };
+
+            let mut frac: i64 = 0;
+            let mut factor: i64 = 1_000_000;
+            for c in frac_str.chars() {
+                let digit = c
+                    .to_digit(10)
+                    .ok_or_else(|| RpcError::JsonError(format!("unparseable balance: {}", balance)))?
+                    as i64;
+                frac += digit * factor;
+                factor /= 10;
+            }
+
+            whole
+                .checked_mul(10_000_000)
+                .and_then(|w| w.checked_add(frac))
+                .ok_or_else(|| RpcError::JsonError(format!("balance overflow: {}", balance)))
+        }
+        _ => Err(RpcError::JsonError(format!("unparseable balance: {}", balance))),
+    }
 }
 
 /// Fetch the XLM balance for `account_id` from the Horizon server at
@@ -316,6 +364,59 @@ mod tests {
     #[test]
     fn parse_account_balance_malformed_json() {
         let err = parse_account_balance_response("not json").unwrap_err();
+        assert!(matches!(err, RpcError::JsonError(_)));
+    }
+
+    /// Verifies that balance values that suffer from IEEE-754 floating point rounding
+    /// error under f64 arithmetic (e.g. 0.0000021 * 10_000_000.0 = 20.999999999999996,
+    /// which truncates to 20 stroops) are parsed with exact precision (21 stroops). Closes #899.
+    #[test]
+    fn parse_account_balance_exact_precision_without_float_loss() {
+        let body = r#"{
+            "id": "GABC",
+            "balances": [{"asset_type":"native","balance":"0.0000021"}]
+        }"#;
+        let stroops = parse_account_balance_response(body).unwrap();
+        assert_eq!(stroops, 21);
+    }
+
+    #[test]
+    fn parse_account_balance_single_stroop() {
+        let body = r#"{
+            "id": "GABC",
+            "balances": [{"asset_type":"native","balance":"0.0000001"}]
+        }"#;
+        let stroops = parse_account_balance_response(body).unwrap();
+        assert_eq!(stroops, 1);
+    }
+
+    #[test]
+    fn parse_account_balance_integer_without_decimal() {
+        let body = r#"{
+            "id": "GABC",
+            "balances": [{"asset_type":"native","balance":"100"}]
+        }"#;
+        let stroops = parse_account_balance_response(body).unwrap();
+        assert_eq!(stroops, 1_000_000_000);
+    }
+
+    #[test]
+    fn parse_account_balance_rejects_excess_fractional_digits() {
+        let body = r#"{
+            "id": "GABC",
+            "balances": [{"asset_type":"native","balance":"0.12345678"}]
+        }"#;
+        let err = parse_account_balance_response(body).unwrap_err();
+        assert!(matches!(err, RpcError::JsonError(_)));
+    }
+
+    #[test]
+    fn parse_account_balance_rejects_negative_balance() {
+        let body = r#"{
+            "id": "GABC",
+            "balances": [{"asset_type":"native","balance":"-1.0000000"}]
+        }"#;
+        let err = parse_account_balance_response(body).unwrap_err();
         assert!(matches!(err, RpcError::JsonError(_)));
     }
 
