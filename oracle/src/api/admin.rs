@@ -120,9 +120,9 @@ pub struct ClearBlacklistResponse {
 /// "manual intervention required" the blacklist log message promises
 /// actually possible through the API (#802).
 ///
-/// Also resets the key's consecutive freeze-failure count, so it gets a
-/// fresh `MAX_CONSECUTIVE_FREEZE_FAILURES` budget instead of being
-/// re-blacklisted after a single further failure.
+/// Also resets the key's consecutive freeze-failure and execution-failure counts,
+/// so it gets a fresh failure budget instead of being re-blacklisted after a
+/// single further failure (#887).
 pub async fn clear_blacklisted_key(
     _auth: AdminAuth,
     State(state): State<Arc<AppState>>,
@@ -140,6 +140,7 @@ pub async fn clear_blacklisted_key(
     }
 
     state.freeze_failure_counts.lock().await.remove(&key);
+    state.execution_failure_counts.lock().await.remove(&key);
 
     info!(key = %key, "blacklisted order key cleared via admin API");
     Ok(Json(ClearBlacklistResponse { key, cleared: true }))
