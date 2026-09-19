@@ -194,6 +194,53 @@ async fn clear_blacklisted_key_removes_key_and_resets_failure_count() {
         .lock()
         .await
         .contains_key("deadbeef"));
+    assert!(!state
+        .execution_failure_counts
+        .lock()
+        .await
+        .contains_key("deadbeef"));
+}
+
+/// #887 — clearing a blacklisted key resets execution_failure_counts so the key gets
+/// a fresh MAX_CONSECUTIVE_EXECUTION_FAILURES budget instead of immediate re-blacklisting.
+#[tokio::test]
+async fn clear_blacklisted_key_resets_execution_failure_counts() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    {
+        let mut blacklist = state.frozen_order_blacklist.lock().await;
+        blacklist.insert("exec_failed_key".to_string(), 5);
+        let mut exec_counts = state.execution_failure_counts.lock().await;
+        exec_counts.insert("exec_failed_key".to_string(), 5);
+    }
+
+    let app = build_router(Arc::clone(&state));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/keeper/blacklist/exec_failed_key")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert!(!state
+        .frozen_order_blacklist
+        .lock()
+        .await
+        .contains_key("exec_failed_key"));
+    assert!(!state
+        .execution_failure_counts
+        .lock()
+        .await
+        .contains_key("exec_failed_key"));
 }
 
 // ── #432 — GET /oracle/failed-submissions ────────────────────────────────────
