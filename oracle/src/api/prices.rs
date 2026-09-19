@@ -13,6 +13,8 @@ use crate::state::{AppState, CachedPrice, FailedSubmission};
 
 const READY_BALANCE_RETRY_ATTEMPTS: u32 = 3;
 const READY_BALANCE_RETRY_BASE_DELAY_MS: u64 = 100;
+const READY_RPC_RETRY_ATTEMPTS: u32 = 3;
+const READY_RPC_RETRY_BASE_DELAY_MS: u64 = 100;
 
 #[derive(Debug, Deserialize)]
 pub struct FailedSubmissionsQuery {
@@ -197,22 +199,55 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
     }))
 }
 
-async fn perform_external_ready_checks(state: &AppState) -> Result<(), ApiError> {
-    // Check RPC reachability
+async fn check_rpc_reachability_for_ready(state: &AppState) -> Result<(), ApiError> {
     let rpc_url = &state.config.stellar_rpc_url;
-    let response = state
-        .http
-        .get(rpc_url)
-        .send()
-        .await
-        .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "rpc_unreachable"))?;
+    let mut last_error = None;
 
-    if !response.status().is_success() {
-        return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "rpc_unhealthy",
-        ));
+    for attempt in 1..=READY_RPC_RETRY_ATTEMPTS {
+        match state.http.get(rpc_url).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    return Ok(());
+                }
+                tracing::warn!(
+                    attempt,
+                    max_attempts = READY_RPC_RETRY_ATTEMPTS,
+                    status = %response.status(),
+                    "ready rpc reachability attempt returned non-success status"
+                );
+                last_error = Some(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "rpc_unhealthy",
+                ));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    attempt,
+                    max_attempts = READY_RPC_RETRY_ATTEMPTS,
+                    error = %error,
+                    "ready rpc reachability attempt failed"
+                );
+                last_error = Some(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "rpc_unreachable",
+                ));
+            }
+        }
+
+        if attempt < READY_RPC_RETRY_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(
+                READY_RPC_RETRY_BASE_DELAY_MS * 2_u64.pow(attempt - 1),
+            ))
+            .await;
+        }
     }
+
+    Err(last_error.expect("READY_RPC_RETRY_ATTEMPTS is greater than zero"))
+}
+
+async fn perform_external_ready_checks(state: &AppState) -> Result<(), ApiError> {
+    // Check RPC reachability (with retry for transient network errors)
+    check_rpc_reachability_for_ready(state).await?;
 
     // Check keeper balance
     let keeper_cfg = crate::keeper::KeeperBalanceConfig {
