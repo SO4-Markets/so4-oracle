@@ -871,7 +871,7 @@ async fn get_account_sequence(state: &Arc<AppState>) -> Result<u64, SequenceFetc
         || async { get_account_sequence_once(state).await },
         ACCOUNT_SEQUENCE_RETRY_ATTEMPTS,
         ACCOUNT_SEQUENCE_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await
 }
@@ -934,7 +934,7 @@ async fn simulate_contract_call(
         || async { simulate_contract_call_once(state, contract_id, method, args).await },
         SIMULATE_RETRY_ATTEMPTS,
         SIMULATE_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await
 }
