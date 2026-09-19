@@ -54,14 +54,19 @@ fn mock_rpc_integration_full_pipeline() {
 
 #[test]
 fn mock_rpc_integration_with_mocked_source_prices() {
+    use oracle::prices::{compute_confidence_interval, MIN_SOURCES_FOR_PERCENTILE};
+
     // Simulate fetching prices from multiple sources and computing confidence interval
     let prices = [45000i128, 45100, 44900];
 
     // Verify we have at least 3 sources for percentile calculation
-    assert!(prices.len() >= 3);
-    assert_eq!(prices[0], 45000);
-    assert_eq!(prices[1], 45100);
-    assert_eq!(prices[2], 44900);
+    assert!(prices.len() >= MIN_SOURCES_FOR_PERCENTILE);
+
+    let interval = compute_confidence_interval(&prices)
+        .expect("Failed to compute confidence interval from prices");
+    assert_eq!(interval.min, 44920);
+    assert_eq!(interval.max, 45080);
+    assert!(interval.min < interval.max);
 }
 
 #[test]
@@ -143,7 +148,7 @@ fn mock_rpc_integration_transaction_failure_detection() {
 }
 
 #[test]
-fn mock_rpc_integration_verified_signature_keypair() {
+fn mock_rpc_integration_transaction_response_status() {
     // Verify that transaction data contains the expected fields
     let tx_response = r#"{
         "jsonrpc":"2.0","id":1,
@@ -163,6 +168,49 @@ fn mock_rpc_integration_verified_signature_keypair() {
 
     let ledger = result.ledger.unwrap();
     assert!(ledger > 0);
+}
+
+#[test]
+fn mock_rpc_integration_verified_signature_keypair() {
+    use ed25519_dalek::{SigningKey, Verifier};
+    use oracle::signing::{build_price_message, sign_price};
+
+    let private_key_hex = "1111111111111111111111111111111111111111111111111111111111111111";
+    let key_bytes: [u8; 32] = hex::decode(private_key_hex).unwrap().try_into().unwrap();
+    let signing_key = SigningKey::from_bytes(&key_bytes);
+    let public_key = signing_key.verifying_key();
+
+    let network_passphrase = "Test SDF Network ; September 2015";
+    let ledger_seq: u32 = 50100;
+    let token_strkey = "CBTCADDR";
+    let min: i128 = 44920;
+    let max: i128 = 45080;
+    let timestamp: u64 = 1690000000;
+
+    let signature = sign_price(
+        private_key_hex,
+        network_passphrase,
+        ledger_seq,
+        token_strkey,
+        min,
+        max,
+        timestamp,
+    )
+    .expect("Signing price failed");
+
+    let expected_payload = build_price_message(
+        network_passphrase,
+        ledger_seq,
+        token_strkey,
+        min,
+        max,
+        timestamp,
+    );
+
+    assert!(
+        public_key.verify(&expected_payload, &signature).is_ok(),
+        "Signature must be verified against public key"
+    );
 }
 
 #[test]
