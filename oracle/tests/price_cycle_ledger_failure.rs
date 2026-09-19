@@ -338,7 +338,11 @@ async fn ledger_failure_with_empty_token_list_still_resets_cycle() {
 async fn ledger_failure_records_non_zero_latency_in_metrics() {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(ledger_fail())
+                .set_delay(std::time::Duration::from_millis(15)),
+        )
         .mount(&mock)
         .await;
 
@@ -349,11 +353,12 @@ async fn ledger_failure_records_non_zero_latency_in_metrics() {
     let metrics = state.metrics.to_response();
     // finish_cycle always calls record_price_cycle(latency_ms) regardless of abort path.
     assert_eq!(metrics.price_cycle_count, 1);
-    // latency_ms is the actual wall-clock time; it could be 0 on very fast CI machines,
-    // so we only verify the cycle was counted, not the exact duration.
+    // With an artificial delay on the mock server response, wall-clock latency
+    // is reliably non-zero.
     assert!(
-        metrics.price_cycle_count > 0,
-        "at least one cycle must be counted in metrics after ledger failure"
+        metrics.price_cycle_latency_ms > 0,
+        "price_cycle_latency_ms in metrics must be non-zero after ledger failure, got {}",
+        metrics.price_cycle_latency_ms
     );
 }
 
