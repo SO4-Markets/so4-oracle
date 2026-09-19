@@ -504,7 +504,7 @@ fn load_price_feed_config(raw: Option<&str>) -> Result<PriceFeedConfig, ConfigEr
 ///
 /// Expected format:
 /// ```json
-/// [{"symbol":"BTC","stellar_address":"C...","sources":["binance","coinbase"]}]
+/// [{"symbol":"BTC","stellar_address":"C...","sources":["binance","coinbase"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC"}]
 /// ```
 pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError> {
     let tokens = shared_config::parse_token_configs(raw)?;
@@ -735,6 +735,18 @@ mod tests {
         assert_eq!(cfg.tokens[0].sources, vec!["binance", "coinbase"]);
         assert_eq!(cfg.tokens[1].symbol, "ETH");
         assert_eq!(cfg.tokens[1].sources, vec!["binance"]);
+    }
+
+    /// Closes #906: doc-comment example JSON for parse_price_feed_config must parse successfully.
+    #[test]
+    fn parse_price_feed_config_doc_example_parses() {
+        let doc_example = r#"[{"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance","coinbase"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC"}]"#;
+        let cfg = parse_price_feed_config(doc_example).unwrap();
+        assert_eq!(cfg.tokens.len(), 1);
+        assert_eq!(cfg.tokens[0].symbol, "BTC");
+        assert_eq!(cfg.tokens[0].stellar_address, "CBTCADDR");
+        assert_eq!(cfg.tokens[0].binance_symbol.as_deref(), Some("BTCUSDT"));
+        assert_eq!(cfg.tokens[0].coinbase_symbol.as_deref(), Some("BTC"));
     }
 
     #[test]
