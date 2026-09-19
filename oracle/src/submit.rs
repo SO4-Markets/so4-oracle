@@ -3,11 +3,16 @@ use serde::Deserialize;
 
 use crate::stellar_rpc::{rpc_post, JsonRpcRequest, JsonRpcResponse, RpcError};
 
-const MAX_POLL_ATTEMPTS: u32 = 10;
+const MAX_POLL_ATTEMPTS: u32 = 7;
 #[cfg(not(test))]
 const INITIAL_BACKOFF_MS: u64 = 1_000;
 #[cfg(test)]
 const INITIAL_BACKOFF_MS: u64 = 1;
+
+/// Maximum backoff cap between poll attempts to ensure the worst-case unjittered poll duration
+/// (1s + 2s + 4s + 8s + 8s + 8s = 31s) comfortably fits within the outer keeper cycle
+/// timeout (KEEPER_CYCLE_TIMEOUT_SECS = 50s) without being killed mid-poll (#916).
+const MAX_POLL_BACKOFF_MS: u64 = 8_000;
 
 /// Maximum number of diagnostic-event XDR entries logged at warn/error level.
 /// Full payload capture is already available in the admin-gated failure ring
@@ -191,7 +196,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                         "transient RPC/network error; will retry"
                     );
                     sleep_ms(crate::retry::jitter(backoff_ms)).await;
-                    backoff_ms = (backoff_ms * 2).min(30_000);
+                    backoff_ms = (backoff_ms * 2).min(MAX_POLL_BACKOFF_MS);
                     continue;
                 } else {
                     return Err(SubmitError::Rpc(rpc_err));
@@ -238,7 +243,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                     "transaction still pending"
                 );
                 sleep_ms(crate::retry::jitter(backoff_ms)).await;
-                backoff_ms = (backoff_ms * 2).min(30_000);
+                backoff_ms = (backoff_ms * 2).min(MAX_POLL_BACKOFF_MS);
             }
             _ => {
                 tracing::warn!(
@@ -248,7 +253,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                     "unexpected transaction status; continuing poll"
                 );
                 sleep_ms(crate::retry::jitter(backoff_ms)).await;
-                backoff_ms = (backoff_ms * 2).min(30_000);
+                backoff_ms = (backoff_ms * 2).min(MAX_POLL_BACKOFF_MS);
             }
         }
     }
@@ -279,6 +284,23 @@ pub async fn submit_and_poll(rpc_url: &str, signed_xdr: &str) -> Result<u32, Sub
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_poll_worst_case_duration_fits_cycle_timeout() {
+        use crate::keeper_loop::KEEPER_CYCLE_TIMEOUT_SECS;
+
+        let mut total_ms = 0u64;
+        let mut backoff = 1_000u64;
+        for _ in 1..MAX_POLL_ATTEMPTS {
+            total_ms += backoff;
+            backoff = (backoff * 2).min(MAX_POLL_BACKOFF_MS);
+        }
+        let total_secs = total_ms as f64 / 1000.0;
+        assert!(
+            total_secs < KEEPER_CYCLE_TIMEOUT_SECS as f64,
+            "Worst-case unjittered poll duration ({total_secs}s) must be strictly less than KEEPER_CYCLE_TIMEOUT_SECS ({KEEPER_CYCLE_TIMEOUT_SECS}s)"
+        );
+    }
     use super::*;
     use serde_json::json;
     use wiremock::ResponseTemplate;
