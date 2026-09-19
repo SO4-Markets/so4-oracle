@@ -176,6 +176,63 @@ async fn get_ready_retries_transient_keeper_balance_failure() {
     assert_eq!(balance_attempts.load(Ordering::SeqCst), 2);
 }
 
+#[tokio::test]
+async fn get_ready_retries_transient_rpc_reachability_failure() {
+    let rpc_mock = MockServer::start().await;
+    let horizon_mock = MockServer::start().await;
+
+    let rpc_attempts = Arc::new(AtomicUsize::new(0));
+    let rpc_attempts_for_mock = Arc::clone(&rpc_attempts);
+    wiremock::Mock::given(method("GET"))
+        .respond_with(move |_req: &WireMockRequest| {
+            let attempt = rpc_attempts_for_mock.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                ResponseTemplate::new(500).set_body_string("transient rpc error")
+            } else {
+                ResponseTemplate::new(200).set_body_string("ok")
+            }
+        })
+        .mount(&rpc_mock)
+        .await;
+
+    wiremock::Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "balances": [{"asset_type": "native", "balance": "100.0000000"}]
+        })))
+        .mount(&horizon_mock)
+        .await;
+
+    let config = test_config(&rpc_mock.uri(), &horizon_mock.uri());
+    let state = Arc::new(AppState::new(config));
+
+    {
+        let mut cache = state.price_cache.write().await;
+        cache
+            .prices
+            .insert("BTC".to_string(), sample_cached_price());
+    }
+    {
+        let mut cycle = state.cycle_status.write().await;
+        cycle.last_price_cycle_at = Some(SystemTime::now());
+        cycle.last_keeper_cycle_at = Some(SystemTime::now());
+    }
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(rpc_attempts.load(Ordering::SeqCst), 2);
+}
+
 // #340 — GET /ready returns 503 when keeper loop is stale
 #[tokio::test]
 async fn get_ready_returns_503_when_keeper_loop_stale() {
