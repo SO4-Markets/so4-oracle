@@ -1262,4 +1262,36 @@ mod tests {
             err.0.len()
         );
     }
+
+    /// Closes #908: verify SET_PRICES_TX_FEE=0 is rejected by Config::from_lookup.
+    #[test]
+    fn config_from_lookup_rejects_zero_set_prices_tx_fee() {
+        let mut env = valid_env();
+        env.insert("SET_PRICES_TX_FEE", "0".to_string());
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        let found = err.0.iter().any(|e| matches!(
+            e,
+            EnvError::InvalidVar { var, reason }
+                if *var == "SET_PRICES_TX_FEE" && reason.contains("must be greater than 0")
+        ));
+        assert!(found, "expected InvalidVar for SET_PRICES_TX_FEE=0, got: {:?}", err.0);
+    }
+
+    /// Closes #908: verify KEEPER_TX_FEE=0 is rejected by Config::from_lookup.
+    #[test]
+    fn config_from_lookup_rejects_zero_keeper_tx_fee() {
+        let mut env = valid_env();
+        env.insert("KEEPER_TX_FEE", "0".to_string());
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        let found = err.0.iter().any(|e| matches!(
+            e,
+            EnvError::InvalidVar { var, reason }
+                if *var == "KEEPER_TX_FEE" && reason.contains("must be greater than 0")
+        ));
+        assert!(found, "expected InvalidVar for KEEPER_TX_FEE=0, got: {:?}", err.0);
+    }
 }
