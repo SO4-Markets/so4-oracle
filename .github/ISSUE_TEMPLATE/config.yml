@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability Disclosure
+    url: https://github.com/SO4-Markets/so4-oracle/security/advisories/new
+    about: Please report security vulnerabilities privately via GitHub Security Advisories or as documented in SECURITY.md.
