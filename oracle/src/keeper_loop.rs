@@ -131,6 +131,7 @@ pub struct CycleSummary {
     pub deposits_executed: usize,
     pub withdrawals_executed: usize,
     pub errors: usize,
+    pub prices_stale: bool,
 }
 
 async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, String> {
@@ -176,20 +177,26 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             .collect::<std::collections::BTreeMap<_, _>>()
     };
 
-    if fresh_prices.is_empty() {
+    let prices_stale = fresh_prices.is_empty();
+    if prices_stale {
         let cache = state.price_cache.read().await;
-        return Err(format!(
-            "No fresh prices available in cache (cache size: {}, all stale)",
-            cache.prices.len()
-        ));
+        warn!(
+            cache_size = cache.prices.len(),
+            "No fresh prices available in cache (all stale); skipping on-chain price update and order execution"
+        );
     }
 
-    let order_keys = get_pending_keys(&state, "get_order_count", "get_order_keys")
-        .await
-        .unwrap_or_else(|e| {
-            warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
-            Vec::new()
-        });
+    let order_keys = if prices_stale {
+        // When prices are stale, orders cannot be safely executed against on-chain prices (#487, #920)
+        Vec::new()
+    } else {
+        get_pending_keys(&state, "get_order_count", "get_order_keys")
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
+                Vec::new()
+            })
+    };
     let deposit_keys = get_pending_keys(&state, "get_deposit_count", "get_deposit_keys")
         .await
         .unwrap_or_else(|e| {
@@ -218,6 +225,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             deposits_executed: 0,
             withdrawals_executed: 0,
             errors: 0,
+            prices_stale,
         });
     }
 
@@ -226,19 +234,23 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         deposits = deposit_keys.len(),
         withdrawals = withdrawal_keys.len(),
         fresh_prices = fresh_prices.len(),
+        prices_stale = prices_stale,
         "found_pending_work"
     );
 
-    // Submit prices on-chain - only fresh prices are included
-    let tx_hash = set_prices_on_chain(&state, &fresh_prices).await?;
-    info!(hash = %tx_hash, "set_prices_confirmed");
-    tokio::time::sleep(Duration::from_millis(5000)).await;
+    if !prices_stale {
+        // Submit prices on-chain - only fresh prices are included
+        let tx_hash = set_prices_on_chain(&state, &fresh_prices).await?;
+        info!(hash = %tx_hash, "set_prices_confirmed");
+        tokio::time::sleep(Duration::from_millis(5000)).await;
+    }
 
     let mut summary = CycleSummary {
         orders_executed: 0,
         deposits_executed: 0,
         withdrawals_executed: 0,
         errors: 0,
+        prices_stale,
     };
 
     // Cached account sequence, shared across every execute_handler call made
@@ -1087,6 +1099,21 @@ async fn record_execution(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cycle_summary_prices_stale() {
+        let summary = CycleSummary {
+            orders_executed: 0,
+            deposits_executed: 5,
+            withdrawals_executed: 3,
+            errors: 0,
+            prices_stale: true,
+        };
+        assert!(summary.prices_stale);
+        assert_eq!(summary.deposits_executed, 5);
+        assert_eq!(summary.withdrawals_executed, 3);
+    }
+
 
     #[test]
     fn test_parse_u32_from_result() {
