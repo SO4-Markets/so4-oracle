@@ -61,26 +61,26 @@ cargo watch -x "run -p oracle"
 ```
 so4-oracle/
 ├── oracle/              Long-running Axum/Tokio binary — price loop, keeper loop, HTTP API
-│   └── src/
-│       ├── main.rs          Entry point: starts server, price loop, keeper loop
-│       ├── config.rs        Config loading from env vars
-│       ├── state.rs         AppState shared across all tasks
-│       ├── price_loop.rs    Periodic price fetching and on-chain submission
-│       ├── keeper_loop.rs   Periodic keeper task execution (orders, deposits, withdrawals)
-│       ├── metrics.rs       In-memory counters exposed at GET /metrics
-│       ├── api/
-│       │   ├── mod.rs       Router: /health, /ready, /prices, /metrics, /oracle/status, etc.
-│       │   ├── prices.rs    Public price feed and health/readiness handlers
-│       │   └── admin.rs     Admin-only status and metrics handlers
-│       ├── binance.rs       Binance price source
-│       ├── coinbase.rs      Coinbase price source
-│       ├── pyth.rs          Pyth price source
-│       └── fixed.rs         Fixed-price source (for stablecoins)
+│   ├── src/
+│   │   ├── main.rs          Entry point: starts server, price loop, keeper loop
+│   │   ├── config.rs        Config loading from env vars
+│   │   ├── state.rs         AppState shared across all tasks
+│   │   ├── price_loop.rs    Periodic price fetching and on-chain submission
+│   │   ├── keeper_loop.rs   Periodic keeper task execution (orders, deposits, withdrawals)
+│   │   ├── metrics.rs       In-memory counters exposed at GET /metrics
+│   │   ├── api/
+│   │   │   ├── mod.rs       Router: /health, /ready, /prices, /metrics, /oracle/status, etc.
+│   │   │   ├── prices.rs    Public price feed and health/readiness handlers
+│   │   │   └── admin.rs     Admin-only status and metrics handlers
+│   │   ├── binance.rs       Binance price source
+│   │   ├── coinbase.rs      Coinbase price source
+│   │   ├── pyth.rs          Pyth price source
+│   │   └── fixed.rs         Fixed-price source (for stablecoins)
+│   └── tests/               Integration tests
 ├── shared/
 │   └── config/src/lib.rs    TokenConfig struct + parse_token_configs() — shared by oracle
-├── config/
-│   └── tokens.json          Example token config for local development
-└── tests/                   Integration tests
+└── config/
+    └── tokens.json          Example token config for local development
 ```
 
 There is **no** Cloudflare Worker, `wrangler.toml`, or `apis/` crate in this repository. The oracle is a plain Axum binary deployed via Docker (see `Dockerfile`) on Fly.io / Railway (see `fly.toml`, `railway.json`).
@@ -164,7 +164,7 @@ If you are using an autonomous coding agent (or if you are an agent), you must r
 ## Testing
 
 - Unit tests go in the same file: `#[cfg(test)] mod tests { ... }`.
-- Integration tests go in `tests/` at the workspace root.
+- Integration tests go in `oracle/tests/`.
 - For HTTP endpoint tests, use `axum::test` or `reqwest` against a spawned server.
 
 ---
