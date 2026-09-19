@@ -3,11 +3,12 @@ use serde::Deserialize;
 
 use crate::stellar_rpc::{rpc_post, JsonRpcRequest, JsonRpcResponse, RpcError};
 
-const MAX_POLL_ATTEMPTS: u32 = 10;
+const MAX_POLL_ATTEMPTS: u32 = 6;
 #[cfg(not(test))]
 const INITIAL_BACKOFF_MS: u64 = 1_000;
 #[cfg(test)]
 const INITIAL_BACKOFF_MS: u64 = 1;
+const MAX_POLL_BACKOFF_MS: u64 = 8_000;
 
 /// Maximum number of diagnostic-event XDR entries logged at warn/error level.
 /// Full payload capture is already available in the admin-gated failure ring
@@ -191,7 +192,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                         "transient RPC/network error; will retry"
                     );
                     sleep_ms(crate::retry::jitter(backoff_ms)).await;
-                    backoff_ms = (backoff_ms * 2).min(30_000);
+                    backoff_ms = (backoff_ms * 2).min(MAX_POLL_BACKOFF_MS);
                     continue;
                 } else {
                     return Err(SubmitError::Rpc(rpc_err));
@@ -238,7 +239,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                     "transaction still pending"
                 );
                 sleep_ms(crate::retry::jitter(backoff_ms)).await;
-                backoff_ms = (backoff_ms * 2).min(30_000);
+                backoff_ms = (backoff_ms * 2).min(MAX_POLL_BACKOFF_MS);
             }
             _ => {
                 tracing::warn!(
@@ -248,7 +249,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                     "unexpected transaction status; continuing poll"
                 );
                 sleep_ms(crate::retry::jitter(backoff_ms)).await;
-                backoff_ms = (backoff_ms * 2).min(30_000);
+                backoff_ms = (backoff_ms * 2).min(MAX_POLL_BACKOFF_MS);
             }
         }
     }

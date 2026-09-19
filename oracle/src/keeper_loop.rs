@@ -144,6 +144,20 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     // of every cycle so an entry like that still surfaces eventually (#806).
     sweep_expired_in_flight_keys(&state).await;
 
+    // Skip on-chain cycle submissions when keeper balance is below minimum threshold (#921)
+    if state.keeper_balance_below_min.load(Ordering::Relaxed) {
+        warn!(
+            account = %state.config.keeper_account_id,
+            "keeper_balance_low: keeper balance is below minimum threshold; skipping on-chain cycle submissions"
+        );
+        return Ok(CycleSummary {
+            orders_executed: 0,
+            deposits_executed: 0,
+            withdrawals_executed: 0,
+            errors: 0,
+        });
+    }
+
     // Get fresh (non-stale) prices from cache
     let now = crate::current_timestamp_secs();
     let fresh_prices = {
