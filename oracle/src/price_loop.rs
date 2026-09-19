@@ -125,7 +125,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
         },
         LEDGER_SEQUENCE_RETRY_ATTEMPTS,
         LEDGER_SEQUENCE_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await
     {
@@ -385,7 +385,7 @@ async fn fetch_source_with_retry(
         },
         SOURCE_RETRY_ATTEMPTS,
         SOURCE_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await
 }
