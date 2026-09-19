@@ -125,12 +125,13 @@ pub async fn run_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     result
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CycleSummary {
     pub orders_executed: usize,
     pub deposits_executed: usize,
     pub withdrawals_executed: usize,
     pub errors: usize,
+    pub prices_stale: bool,
 }
 
 async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, String> {
@@ -146,11 +147,11 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
 
     // Get fresh (non-stale) prices from cache
     let now = crate::current_timestamp_secs();
-    let fresh_prices = {
+    let (fresh_prices, prices_stale) = {
         let cache = state.price_cache.read().await;
         let tokens = &state.config.price_feed.tokens;
 
-        cache
+        let fresh = cache
             .prices
             .iter()
             .filter_map(|(key, price)| {
@@ -173,29 +174,36 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                         }
                     })
             })
-            .collect::<std::collections::BTreeMap<_, _>>()
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        let stale = fresh.is_empty();
+        if stale {
+            warn!(
+                cache_size = cache.prices.len(),
+                "No fresh prices available in cache (all stale) - skipping set_prices and order execution this cycle"
+            );
+        }
+        (fresh, stale)
     };
 
-    if fresh_prices.is_empty() {
-        let cache = state.price_cache.read().await;
-        return Err(format!(
-            "No fresh prices available in cache (cache size: {}, all stale)",
-            cache.prices.len()
-        ));
-    }
+    let order_keys = if prices_stale {
+        Vec::new()
+    } else {
+        get_pending_keys(&state, "get_order_count", "get_order_keys")
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
+                Vec::new()
+            })
+    };
 
-    let order_keys = get_pending_keys(&state, "get_order_count", "get_order_keys")
-        .await
-        .unwrap_or_else(|e| {
-            warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
-            Vec::new()
-        });
     let deposit_keys = get_pending_keys(&state, "get_deposit_count", "get_deposit_keys")
         .await
         .unwrap_or_else(|e| {
             warn!(error = %e, "get_pending_keys(deposits) failed, skipping deposits this cycle");
             Vec::new()
         });
+
     let withdrawal_keys =
         get_pending_keys(&state, "get_withdrawal_count", "get_withdrawal_keys")
             .await
@@ -218,6 +226,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             deposits_executed: 0,
             withdrawals_executed: 0,
             errors: 0,
+            prices_stale,
         });
     }
 
@@ -226,19 +235,23 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         deposits = deposit_keys.len(),
         withdrawals = withdrawal_keys.len(),
         fresh_prices = fresh_prices.len(),
+        prices_stale = prices_stale,
         "found_pending_work"
     );
 
     // Submit prices on-chain - only fresh prices are included
-    let tx_hash = set_prices_on_chain(&state, &fresh_prices).await?;
-    info!(hash = %tx_hash, "set_prices_confirmed");
-    tokio::time::sleep(Duration::from_millis(5000)).await;
+    if !prices_stale && !fresh_prices.is_empty() {
+        let tx_hash = set_prices_on_chain(&state, &fresh_prices).await?;
+        info!(hash = %tx_hash, "set_prices_confirmed");
+        tokio::time::sleep(Duration::from_millis(5000)).await;
+    }
 
     let mut summary = CycleSummary {
         orders_executed: 0,
         deposits_executed: 0,
         withdrawals_executed: 0,
         errors: 0,
+        prices_stale,
     };
 
     // Cached account sequence, shared across every execute_handler call made
