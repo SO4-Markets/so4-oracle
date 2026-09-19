@@ -68,17 +68,27 @@ async fn http_get_prices_with_empty_cache() {
 
     tokio::spawn(async move { axum::serve(listener, app).await.ok() });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let client = reqwest::Client::new();
+    let health_url = format!("http://{}/health", addr);
+    let mut server_ready = false;
+    for _ in 0..50 {
+        if let Ok(resp) = client.get(&health_url).send().await {
+            if resp.status() == 200 {
+                server_ready = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(server_ready, "server failed to start within timeout");
 
-    let response = reqwest::Client::new()
+    let response = client
         .get(format!("http://{}/prices", addr))
         .send()
-        .await;
+        .await
+        .unwrap();
 
-    // May fail due to timing, but if successful, should be 503
-    if let Ok(resp) = response {
-        assert_eq!(resp.status(), 503);
-    }
+    assert_eq!(response.status(), 503);
 }
 
 #[tokio::test]
