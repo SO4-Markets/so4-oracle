@@ -51,6 +51,7 @@ mod tests {
             binance_symbol: None,
             coinbase_symbol: None,
             pyth_feed_id: None,
+            pyth_max_confidence_bps: 50,
             fixed_price: fixed_price.map(|s| s.to_string()),
             min_sources: 1,
             max_deviation_bps: 100,
