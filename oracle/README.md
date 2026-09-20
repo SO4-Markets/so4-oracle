@@ -38,6 +38,7 @@ Optional defaults:
 - `KEEPER_INDEX=0`
 - `MIN_KEEPER_BALANCE_XLM=10`
 - `PRICE_FEED_CONFIG`, otherwise `config/tokens.json` is embedded
+- `PYTH_API_KEY` — optional bearer token for Pyth Hermes price feed requests; recommended for production before authentication becomes mandatory
 
 For mainnet, `STELLAR_RPC_URL` and `ORACLE_CONTRACT_ID` must be explicit.
 

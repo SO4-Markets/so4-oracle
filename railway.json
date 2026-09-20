@@ -29,6 +29,7 @@
     "PRICE_LOOP_MS": "1000",
     "KEEPER_LOOP_MS": "1500",
     "MIN_KEEPER_BALANCE_XLM": "10",
-    "KEEPER_INDEX": "0"
+    "KEEPER_INDEX": "0",
+    "PYTH_API_KEY": "YOUR_PYTH_API_KEY"
   }
 }

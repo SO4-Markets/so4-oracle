@@ -34,6 +34,10 @@ primary_region = 'iad'
   KEEPER_LOOP_MS = '1500'
   MIN_KEEPER_BALANCE_XLM = '10'
   KEEPER_INDEX = '0'
+  # OPTIONAL: Pyth Hermes price feed API key. Optional during the migration period,
+  # but production deployments should set this before authentication becomes mandatory.
+  # Set as a Fly secret (`fly secrets set PYTH_API_KEY=...`) rather than plaintext.
+  PYTH_API_KEY = 'YOUR_PYTH_API_KEY'
 
 [http_service]
   internal_port = 8080

@@ -87,6 +87,9 @@ KEEPER_LOOP_MS=1500
 
 # Price feed configuration (optional; falls back to embedded config/tokens.json)
 PRICE_FEED_CONFIG=/path/to/tokens.json
+
+# Pyth Hermes authentication (optional during migration; recommended for production before authentication becomes mandatory)
+PYTH_API_KEY=<optional Pyth Hermes API key>
 ```
 
 > **Note:** `NETWORK_PASSPHRASE` is not read by the binary — the correct

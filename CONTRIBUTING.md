@@ -40,6 +40,7 @@ Key variables (see `oracle/src/config.rs` for the full list):
 | `KEEPER_SECRET_KEY` | Stellar secret key for the keeper account |
 | `ORACLE_CONTRACT_ID` | Deployed oracle contract address |
 | `ADMIN_API_TOKEN` | Bearer token for admin routes (`/oracle/status`, `/metrics`, etc.) |
+| `PYTH_API_KEY` | Optional bearer token for Pyth Hermes price feed API (recommended for production before authentication becomes mandatory) |
 
 **Run locally**
 
