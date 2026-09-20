@@ -166,6 +166,34 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
         }
     };
 
+    // Binance accepts multiple symbols in a single request. Fetch all Binance
+    // tickers once per cycle, rather than spending one rate-limited request per token.
+    let mut binance_symbols: Vec<String> = state
+        .config
+        .price_feed
+        .tokens
+        .iter()
+        .filter(|token| token.sources.iter().any(|source| source == "binance"))
+        .filter_map(|token| token.binance_symbol.clone())
+        .collect();
+    binance_symbols.sort();
+    binance_symbols.dedup();
+
+    let (binance_prices, binance_batch_failed) = if binance_symbols.is_empty() {
+        (std::collections::HashMap::new(), false)
+    } else {
+        match crate::binance::fetch_spot_prices(&binance_symbols).await {
+            Ok(prices) => {
+                let map: std::collections::HashMap<String, i128> = prices.into_iter().collect();
+                (map, false)
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "batched Binance request failed");
+                (std::collections::HashMap::new(), true)
+            }
+        }
+    };
+
     let mut new_prices = std::collections::BTreeMap::new();
 
     // First, check for stale entries in the existing cache
@@ -189,7 +217,16 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
                 }
             }
             // Token is either not in cache or not stale, try to fetch fresh price
-            match build_cached_price(&state, token, ledger_seq, &pyth_prices, batch_failed).await {
+            match build_cached_price(
+                &state,
+                token,
+                ledger_seq,
+                &pyth_prices,
+                batch_failed,
+                &binance_prices,
+                binance_batch_failed,
+            )
+            .await {
                 Ok(price) => {
                     new_prices.insert(key, price);
                     tokens_ok += 1;
@@ -302,6 +339,8 @@ async fn build_cached_price(
     ledger_seq: u32,
     pyth_prices: &std::collections::HashMap<String, crate::pyth::PythPriceFeed>,
     pyth_batch_failed: bool,
+    binance_prices: &std::collections::HashMap<String, i128>,
+    binance_batch_failed: bool,
 ) -> Result<CachedPrice, String> {
     let mut prices = Vec::new();
     let mut sources = Vec::new();
@@ -313,6 +352,8 @@ async fn build_cached_price(
             state.config.pyth_api_key.as_ref().map(|key| key.as_str()),
             pyth_prices,
             pyth_batch_failed,
+            binance_prices,
+            binance_batch_failed,
         )
         .await
         {
@@ -378,10 +419,21 @@ async fn fetch_source_with_retry(
     pyth_api_key: Option<&str>,
     pyth_prices: &std::collections::HashMap<String, crate::pyth::PythPriceFeed>,
     pyth_batch_failed: bool,
+    binance_prices: &std::collections::HashMap<String, i128>,
+    binance_batch_failed: bool,
 ) -> Result<i128, PriceSourceError> {
     crate::retry::retry_with_backoff(
         || async {
-            fetch_source_price(source, token, pyth_api_key, pyth_prices, pyth_batch_failed).await
+            fetch_source_price(
+                source,
+                token,
+                pyth_api_key,
+                pyth_prices,
+                pyth_batch_failed,
+                binance_prices,
+                binance_batch_failed,
+            )
+            .await
         },
         SOURCE_RETRY_ATTEMPTS,
         SOURCE_RETRY_BASE_DELAY_MS,
@@ -396,6 +448,8 @@ async fn fetch_source_price(
     pyth_api_key: Option<&str>,
     pyth_prices: &std::collections::HashMap<String, crate::pyth::PythPriceFeed>,
     pyth_batch_failed: bool,
+    binance_prices: &std::collections::HashMap<String, i128>,
+    binance_batch_failed: bool,
 ) -> Result<i128, PriceSourceError> {
     match source {
         "binance" => {
@@ -403,16 +457,38 @@ async fn fetch_source_price(
                 .binance_symbol
                 .as_ref()
                 .ok_or_else(|| PriceSourceError::Config("missing binance_symbol".to_string()))?;
-            let results = crate::binance::fetch_spot_prices(std::slice::from_ref(symbol))
-                .await
-                .map_err(PriceSourceError::Binance)?;
-            results
-                .into_iter()
-                .find(|(got_symbol, _)| got_symbol == symbol)
-                .map(|(_, price)| price)
-                .ok_or_else(|| {
-                    PriceSourceError::Config(format!("binance symbol not returned: {symbol}"))
-                })
+            if let Some(&price) = binance_prices.get(symbol) {
+                Ok(price)
+            } else {
+                if binance_batch_failed {
+                    tracing::warn!(
+                        symbol = %token.symbol,
+                        binance_symbol = %symbol,
+                        "skipping Binance price fetch due to batch failure"
+                    );
+                    return Err(PriceSourceError::Binance(
+                        crate::binance::BinancePriceError::NetworkError(
+                            "batch request failed, skipping individual fallback".to_string(),
+                        ),
+                    ));
+                }
+
+                tracing::warn!(
+                    symbol = %token.symbol,
+                    binance_symbol = %symbol,
+                    "Binance symbol not found in batch, falling back to individual request"
+                );
+                let results = crate::binance::fetch_spot_prices(std::slice::from_ref(symbol))
+                    .await
+                    .map_err(PriceSourceError::Binance)?;
+                results
+                    .into_iter()
+                    .find(|(got_symbol, _)| got_symbol == symbol)
+                    .map(|(_, price)| price)
+                    .ok_or_else(|| {
+                        PriceSourceError::Config(format!("binance symbol not returned: {symbol}"))
+                    })
+            }
         }
         "coinbase" => {
             let symbol = token
@@ -683,6 +759,8 @@ mod tests {
             123,
             &std::collections::HashMap::new(),
             false,
+            &std::collections::HashMap::new(),
+            false,
         )
         .await
         .unwrap();
@@ -703,6 +781,88 @@ mod tests {
         assert_eq!(cached.sources_used, vec!["fixed"]);
         assert_eq!(cached.signature.len(), 128);
         assert!(cached.timestamp > 0, "timestamp should be positive");
+    }
+
+    #[tokio::test]
+    async fn binance_source_uses_batch_results() {
+        let token = TokenConfig {
+            symbol: "TBTC".to_string(),
+            display_symbol: Some("BTC".to_string()),
+            stellar_address: "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES".to_string(),
+            sources: vec!["binance".to_string()],
+            binance_symbol: Some("BTCUSDT".to_string()),
+            coinbase_symbol: None,
+            pyth_feed_id: None,
+            fixed_price: None,
+            min_sources: 1,
+            max_deviation_bps: 100,
+            stale_after_seconds: 60,
+            submit_threshold_bps: 10,
+            min: 0.0,
+            max: 0.0,
+            sources_used: vec![],
+        };
+
+        let state = test_state(token.clone());
+        let mut binance_prices = std::collections::HashMap::new();
+        binance_prices.insert(
+            "BTCUSDT".to_string(),
+            50_000_000_000_000_000_000_000_000_000_000i128,
+        );
+
+        let cached = build_cached_price(
+            &state,
+            &token,
+            123,
+            &std::collections::HashMap::new(),
+            false,
+            &binance_prices,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(cached.symbol, "TBTC");
+        assert_eq!(
+            cached.median,
+            50_000_000_000_000_000_000_000_000_000_000i128
+        );
+        assert_eq!(cached.sources_used, vec!["binance"]);
+    }
+
+    #[tokio::test]
+    async fn binance_source_skips_fallback_on_batch_failure() {
+        let token = TokenConfig {
+            symbol: "TBTC".to_string(),
+            display_symbol: Some("BTC".to_string()),
+            stellar_address: "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES".to_string(),
+            sources: vec!["binance".to_string()],
+            binance_symbol: Some("BTCUSDT".to_string()),
+            coinbase_symbol: None,
+            pyth_feed_id: None,
+            fixed_price: None,
+            min_sources: 1,
+            max_deviation_bps: 100,
+            stale_after_seconds: 60,
+            submit_threshold_bps: 10,
+            min: 0.0,
+            max: 0.0,
+            sources_used: vec![],
+        };
+
+        let state = test_state(token.clone());
+        let result = build_cached_price(
+            &state,
+            &token,
+            123,
+            &std::collections::HashMap::new(),
+            false,
+            &std::collections::HashMap::new(),
+            true,
+        )
+        .await;
+
+        assert!(result.is_err());
     }
 
     #[test]
