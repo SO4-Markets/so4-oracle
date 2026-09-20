@@ -341,6 +341,7 @@ async fn last_updated_not_set_when_token_has_no_sources() {
         binance_symbol: None,
         coinbase_symbol: None,
         pyth_feed_id: None,
+        pyth_max_confidence_bps: 50,
         min_sources: 1,
         max_deviation_bps: 100,
         stale_after_seconds: 60,
