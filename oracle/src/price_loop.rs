@@ -433,7 +433,7 @@ async fn fetch_source_price(
                     &feed.price,
                     crate::current_timestamp_secs(),
                     token.stale_after_seconds,
-                    50,
+                    token.pyth_max_confidence_bps,
                 )
             } else {
                 // If batch failed, we should not fall back to individual requests
@@ -468,7 +468,7 @@ async fn fetch_source_price(
                             &feed.price,
                             crate::current_timestamp_secs(),
                             token.stale_after_seconds,
-                            50,
+                            token.pyth_max_confidence_bps,
                         )
                     })
             }
@@ -666,6 +666,7 @@ mod tests {
             binance_symbol: None,
             coinbase_symbol: None,
             pyth_feed_id: None,
+            pyth_max_confidence_bps: 50,
             fixed_price: Some("1000000000000000000000000000000".to_string()),
             min_sources: 1,
             max_deviation_bps: 100,
@@ -801,5 +802,48 @@ mod tests {
 
         assert_eq!(fresh_prices.len(), 1);
         assert_eq!(fresh_prices[0].symbol, "FRESH");
+    }
+
+    #[tokio::test]
+    async fn fetch_source_price_uses_token_pyth_max_confidence_bps() {
+        use crate::pyth::{PythPriceData, PythPriceFeed};
+
+        let feed_id = "test_feed_id_123".to_string();
+        let feed = PythPriceFeed {
+            id: feed_id.clone(),
+            price: PythPriceData {
+                price: "100000000".to_string(), // $1.00 normalized
+                conf: Some("100000".to_string()), // 10 bps confidence
+                expo: -8,
+                publish_time: Some(crate::current_timestamp_secs() as i64),
+            },
+        };
+        let mut pyth_prices = std::collections::HashMap::new();
+        pyth_prices.insert(feed_id.clone(), feed);
+
+        // Token with strict tolerance of 5 bps must reject the 10 bps confidence interval
+        let strict_token = TokenConfig {
+            symbol: "TTEST".to_string(),
+            sources: vec!["pyth".to_string()],
+            pyth_feed_id: Some(feed_id.clone()),
+            pyth_max_confidence_bps: 5,
+            ..Default::default()
+        };
+        let err = fetch_source_price(&strict_token, "pyth", None, &pyth_prices, false).await;
+        assert!(matches!(
+            err,
+            Err(PriceSourceError::Pyth(crate::pyth::PythPriceError::ConfidenceTooWide { max_bps: 5, .. }))
+        ));
+
+        // Token with lenient tolerance of 50 bps must accept the 10 bps confidence interval
+        let lenient_token = TokenConfig {
+            symbol: "TTEST".to_string(),
+            sources: vec!["pyth".to_string()],
+            pyth_feed_id: Some(feed_id.clone()),
+            pyth_max_confidence_bps: 50,
+            ..Default::default()
+        };
+        let res = fetch_source_price(&lenient_token, "pyth", None, &pyth_prices, false).await;
+        assert!(res.is_ok());
     }
 }
