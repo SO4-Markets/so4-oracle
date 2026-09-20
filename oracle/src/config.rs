@@ -241,6 +241,33 @@ impl Config {
         let reader_contract_id =
             collect_or_default!(required(&mut lookup, "READER"), String::new());
 
+        // Check 7 contract-ID env vars for accidental duplicate assignments (#950)
+        let contract_ids = [
+            ("ORACLE_CONTRACT_ID", &oracle_contract_id),
+            ("ROLE_STORE", &role_store_contract_id),
+            ("DATA_STORE", &data_store_contract_id),
+            ("ORDER_HANDLER", &order_handler_contract_id),
+            ("DEPOSIT_HANDLER", &deposit_handler_contract_id),
+            ("WITHDRAWAL_HANDLER", &withdrawal_handler_contract_id),
+            ("READER", &reader_contract_id),
+        ];
+
+        for i in 0..contract_ids.len() {
+            let (name_a, id_a) = contract_ids[i];
+            if id_a.is_empty() {
+                continue;
+            }
+            for j in (i + 1)..contract_ids.len() {
+                let (name_b, id_b) = contract_ids[j];
+                if !id_b.is_empty() && id_a == id_b {
+                    errors.push(EnvError::InvalidVar {
+                        var: name_b,
+                        reason: format!("duplicate contract ID shared with {name_a}: {id_a}"),
+                    });
+                }
+            }
+        }
+
         let keeper_private_key_raw =
             collect_or_default!(required(&mut lookup, "KEEPER_PRIVATE_KEY"), String::new());
         let keeper_private_key = if !keeper_private_key_raw.is_empty() {
@@ -1287,5 +1314,22 @@ mod tests {
             .iter()
             .any(|e| matches!(e, EnvError::InvalidVar { var: "KEEPER_TX_FEE", .. }));
         assert!(invalid, "expected InvalidVar for KEEPER_TX_FEE=0");
+    }
+
+    #[test]
+    fn config_from_lookup_rejects_duplicate_contract_ids() {
+        let mut env = valid_env();
+        let dup = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        env.insert("ORDER_HANDLER".to_string(), dup.to_string());
+        env.insert("DEPOSIT_HANDLER".to_string(), dup.to_string());
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+        let invalid = err.0.iter().any(|e| match e {
+            EnvError::InvalidVar { var, reason } => {
+                *var == "DEPOSIT_HANDLER" && reason.contains("duplicate contract ID")
+            }
+            _ => false,
+        });
+        assert!(invalid, "expected duplicate contract ID error for DEPOSIT_HANDLER");
     }
 }

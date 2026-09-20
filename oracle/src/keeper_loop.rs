@@ -328,28 +328,30 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 )
                 .await;
             }
-            Err(ref error) if is_poll_timeout(error) => {
+            Err(ref error) if error.is_poll_timeout() => {
+                let err_str = error.to_string();
                 // Tx may still confirm on-chain; retain in-flight to prevent re-submission.
-                warn!(key = %order_key, %error, "order_poll_timeout_key_remains_in_flight");
+                warn!(key = %order_key, error = %err_str, "order_poll_timeout_key_remains_in_flight");
                 summary.errors += 1;
-                record_error(&state, &format!("execute_order:{}", order_key), error, None).await;
+                record_error(&state, &format!("execute_order:{}", order_key), &err_str, None).await;
                 record_execution(
                     &state,
                     "execute_order",
                     order_key,
                     None,
                     false,
-                    Some(error.clone()),
+                    Some(err_str),
                 )
                 .await;
             }
             Err(error) => {
+                let err_str = error.to_string();
                 state.in_flight_keys.lock().await.remove(order_key);
                 summary.errors += 1;
-                warn!(key = %order_key, %error, "order_execution_failed");
+                warn!(key = %order_key, error = %err_str, "order_execution_failed");
 
                 let mut freeze_error_msg = None;
-                if error.contains("Budget, ExceededLimit") {
+                if err_str.contains("Budget, ExceededLimit") {
                     match execute_handler(
                         &state,
                         &state.config.order_handler_contract_id,
@@ -376,6 +378,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                                 .remove(order_key.as_str());
                         }
                         Err(freeze_error) => {
+                            let freeze_err_str = freeze_error.to_string();
                             let consecutive = {
                                 let mut counts = state.freeze_failure_counts.lock().await;
                                 let count = counts.entry(order_key.clone()).or_insert(0);
@@ -385,13 +388,13 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
 
                             error!(
                                 key = %order_key,
-                                %freeze_error,
+                                freeze_error = %freeze_err_str,
                                 consecutive_failures = consecutive,
                                 max = MAX_CONSECUTIVE_FREEZE_FAILURES,
                                 "freeze_order_failed"
                             );
-                            freeze_error_msg = Some(freeze_error.clone());
-                            record_error(&state, "freeze_order", &freeze_error, None).await;
+                            freeze_error_msg = Some(freeze_err_str.clone());
+                            record_error(&state, "freeze_order", &freeze_err_str, None).await;
 
                             if consecutive >= MAX_CONSECUTIVE_FREEZE_FAILURES {
                                 // Permanently blacklist this key and stop
@@ -452,12 +455,13 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                                 "order_frozen_after_repeated_execution_failures"
                             ),
                             Err(freeze_error) => {
+                                let freeze_err_str = freeze_error.to_string();
                                 warn!(
                                     key = %order_key,
-                                    %freeze_error,
+                                    freeze_error = %freeze_err_str,
                                     "freeze_order_failed_while_abandoning_broken_order"
                                 );
-                                record_error(&state, "freeze_order", &freeze_error, None).await;
+                                record_error(&state, "freeze_order", &freeze_err_str, None).await;
                             }
                         }
                         state
@@ -484,7 +488,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 record_error(
                     &state,
                     &format!("execute_order:{}", order_key),
-                    &error,
+                    &err_str,
                     None,
                 )
                 .await;
@@ -495,8 +499,8 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     None,
                     false,
                     Some(match freeze_error_msg {
-                        Some(freeze_error) => format!("{error} | freeze_error: {freeze_error}"),
-                        None => error,
+                        Some(freeze_error) => format!("{err_str} | freeze_error: {freeze_error}"),
+                        None => err_str,
                     }),
                 )
                 .await;
@@ -545,13 +549,14 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 )
                 .await;
             }
-            Err(ref error) if is_poll_timeout(error) => {
-                warn!(key = %deposit_key, %error, "deposit_poll_timeout_key_remains_in_flight");
+            Err(ref error) if error.is_poll_timeout() => {
+                let err_str = error.to_string();
+                warn!(key = %deposit_key, error = %err_str, "deposit_poll_timeout_key_remains_in_flight");
                 summary.errors += 1;
                 record_error(
                     &state,
                     &format!("execute_deposit:{}", deposit_key),
-                    error,
+                    &err_str,
                     None,
                 )
                 .await;
@@ -561,18 +566,19 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     deposit_key,
                     None,
                     false,
-                    Some(error.clone()),
+                    Some(err_str),
                 )
                 .await;
             }
             Err(error) => {
+                let err_str = error.to_string();
                 state.in_flight_keys.lock().await.remove(deposit_key);
                 summary.errors += 1;
-                warn!(key = %deposit_key, %error, "deposit_execution_failed");
+                warn!(key = %deposit_key, error = %err_str, "deposit_execution_failed");
                 record_error(
                     &state,
                     &format!("execute_deposit:{}", deposit_key),
-                    &error,
+                    &err_str,
                     None,
                 )
                 .await;
@@ -582,7 +588,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     deposit_key,
                     None,
                     false,
-                    Some(error),
+                    Some(err_str),
                 )
                 .await;
             }
@@ -630,13 +636,14 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 )
                 .await;
             }
-            Err(ref error) if is_poll_timeout(error) => {
-                warn!(key = %withdrawal_key, %error, "withdrawal_poll_timeout_key_remains_in_flight");
+            Err(ref error) if error.is_poll_timeout() => {
+                let err_str = error.to_string();
+                warn!(key = %withdrawal_key, error = %err_str, "withdrawal_poll_timeout_key_remains_in_flight");
                 summary.errors += 1;
                 record_error(
                     &state,
                     &format!("execute_withdrawal:{}", withdrawal_key),
-                    error,
+                    &err_str,
                     None,
                 )
                 .await;
@@ -646,18 +653,19 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     withdrawal_key,
                     None,
                     false,
-                    Some(error.clone()),
+                    Some(err_str),
                 )
                 .await;
             }
             Err(error) => {
+                let err_str = error.to_string();
                 state.in_flight_keys.lock().await.remove(withdrawal_key);
                 summary.errors += 1;
-                warn!(key = %withdrawal_key, %error, "withdrawal_execution_failed");
+                warn!(key = %withdrawal_key, error = %err_str, "withdrawal_execution_failed");
                 record_error(
                     &state,
                     &format!("execute_withdrawal:{}", withdrawal_key),
-                    &error,
+                    &err_str,
                     None,
                 )
                 .await;
@@ -667,7 +675,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     withdrawal_key,
                     None,
                     false,
-                    Some(error),
+                    Some(err_str),
                 )
                 .await;
             }
@@ -675,10 +683,6 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     }
 
     Ok(summary)
-}
-
-fn is_poll_timeout(error: &str) -> bool {
-    error.contains("not confirmed after")
 }
 
 /// Evict any `in_flight_keys` entry older than `IN_FLIGHT_EXPIRY`, regardless
@@ -793,6 +797,39 @@ async fn set_prices_on_chain(
 }
 
 /// True if `error` indicates the submitted transaction was rejected for
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandlerError {
+    InvalidKey(String),
+    SequenceFetch(String),
+    TxBuild(String),
+    TxSign(String),
+    Submit(crate::submit::SubmitError),
+}
+
+impl HandlerError {
+    pub fn is_poll_timeout(&self) -> bool {
+        matches!(
+            self,
+            HandlerError::Submit(crate::submit::SubmitError::PollTimeout { .. })
+        )
+    }
+}
+
+impl std::fmt::Display for HandlerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HandlerError::InvalidKey(msg) => write!(f, "invalid key: {msg}"),
+            HandlerError::SequenceFetch(msg) => write!(f, "sequence fetch error: {msg}"),
+            HandlerError::TxBuild(msg) => write!(f, "tx build error: {msg}"),
+            HandlerError::TxSign(msg) => write!(f, "tx sign error: {msg}"),
+            HandlerError::Submit(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for HandlerError {}
+
+/// True if `error` indicates the submitted transaction was rejected for
 /// carrying a stale/incorrect account sequence number (e.g. RPC status
 /// `BAD_SEQUENCE`, or classic Horizon's `tx_bad_seq`), as opposed to any
 /// other submission failure. Used to decide when a locally-cached sequence
@@ -819,12 +856,13 @@ async fn execute_handler(
     method: &str,
     key: &str,
     sequence_cache: &mut Option<u64>,
-) -> Result<String, String> {
-    let key_bytes = hex::decode(key).map_err(|e| format!("invalid key hex: {e}"))?;
+) -> Result<String, HandlerError> {
+    let key_bytes =
+        hex::decode(key).map_err(|e| HandlerError::InvalidKey(format!("invalid key hex: {e}")))?;
     let key_scval = stellar_xdr::ScVal::Bytes(stellar_xdr::ScBytes(
         key_bytes
             .try_into()
-            .map_err(|e| format!("key bytes conversion failed: {e}"))?,
+            .map_err(|e| HandlerError::InvalidKey(format!("key bytes conversion failed: {e}")))?,
     ));
 
     let sequence = match *sequence_cache {
@@ -832,7 +870,7 @@ async fn execute_handler(
         None => {
             let seq = get_account_sequence(state)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| HandlerError::SequenceFetch(e.to_string()))?;
             *sequence_cache = Some(seq);
             seq
         }
@@ -843,21 +881,24 @@ async fn execute_handler(
         contract_id,
         method,
         vec![
-            stellar_xdr::ScVal::Address(crate::chain::scval::strkey_to_sc_address(
-                &state.config.keeper_account_id,
-            )?),
+            stellar_xdr::ScVal::Address(
+                crate::chain::scval::strkey_to_sc_address(&state.config.keeper_account_id)
+                    .map_err(|e| HandlerError::TxBuild(e.to_string()))?,
+            ),
             key_scval,
         ],
         state.config.keeper_tx_fee,
         sequence,
         None,
-    )?;
+    )
+    .map_err(|e| HandlerError::TxBuild(e.to_string()))?;
 
     let signed_xdr = tx_builder::sign_transaction(
         &tx,
         state.config.keeper_secret_key.as_str(),
         &state.config.network_passphrase,
-    )?;
+    )
+    .map_err(|e| HandlerError::TxSign(e.to_string()))?;
 
     match crate::submit::submit_and_poll(&state.config.stellar_rpc_url, &signed_xdr).await {
         Ok(ledger) => {
@@ -875,7 +916,7 @@ async fn execute_handler(
                 // with the same wrong value.
                 *sequence_cache = None;
             }
-            Err(format!("{method} submit failed: {msg}"))
+            Err(HandlerError::Submit(error))
         }
     }
 }
@@ -1219,5 +1260,21 @@ mod tests {
             .collect();
         assert_eq!(stale_filtered.len(), 1);
         assert_eq!(stale_filtered[0].1.symbol, "STALE");
+    }
+
+    #[test]
+    fn test_handler_error_poll_timeout_detection() {
+        let timeout_err = HandlerError::Submit(crate::submit::SubmitError::PollTimeout {
+            hash: "deadbeef".to_string(),
+        });
+        assert!(timeout_err.is_poll_timeout());
+
+        let failed_err = HandlerError::Submit(crate::submit::SubmitError::TransactionFailed {
+            events: vec!["event".to_string()],
+        });
+        assert!(!failed_err.is_poll_timeout());
+
+        let key_err = HandlerError::InvalidKey("bad hex".to_string());
+        assert!(!key_err.is_poll_timeout());
     }
 }
