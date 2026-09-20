@@ -475,7 +475,7 @@ fn validate_hex_key(
 /// Validate a Stellar strkey (account `G…` / secret seed `S…`) for shape only:
 /// 56-char base32 with the expected version prefix. This catches typos and
 /// swapped vars at boot; it does not verify the CRC16 or that a secret derives
-/// the configured account (those are wired with the keeper in #3).
+/// the configured account.
 fn validate_strkey(var: &'static str, value: String, prefix: char) -> Result<String, EnvError> {
     let invalid = |reason: String| EnvError::InvalidVar { var, reason };
     if value.len() != 56 {
@@ -504,7 +504,7 @@ fn load_price_feed_config(raw: Option<&str>) -> Result<PriceFeedConfig, ConfigEr
 ///
 /// Expected format:
 /// ```json
-/// [{"symbol":"BTC","stellar_address":"C...","sources":["binance","coinbase"]}]
+/// [{"symbol":"BTC","stellar_address":"CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","sources":["binance","coinbase"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC"}]
 /// ```
 pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError> {
     let tokens = shared_config::parse_token_configs(raw)?;
@@ -1261,5 +1261,31 @@ mod tests {
             "expected at least 2 errors, got {}",
             err.0.len()
         );
+    }
+
+    #[test]
+    fn config_from_lookup_rejects_zero_set_prices_tx_fee() {
+        let mut env = valid_env();
+        env.insert("SET_PRICES_TX_FEE", "0".to_string());
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+        let invalid = err
+            .0
+            .iter()
+            .any(|e| matches!(e, EnvError::InvalidVar { var: "SET_PRICES_TX_FEE", .. }));
+        assert!(invalid, "expected InvalidVar for SET_PRICES_TX_FEE=0");
+    }
+
+    #[test]
+    fn config_from_lookup_rejects_zero_keeper_tx_fee() {
+        let mut env = valid_env();
+        env.insert("KEEPER_TX_FEE", "0".to_string());
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+        let invalid = err
+            .0
+            .iter()
+            .any(|e| matches!(e, EnvError::InvalidVar { var: "KEEPER_TX_FEE", .. }));
+        assert!(invalid, "expected InvalidVar for KEEPER_TX_FEE=0");
     }
 }

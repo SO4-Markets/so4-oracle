@@ -15,6 +15,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
+use crate::auth::constant_time_eq;
 use crate::state::AppState;
 
 pub mod admin;
@@ -228,19 +229,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(trace_layer)
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(axum::middleware::from_fn_with_state(state, track_metrics))
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    let max_len = left.len().max(right.len());
-    let mut diff = left.len() ^ right.len();
-
-    for index in 0..max_len {
-        let a = left.get(index).copied().unwrap_or(0);
-        let b = right.get(index).copied().unwrap_or(0);
-        diff |= (a ^ b) as usize;
-    }
-
-    diff == 0
 }
 
 #[cfg(test)]

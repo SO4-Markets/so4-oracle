@@ -192,13 +192,40 @@ pub fn parse_account_balance_response(body: &str) -> Result<i64, RpcError> {
         .find(|b| b.asset_type == "native")
         .ok_or_else(|| RpcError::JsonError("no native balance entry".to_string()))?;
 
-    // Horizon returns XLM as a decimal string "100.0000000" (7 decimal places).
-    let xlm: f64 = native
-        .balance
+    // Parse Horizon decimal string without lossy f64 roundtrip (1 XLM = 10,000,000 stroops).
+    let balance_str = native.balance.trim();
+    let parts: Vec<&str> = balance_str.split('.').collect();
+    let (whole_str, frac_str) = match parts.as_slice() {
+        [whole] => (*whole, ""),
+        [whole, frac] => (*whole, *frac),
+        _ => return Err(RpcError::JsonError(format!("unparseable balance: {}", native.balance))),
+    };
+
+    let whole: i64 = whole_str
         .parse()
         .map_err(|_| RpcError::JsonError(format!("unparseable balance: {}", native.balance)))?;
 
-    Ok((xlm * 10_000_000.0) as i64)
+    if frac_str.len() > 7 {
+        return Err(RpcError::JsonError(format!("unparseable balance: {}", native.balance)));
+    }
+
+    let mut frac_padded = frac_str.to_string();
+    while frac_padded.len() < 7 {
+        frac_padded.push('0');
+    }
+
+    let frac: i64 = if frac_padded.is_empty() {
+        0
+    } else {
+        frac_padded
+            .parse()
+            .map_err(|_| RpcError::JsonError(format!("unparseable balance: {}", native.balance)))?
+    };
+
+    whole
+        .checked_mul(10_000_000)
+        .and_then(|w| w.checked_add(frac))
+        .ok_or_else(|| RpcError::JsonError(format!("balance overflow: {}", native.balance)))
 }
 
 /// Fetch the XLM balance for `account_id` from the Horizon server at
