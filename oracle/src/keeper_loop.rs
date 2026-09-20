@@ -184,25 +184,24 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         ));
     }
 
-    let order_keys = get_pending_keys(&state, "get_order_count", "get_order_keys")
-        .await
-        .unwrap_or_else(|e| {
-            warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
-            Vec::new()
-        });
-    let deposit_keys = get_pending_keys(&state, "get_deposit_count", "get_deposit_keys")
-        .await
-        .unwrap_or_else(|e| {
-            warn!(error = %e, "get_pending_keys(deposits) failed, skipping deposits this cycle");
-            Vec::new()
-        });
-    let withdrawal_keys =
-        get_pending_keys(&state, "get_withdrawal_count", "get_withdrawal_keys")
-            .await
-            .unwrap_or_else(|e| {
-                warn!(error = %e, "get_pending_keys(withdrawals) failed, skipping withdrawals this cycle");
-                Vec::new()
-            });
+    let (order_res, deposit_res, withdrawal_res) = tokio::join!(
+        get_pending_keys(&state, "get_order_count", "get_order_keys"),
+        get_pending_keys(&state, "get_deposit_count", "get_deposit_keys"),
+        get_pending_keys(&state, "get_withdrawal_count", "get_withdrawal_keys"),
+    );
+
+    let order_keys = order_res.unwrap_or_else(|e| {
+        warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
+        Vec::new()
+    });
+    let deposit_keys = deposit_res.unwrap_or_else(|e| {
+        warn!(error = %e, "get_pending_keys(deposits) failed, skipping deposits this cycle");
+        Vec::new()
+    });
+    let withdrawal_keys = withdrawal_res.unwrap_or_else(|e| {
+        warn!(error = %e, "get_pending_keys(withdrawals) failed, skipping withdrawals this cycle");
+        Vec::new()
+    });
 
     {
         let mut keeper_status = state.keeper_status.write().await;
@@ -1171,6 +1170,8 @@ mod tests {
             ledger_seq: 12345,
             sources_used: vec!["test".to_string()],
             signature: "sig".to_string(),
+            price_bound_min: 0.0,
+            price_bound_max: 0.0,
         };
 
         let stale_price = CachedPrice {
@@ -1181,29 +1182,33 @@ mod tests {
             min: 900,
             max: 900,
             median: 900,
-            timestamp: now - 100,
+            timestamp: now.saturating_sub(100),
             ledger_seq: 12344,
             sources_used: vec!["test".to_string()],
             signature: "sig".to_string(),
+            price_bound_min: 0.0,
+            price_bound_max: 0.0,
         };
 
         let mut prices = std::collections::BTreeMap::new();
         prices.insert("GAFRESH".to_string(), fresh_price);
         prices.insert("GASTALE".to_string(), stale_price);
 
-        let filtered_prices: Vec<_> = prices
-            .iter()
-            .filter(|(_, price)| !price.is_stale(stale_after, now))
+        let fresh_prices: Vec<CachedPrice> = prices
+            .values()
+            .filter(|p| !p.is_stale(stale_after, now))
+            .cloned()
             .collect();
 
-        assert_eq!(filtered_prices.len(), 1);
-        assert_eq!(filtered_prices[0].1.symbol, "FRESH");
+        assert_eq!(fresh_prices.len(), 1);
+        assert_eq!(fresh_prices[0].symbol, "FRESH");
 
-        let stale_filtered: Vec<_> = prices
-            .iter()
-            .filter(|(_, price)| price.is_stale(stale_after, now))
+        let stale_prices: Vec<CachedPrice> = prices
+            .values()
+            .filter(|p| p.is_stale(stale_after, now))
+            .cloned()
             .collect();
-        assert_eq!(stale_filtered.len(), 1);
-        assert_eq!(stale_filtered[0].1.symbol, "STALE");
+        assert_eq!(stale_prices.len(), 1);
+        assert_eq!(stale_prices[0].symbol, "STALE");
     }
 }
