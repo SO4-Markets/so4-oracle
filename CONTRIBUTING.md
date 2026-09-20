@@ -1,5 +1,11 @@
-## Code of Conduct
+# Contributing to so4-oracle
 
-This project adheres to the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
-By participating, you are expected to uphold this code. Please report
-unacceptable behavior to the maintainers as described in that document.
+Thank you for contributing! This document explains how to set up the
+development environment, make changes, and submit pull requests.
+
+## Development setup
+
+1. Install Rust (stable, `rust-version = "1.95"` per the workspace).
+2. Clone the repository and install dependencies:
+
+   

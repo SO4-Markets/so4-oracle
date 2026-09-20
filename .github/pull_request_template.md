@@ -1,15 +1,35 @@
-## Description
-*What changed, why, and linked issue.*
+## Summary
 
-## Verification Gate
-I confirm the following commands were run and exited 0. **(Paste the terminal output below)**:
+<!-- Briefly describe what this PR does and why. -->
 
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets --all-features --locked -- -D warnings`
-- [ ] `RUSTFLAGS=-Dwarnings cargo test --all --locked`
-- [ ] `cargo build --release --all --locked`
-- [ ] `docker build -t so4-oracle .` *(only if Dockerfile or dependencies changed)*
+## Type of change
 
-## Verification Output
-```text
-(paste your successful command outputs here)
+- [ ] New feature
+- [ ] Bug fix
+- [ ] Behavior change (price aggregation, keeper, circuit-breaker, retry, security)
+- [ ] Configuration change
+- [ ] Documentation
+- [ ] Refactor (no behavior change)
+- [ ] Test-only change
+- [ ] Dependency bump (no behavior change)
+
+## Changelog
+
+- [ ] I added an entry to `CHANGELOG.md` under `## [Unreleased]` (required for
+      any behavior-relevant change; see the "How to contribute an entry" section
+      in `CHANGELOG.md`).
+- [ ] N/A — this change does not affect runtime behavior.
+
+## Testing
+
+<!-- Describe how you tested the change. Include commands and expected results. -->
+
+- [ ] `cargo test` passes
+- [ ] `cargo fmt --check` passes
+- [ ] `cargo clippy` passes
+
+## Checklist
+
+- [ ] Code follows the existing style and directory layout
+- [ ] Tests added/updated for any behavior change
+- [ ] Documentation updated where relevant
