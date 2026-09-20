@@ -209,6 +209,15 @@ pub(crate) async fn fetch_pyth_price_with_url(
     stale_after_seconds: u64,
     max_confidence_bps: u32,
 ) -> Result<i128, PythPriceError> {
+    if feed_id.is_empty()
+        || !feed_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(PythPriceError::NetworkError(format!(
+            "invalid feed_id '{feed_id}': must contain only alphanumeric characters, dashes, or underscores"
+        )));
+    }
     let query = format!("ids[]={feed_id}");
     let url_string = format!("{base_url}?{query}");
 
@@ -258,6 +267,17 @@ pub async fn fetch_pyth_prices(
 ) -> Result<HashMap<String, PythPriceFeed>, PythPriceError> {
     if feed_ids.is_empty() {
         return Ok(HashMap::new());
+    }
+    for id in feed_ids {
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(PythPriceError::NetworkError(format!(
+                "invalid feed_id '{id}': must contain only alphanumeric characters, dashes, or underscores"
+            )));
+        }
     }
     let query = feed_ids
         .iter()
@@ -591,6 +611,12 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64
+    }
+
+    #[tokio::test]
+    async fn fetch_pyth_prices_rejects_invalid_feed_id_characters() {
+        let err = fetch_pyth_prices(&["bad&feed#id"], None).await.unwrap_err();
+        assert!(matches!(err, PythPriceError::NetworkError(_)));
     }
 
     #[tokio::test]
