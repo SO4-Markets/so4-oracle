@@ -80,6 +80,7 @@ so4-oracle/
 │   └── config/src/lib.rs    TokenConfig struct + parse_token_configs() — shared by oracle
 ├── config/
 │   └── tokens.json          Example token config for local development
+├── CHANGELOG.md             Version history and release notes following Keep a Changelog
 └── tests/                   Integration tests
 ```
 
@@ -147,6 +148,7 @@ If you are using an autonomous coding agent (or if you are an agent), you must r
 - **Title:** Start with a type prefix: `feat:`, `fix:`, `test:`, `docs:`, `chore:`.
 - **Description:** What does this do, and why? Link the relevant issue (`Closes #N`).
 - **Tests:** New functionality must include tests. Bug fixes should include a regression test.
+- **Changelog:** For user-facing or behavior-relevant changes, append an entry to `[Unreleased]` in [CHANGELOG.md](./CHANGELOG.md).
 - **No partial implementations:** If a function is not yet complete, leave it as a stub with `todo!()` rather than committing broken logic.
 - **No unnecessary refactors:** Keep PRs focused on the stated issue.
 
