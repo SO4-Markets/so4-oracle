@@ -31,6 +31,8 @@ pub struct TokenConfig {
     pub coinbase_symbol: Option<String>,
     /// Optional Pyth feed ID.
     pub pyth_feed_id: Option<String>,
+    /// Maximum allowed Pyth confidence interval width in basis points.
+    pub pyth_max_confidence_bps: u32,
     /// Fixed price in 1e30 precision, encoded as a decimal integer string.
     pub fixed_price: Option<String>,
     /// Minimum source count required after source fetches and outlier filtering.
@@ -59,6 +61,7 @@ impl Default for TokenConfig {
             binance_symbol: None,
             coinbase_symbol: None,
             pyth_feed_id: None,
+            pyth_max_confidence_bps: 50,
             fixed_price: None,
             min_sources: 2,
             max_deviation_bps: 100,
@@ -215,6 +218,15 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
                 reason: format!(
                     "max_deviation_bps ({}) must be between 1 and 10000",
                     token.max_deviation_bps
+                ),
+            });
+        }
+        if token.pyth_max_confidence_bps == 0 || token.pyth_max_confidence_bps > 10_000 {
+            return Err(ConfigError::InvalidToken {
+                symbol: token.symbol.clone(),
+                reason: format!(
+                    "pyth_max_confidence_bps ({}) must be between 1 and 10000",
+                    token.pyth_max_confidence_bps
                 ),
             });
         }
@@ -375,5 +387,37 @@ mod tests {
         let json = r#"[{"symbol":"BTC","sources":["binance"],"min_sources":0}]"#;
         let err = parse_token_configs(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }), "{err:?}");
+    }
+
+    // #964 — range validation: pyth_max_confidence_bps = 0 must fail.
+    #[test]
+    fn reject_zero_pyth_max_confidence_bps() {
+        let json = r#"[{"symbol":"BTC","sources":["binance"],"pyth_max_confidence_bps":0}]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }), "{err:?}");
+    }
+
+    // #964 — range validation: pyth_max_confidence_bps above 10000 must fail.
+    #[test]
+    fn reject_pyth_max_confidence_bps_above_10000() {
+        let json = r#"[{"symbol":"BTC","sources":["binance"],"pyth_max_confidence_bps":10001}]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }), "{err:?}");
+    }
+
+    // #964 — pyth_max_confidence_bps defaults to 50 when omitted.
+    #[test]
+    fn default_pyth_max_confidence_bps_is_50() {
+        let json = r#"[{"symbol":"BTC","sources":["binance"]}]"#;
+        let tokens = parse_token_configs(json).unwrap();
+        assert_eq!(tokens[0].pyth_max_confidence_bps, 50);
+    }
+
+    // #964 — custom pyth_max_confidence_bps is parsed correctly.
+    #[test]
+    fn parses_custom_pyth_max_confidence_bps() {
+        let json = r#"[{"symbol":"BTC","sources":["binance"],"pyth_max_confidence_bps":150}]"#;
+        let tokens = parse_token_configs(json).unwrap();
+        assert_eq!(tokens[0].pyth_max_confidence_bps, 150);
     }
 }
