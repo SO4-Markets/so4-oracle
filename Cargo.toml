@@ -8,12 +8,9 @@ rust-version = "1.95"
 [workspace.lints.rust]
 # Allow during the Rust 2024 migration while dependencies and generated code settle on one lifetime spelling.
 mismatched_lifetime_syntaxes = "allow"
+unsafe_code = "forbid"
 
 # Aligned with railway.json healthcheck: setting healthcheckPath to /ready
 # ensures the probe reflects real liveness (/ready inspects state.cycle_status).
 # Setting panic = "abort" ensures any unexpected panic crashes the process,
-# allowing the ON_FAILURE restart policy to detect and restart it.
-[profile.release]
-overflow-checks = true
-panic = "abort"
-
+# allowing the ON_FAILURE restart policy to detect
