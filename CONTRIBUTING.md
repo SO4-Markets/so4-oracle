@@ -108,13 +108,40 @@ Once running, the oracle exposes:
 
 All open issues are tracked on [GitHub Issues](https://github.com/SO4-Markets/so4-oracle/issues). Issues are labelled:
 
+### Components
+
 | Label | Meaning |
 |---|---|
-| `good first issue` | Self-contained, well-defined, good starting point |
-| `bug` | Something is broken |
-| `documentation` | Docs, comments, diagrams |
-| `enhancement` | New feature or improvement |
-| `infrastructure` | CI, Docker, deploy scripts, tooling |
+| `apis` | Axum HTTP server crate (`oracle/src/api/`, endpoints, routing, and middleware) |
+| `contracts` | On-chain Soroban smart contract interactions, bindings, and invocation helpers |
+| `oracle-worker` | Oracle background worker runtime and loop tasks (`price_loop`, `keeper_loop`) |
+
+### Types & Areas
+
+| Label | Meaning |
+|---|---|
+| `bug` | Something isn't working or incorrect behavior |
+| `documentation` | Improvements or additions to documentation, guides, or code doc comments |
+| `enhancement` | New feature, capability, or improvement |
+| `infrastructure` | CI, Docker, deployment manifests (`fly.toml`, `railway.json`), and tooling |
+| `testing` | Test coverage, integration tests, mock environments, and test harness fixes |
+| `security` | Security-sensitive changes, authentication, secret hygiene, or vulnerability fixes |
+| `performance` | Latency reduction, throughput, batching, and concurrency optimizations |
+| `dependencies` | Dependency updates and cargo crate version bumps |
+| `github_actions` | CI workflow definitions and GitHub Actions automations |
+| `rust` | Idiomatic Rust updates, compiler lints, MSRV, or toolchain changes |
+
+### Triage & Workflow
+
+| Label | Meaning |
+|---|---|
+| `good first issue` | Self-contained, well-defined task suitable for newcomers |
+| `help wanted` | Extra attention or community contribution is welcome |
+| `priority` | High-priority issue blocking core workflow or release |
+| `question` | Further information or architectural clarification requested |
+| `duplicate` | Another issue or pull request already tracks this work |
+| `invalid` | Out of scope or does not reflect intended repository behavior |
+| `wontfix` | Decided not to be implemented or worked on |
 
 Before starting, leave a comment on the issue so no one duplicates effort.
 
