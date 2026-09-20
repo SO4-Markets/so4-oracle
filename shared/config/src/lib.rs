@@ -197,7 +197,21 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
                         }
                     }
                 }
-                "pyth" | "fixed" => {}
+                "pyth" => {
+                    if let Some(ref feed_id) = token.pyth_feed_id {
+                        if feed_id.is_empty()
+                            || !feed_id
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                        {
+                            return Err(ConfigError::InvalidToken {
+                                symbol: token.symbol.clone(),
+                                reason: format!("invalid pyth_feed_id '{feed_id}': must contain only alphanumeric characters, dashes, or underscores"),
+                            });
+                        }
+                    }
+                }
+                "fixed" => {}
                 other => {
                     return Err(ConfigError::InvalidToken {
                         symbol: token.symbol.clone(),
@@ -370,6 +384,29 @@ mod tests {
     }
 
     // #504 — range validation: min_sources = 0 must fail.
+    #[test]
+    fn reject_invalid_pyth_feed_id() {
+        let json = r#"[{"symbol":"BTC","sources":["pyth"],"pyth_feed_id":"bad&id=123"}]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        match err {
+            ConfigError::InvalidToken { symbol, reason } => {
+                assert_eq!(symbol, "BTC");
+                assert!(reason.contains("invalid pyth_feed_id"));
+            }
+            _ => panic!("expected ConfigError::InvalidToken"),
+        }
+    }
+
+    #[test]
+    fn accept_valid_pyth_feed_id() {
+        let json = r#"[{"symbol":"BTC","sources":["pyth"],"pyth_feed_id":"e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"}]"#;
+        let tokens = parse_token_configs(json).unwrap();
+        assert_eq!(
+            tokens[0].pyth_feed_id.as_deref(),
+            Some("e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43")
+        );
+    }
+
     #[test]
     fn reject_zero_min_sources() {
         let json = r#"[{"symbol":"BTC","sources":["binance"],"min_sources":0}]"#;
