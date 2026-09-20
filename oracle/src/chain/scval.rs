@@ -156,6 +156,8 @@ mod tests {
             ledger_seq: 12345,
             sources_used: vec!["fixed".to_string()],
             signature: "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            price_bound_min: 0.0,
+            price_bound_max: 0.0,
         };
 
         let scval = encode_signed_price(&price).unwrap();
@@ -243,6 +245,8 @@ mod tests {
             ledger_seq: 12345,
             sources_used: vec!["fixed".to_string()],
             signature: "not-valid-hex!!!".to_string(),
+            price_bound_min: 0.0,
+            price_bound_max: 0.0,
         };
 
         let err = encode_signed_price(&price).unwrap_err();
@@ -291,6 +295,8 @@ mod tests {
             ledger_seq: 12345,
             sources_used: vec!["fixed".to_string()],
             signature: "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            price_bound_min: 0.0,
+            price_bound_max: 0.0,
         };
 
         let scval = encode_prices_vec(&[&price]).unwrap();
@@ -316,6 +322,8 @@ mod tests {
             ledger_seq: 12345,
             sources_used: vec!["fixed".to_string()],
             signature: "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            price_bound_min: 0.0,
+            price_bound_max: 0.0,
         };
 
         let scval = encode_signed_price(&price).unwrap();

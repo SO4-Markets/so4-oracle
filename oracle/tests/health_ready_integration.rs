@@ -31,6 +31,8 @@ fn sample_cached_price() -> CachedPrice {
         ledger_seq: 1,
         sources_used: vec!["binance".to_string()],
         signature: "sig".to_string(),
+        price_bound_min: 0.0,
+        price_bound_max: 0.0,
     }
 }
 

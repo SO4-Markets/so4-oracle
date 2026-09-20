@@ -29,7 +29,14 @@ pub struct CachedPrice {
     pub ledger_seq: u32,
     pub sources_used: Vec<String>,
     pub signature: String,
+    /// Operator-configured minimum price bound from `TokenConfig.min` (#949).
+    /// Expressed as a plain `f64` for human-readable display in the API.
+    pub price_bound_min: f64,
+    /// Operator-configured maximum price bound from `TokenConfig.max` (#949).
+    /// Expressed as a plain `f64` for human-readable display in the API.
+    pub price_bound_max: f64,
 }
+
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct PriceCache {

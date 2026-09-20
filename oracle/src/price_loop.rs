@@ -511,6 +511,10 @@ fn signed_cached_price(
         ledger_seq,
         sources_used: aggregate.sources_used,
         signature: hex::encode(signature.to_bytes()),
+        // Operator-configured display bounds — include in API response so
+        // clients can perform range validation without a separate config call.
+        price_bound_min: token.min,
+        price_bound_max: token.max,
     })
 }
 
@@ -673,7 +677,6 @@ mod tests {
             submit_threshold_bps: 10,
             min: 0.0,
             max: 0.0,
-            sources_used: vec![],
         };
 
         let state = test_state(token.clone());
@@ -719,6 +722,8 @@ mod tests {
             ledger_seq: 12345,
             sources_used: vec!["test".to_string()],
             signature: "sig".to_string(),
+            price_bound_min: 0.0,
+            price_bound_max: 0.0,
         };
 
         assert!(!price.is_stale(60, 1050));
@@ -750,6 +755,8 @@ mod tests {
             ledger_seq: 12345,
             sources_used: vec!["test".to_string()],
             signature: "sig".to_string(),
+            price_bound_min: 0.0,
+            price_bound_max: 0.0,
         };
 
         // Should not overflow due to saturating_sub
@@ -773,6 +780,8 @@ mod tests {
             ledger_seq: 12345,
             sources_used: vec!["test".to_string()],
             signature: "sig".to_string(),
+            price_bound_min: 0.0,
+            price_bound_max: 0.0,
         };
 
         let stale_price = CachedPrice {
@@ -787,6 +796,8 @@ mod tests {
             ledger_seq: 12344,
             sources_used: vec!["test".to_string()],
             signature: "sig".to_string(),
+            price_bound_min: 0.0,
+            price_bound_max: 0.0,
         };
 
         // Verify freshness detection

@@ -232,7 +232,14 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     // Submit prices on-chain - only fresh prices are included
     let tx_hash = set_prices_on_chain(&state, &fresh_prices).await?;
     info!(hash = %tx_hash, "set_prices_confirmed");
-    tokio::time::sleep(Duration::from_millis(5000)).await;
+    // Wait one ledger-close period (~5 s on Stellar) so the keeper's own
+    // subsequent contract calls see the newly-committed price data. This
+    // is an explicit protocol requirement, not a generic backoff — the
+    // constant is named so that a future change to network parameters
+    // can update it in one place. (#956)
+    const LEDGER_CLOSE_WAIT_MS: u64 = 5_000;
+    tokio::time::sleep(Duration::from_millis(LEDGER_CLOSE_WAIT_MS)).await;
+
 
     let mut summary = CycleSummary {
         orders_executed: 0,
@@ -1041,7 +1048,7 @@ async fn record_error(
     state: &Arc<AppState>,
     operation: &str,
     error: &str,
-    _tx_hash: Option<String>,
+    tx_hash: Option<String>,
 ) {
     state.failures.lock().await.push(FailedSubmission {
         at: SystemTime::now(),
@@ -1051,7 +1058,7 @@ async fn record_error(
         symbol: String::new(),
         min: 0,
         max: 0,
-        tx_hash: None,
+        tx_hash,
         error: error.to_string(),
         timestamp: crate::current_timestamp_secs(),
         // Unlike price_loop.rs, this loop never fetches a Soroban ledger
@@ -1061,6 +1068,7 @@ async fn record_error(
         ledger_seq: 0,
     });
 }
+
 
 async fn record_execution(
     state: &Arc<AppState>,
@@ -1171,6 +1179,8 @@ mod tests {
             ledger_seq: 12345,
             sources_used: vec!["test".to_string()],
             signature: "sig".to_string(),
+            price_bound_min: 0.0,
+            price_bound_max: 0.0,
         };
 
         let stale_price = CachedPrice {
@@ -1185,6 +1195,8 @@ mod tests {
             ledger_seq: 12344,
             sources_used: vec!["test".to_string()],
             signature: "sig".to_string(),
+            price_bound_min: 0.0,
+            price_bound_max: 0.0,
         };
 
         let mut prices = std::collections::BTreeMap::new();

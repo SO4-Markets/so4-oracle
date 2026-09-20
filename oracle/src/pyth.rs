@@ -74,6 +74,8 @@ impl crate::retry::Retryable for PythPriceError {
         match self {
             // Network errors and 5xx HTTP errors are transient
             Self::NetworkError(_) => true,
+            // 429 Too Many Requests is transient — the retry loop will back off
+            Self::HttpError { status: 429, .. } => true,
             Self::HttpError { status, .. } => *status >= 500,
             // Stale prices might become fresh on retry
             Self::StalePrice { .. } => true,
@@ -860,5 +862,47 @@ mod tests {
             "expected ConfidenceTooWide with max_bps=50, got {:?}",
             err
         );
+    }
+
+    // #955 — validate_pyth_price must return PriceParseError when conf is a
+    // malformed, non-numeric string.  Previously there was no test covering
+    // this branch of normalize_pyth_price(conf, expo) inside validate_pyth_price.
+    #[test]
+    fn validate_pyth_price_rejects_malformed_conf() {
+        let data = PythPriceData {
+            price: "4500000000".to_string(),
+            conf: Some("not-a-number".to_string()),
+            expo: -8,
+            publish_time: Some(1_000),
+        };
+        // now=1_010, age=10 < stale_after=60 — freshness OK, but conf parse fails
+        let err = validate_pyth_price(&data, 1_010, 60, 100).unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::PriceParseError(_)),
+            "expected PriceParseError for malformed conf, got: {err:?}"
+        );
+    }
+
+    // #954 — HTTP 429 must be classified as retryable so the retry loop backs
+    // off instead of treating rate-limit responses as permanent failures.
+    #[test]
+    fn http_429_is_retryable() {
+        use crate::retry::Retryable;
+        let err = PythPriceError::HttpError {
+            status: 429,
+            body: "rate limited".to_string(),
+        };
+        assert!(err.is_retryable(), "HTTP 429 must be retryable");
+    }
+
+    // Complement: non-429, non-5xx HTTP errors must NOT be retryable
+    #[test]
+    fn http_404_is_not_retryable() {
+        use crate::retry::Retryable;
+        let err = PythPriceError::HttpError {
+            status: 404,
+            body: "not found".to_string(),
+        };
+        assert!(!err.is_retryable(), "HTTP 404 must not be retryable");
     }
 }

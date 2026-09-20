@@ -10,7 +10,7 @@ use serde::Deserialize;
 /// A single token entry used by both the oracle cron pipeline and the API
 /// server.  Fields cover both use-cases:
 ///   - `symbol`, `stellar_address`, `sources` — oracle feed config
-///   - `min`, `max`, `sources_used` — API price-lookup metadata
+///   - `min`, `max` — operator-configured price bounds for display in the API
 // #504 — deny_unknown_fields ensures a typo'd key (e.g. "max_deviaton_bps") is
 // rejected at parse time instead of being silently ignored and falling back to
 // the Default value, which would let the oracle run with wrong risk thresholds.
@@ -41,12 +41,17 @@ pub struct TokenConfig {
     pub stale_after_seconds: u64,
     /// Minimum movement before on-chain submission, in basis points.
     pub submit_threshold_bps: u32,
-    /// Minimum price bound (used by the API server for display).
+    /// Operator-configured minimum price bound for display by the API server
+    /// (included as `price_bound_min` in `GET /prices` responses). (#949)
     pub min: f64,
-    /// Maximum price bound (used by the API server for display).
+    /// Operator-configured maximum price bound for display by the API server
+    /// (included as `price_bound_max` in `GET /prices` responses). (#949)
     pub max: f64,
-    /// Sources that contributed to the latest price (populated at runtime).
-    pub sources_used: Vec<String>,
+    // NOTE: `sources_used` was removed — it was documented as 'populated at
+    // runtime' but `Config` is wrapped in `Arc` and shared immutably across the
+    // entire process after startup, so no code path could ever assign to it.
+    // The set of sources that contributed to the latest price is carried by
+    // `CachedPrice::sources_used` instead. (#963)
 }
 
 impl Default for TokenConfig {
@@ -66,7 +71,6 @@ impl Default for TokenConfig {
             submit_threshold_bps: 10,
             min: 0.0,
             max: 0.0,
-            sources_used: vec![],
         }
     }
 }

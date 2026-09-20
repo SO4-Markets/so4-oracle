@@ -45,6 +45,8 @@ impl crate::retry::Retryable for CoinbasePriceError {
         match self {
             // Network errors and 5xx HTTP errors are transient
             Self::NetworkError(_) => true,
+            // 429 Too Many Requests is transient — the retry loop will back off
+            Self::HttpError { status: 429, .. } => true,
             Self::HttpError { status, .. } => *status >= 500,
             // Parse/JSON/config errors are permanent failures
             Self::JsonError(_) | Self::PriceParseError(_) | Self::MissingUsdRate => false,

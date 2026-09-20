@@ -236,6 +236,8 @@ async fn multi_source_single_source_token_still_works_with_min_sources_1() {
         min: 0.0,
         max: 0.0,
         sources_used: vec![],
+        price_bound_min: 0.0,
+        price_bound_max: 0.0,
     };
 
     let multi = three_source_token();

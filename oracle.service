@@ -11,8 +11,12 @@ WorkingDirectory=/opt/oracle
 ExecStart=/opt/oracle/oracle
 Restart=always
 RestartSec=5
-StartLimitInterval=60
-StartLimitBurst=3
+# Disable the systemd restart-attempt cap so a crash-looping oracle is always
+# restarted and never left permanently down in a 'failed' state requiring a
+# manual `systemctl reset-failed`.  This mirrors the railway.json fix from
+# #544.  Without StartLimitIntervalSec=0 systemd stops retrying after
+# StartLimitBurst restarts within StartLimitIntervalSec seconds.
+StartLimitIntervalSec=0
 
 # Environment
 EnvironmentFile=/opt/oracle/.env

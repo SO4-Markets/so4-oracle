@@ -348,6 +348,8 @@ async fn last_updated_not_set_when_token_has_no_sources() {
         min: 0.0,
         max: 0.0,
         sources_used: vec![],
+        price_bound_min: 0.0,
+        price_bound_max: 0.0,
     };
     let state = test_state(&mock.uri(), vec![no_source_token]);
 
