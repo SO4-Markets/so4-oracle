@@ -1,0 +1,41 @@
+name: Set Repository Metadata
+
+# This workflow ensures that the repository always has a helpful description,
+# homepage URL, and a set of relevant topics for discoverability.
+# It runs on every push to the default branch and can also be triggered manually.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  set-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update repository description and homepage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          curl -sSL -X PATCH \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO" \
+            -d '{
+                  "description": "Production Axum service for the SO4.market Soroban oracle and keeper.",
+                  "homepage": "https://so4.market"
+                }'
+
+      - name: Update repository topics
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          curl -sSL -X PUT \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/topics" \
+            -d '{
+                  "names": ["stellar", "soroban", "oracle", "defi", "rust"]
+                }'
