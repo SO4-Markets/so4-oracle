@@ -138,6 +138,9 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
     }
 
     let mut symbols_seen = std::collections::HashSet::new();
+    let mut binance_symbols_seen = std::collections::HashSet::new();
+    let mut coinbase_symbols_seen = std::collections::HashSet::new();
+    let mut pyth_feed_ids_seen = std::collections::HashSet::new();
     for token in &tokens {
         if token.symbol.is_empty() {
             return Err(ConfigError::InvalidToken {
@@ -151,6 +154,33 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
                 symbol: token.symbol.clone(),
                 reason: "duplicate symbol (case-insensitive)".to_string(),
             });
+        }
+
+        // Reject cross-token duplicate source identifiers so two different
+        // tokens cannot inadvertently read the exact same feed (#995).
+        if let Some(ref sym) = token.binance_symbol {
+            if !sym.is_empty() && !binance_symbols_seen.insert(sym.to_lowercase()) {
+                return Err(ConfigError::InvalidToken {
+                    symbol: token.symbol.clone(),
+                    reason: format!("duplicate binance_symbol '{sym}' across tokens"),
+                });
+            }
+        }
+        if let Some(ref sym) = token.coinbase_symbol {
+            if !sym.is_empty() && !coinbase_symbols_seen.insert(sym.to_lowercase()) {
+                return Err(ConfigError::InvalidToken {
+                    symbol: token.symbol.clone(),
+                    reason: format!("duplicate coinbase_symbol '{sym}' across tokens"),
+                });
+            }
+        }
+        if let Some(ref id) = token.pyth_feed_id {
+            if !id.is_empty() && !pyth_feed_ids_seen.insert(id.to_lowercase()) {
+                return Err(ConfigError::InvalidToken {
+                    symbol: token.symbol.clone(),
+                    reason: format!("duplicate pyth_feed_id '{id}' across tokens"),
+                });
+            }
         }
         // stellar_address and sources are optional for the API server path,
         // but required for the oracle path — the oracle validates separately.
@@ -375,5 +405,52 @@ mod tests {
         let json = r#"[{"symbol":"BTC","sources":["binance"],"min_sources":0}]"#;
         let err = parse_token_configs(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }), "{err:?}");
+    }
+
+    // #995 — reject duplicate binance_symbol across different tokens.
+    #[test]
+    fn reject_duplicate_binance_symbol_across_tokens() {
+        let json = r#"[
+            {"symbol":"BTC","sources":["binance"],"binance_symbol":"BTCUSDT"},
+            {"symbol":"WBTC","sources":["binance"],"binance_symbol":"btcusdt"}
+        ]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }), "{err:?}");
+        assert!(err.to_string().contains("duplicate binance_symbol 'btcusdt' across tokens"));
+    }
+
+    // #995 — reject duplicate coinbase_symbol across different tokens.
+    #[test]
+    fn reject_duplicate_coinbase_symbol_across_tokens() {
+        let json = r#"[
+            {"symbol":"BTC","sources":["coinbase"],"coinbase_symbol":"BTC"},
+            {"symbol":"WBTC","sources":["coinbase"],"coinbase_symbol":"btc"}
+        ]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }), "{err:?}");
+        assert!(err.to_string().contains("duplicate coinbase_symbol 'btc' across tokens"));
+    }
+
+    // #995 — reject duplicate pyth_feed_id across different tokens.
+    #[test]
+    fn reject_duplicate_pyth_feed_id_across_tokens() {
+        let json = r#"[
+            {"symbol":"BTC","sources":["pyth"],"pyth_feed_id":"e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"},
+            {"symbol":"WBTC","sources":["pyth"],"pyth_feed_id":"E62DF6C8B4A85FE1A67DB44DC12DE5DB330F7AC66B72DC658AFEDF0F4A415B43"}
+        ]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }), "{err:?}");
+        assert!(err.to_string().contains("duplicate pyth_feed_id 'E62DF6C8B4A85FE1A67DB44DC12DE5DB330F7AC66B72DC658AFEDF0F4A415B43' across tokens"));
+    }
+
+    // #995 — accept distinct source identifiers across tokens.
+    #[test]
+    fn accept_distinct_source_identifiers_across_tokens() {
+        let json = r#"[
+            {"symbol":"BTC","sources":["binance","coinbase","pyth"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC","pyth_feed_id":"feed_btc"},
+            {"symbol":"ETH","sources":["binance","coinbase","pyth"],"binance_symbol":"ETHUSDT","coinbase_symbol":"ETH","pyth_feed_id":"feed_eth"}
+        ]"#;
+        let tokens = parse_token_configs(json).unwrap();
+        assert_eq!(tokens.len(), 2);
     }
 }
