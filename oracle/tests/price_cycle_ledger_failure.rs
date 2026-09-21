@@ -424,28 +424,53 @@ async fn last_price_cycle_at_bounded_within_test_window() {
     );
 }
 
+// #1018 — Use mount_as_scoped on a single MockServer so the state genuinely
+// transitions from a ledger failure to a ledger success on the same AppState instance.
 #[tokio::test]
 async fn mixed_failure_then_success_total_cycle_count_is_two() {
-    let mock_fail = MockServer::start().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
-        .mount(&mock_fail)
-        .await;
+    let mock = MockServer::start().await;
+    let state = test_state(&mock.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
 
-    let state = test_state(&mock_fail.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
-    run_price_cycle(Arc::clone(&state)).await;
+    // Cycle 1: ledger fails — finish_cycle still runs, metrics increment, price cache empty
+    {
+        let _guard = Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
+            .mount_as_scoped(&mock)
+            .await;
+        run_price_cycle(Arc::clone(&state)).await;
+    }
+    assert_eq!(
+        state.metrics.to_response().price_cycle_count,
+        1,
+        "first (failing) cycle must increment price_cycle_count"
+    );
+    {
+        let cache = state.price_cache.read().await;
+        assert!(
+            cache.prices.is_empty(),
+            "price cache must remain empty after failed ledger cycle"
+        );
+    }
 
-    // Reuse the same state with a different mock — only possible by creating fresh state.
-    let mock_ok = MockServer::start().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
-        .mount(&mock_ok)
-        .await;
+    // Cycle 2: ledger succeeds on the same state instance
+    {
+        let _guard = Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
+            .mount_as_scoped(&mock)
+            .await;
+        run_price_cycle(Arc::clone(&state)).await;
+    }
 
-    run_price_cycle(Arc::clone(&state)).await;
-
-    // state.config.stellar_rpc_url still points to the fail mock, but finish_cycle
-    // always runs — so the counter reflects 2 full cycle invocations.
     let metrics = state.metrics.to_response();
-    assert_eq!(metrics.price_cycle_count, 2);
+    assert_eq!(
+        metrics.price_cycle_count, 2,
+        "price_cycle_count must accumulate to 2 after genuine fail-then-succeed sequence"
+    );
+
+    // Verify cache was populated on the successful second cycle
+    let cache = state.price_cache.read().await;
+    assert!(
+        cache.prices.contains_key("USDC"),
+        "successful second cycle should populate price cache for USDC"
+    );
 }
