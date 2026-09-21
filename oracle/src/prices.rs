@@ -49,13 +49,16 @@ pub fn aggregate_prices(
     let filtered_sources = filter_result.filtered_sources;
 
     if filtered_prices.len() < min_sources {
+        let reference_median = compute_median_allow_single(&filtered_prices)
+            .or_else(|| compute_median_allow_single(prices))
+            .unwrap_or(0);
         let rejected_sources: Vec<RejectedSource> = filter_result
             .rejected
             .into_iter()
-            .map(|(source, price, deviation)| RejectedSource {
+            .map(|(source, price, _)| RejectedSource {
                 source,
                 price,
-                deviation_bps: deviation,
+                deviation_bps: deviation_bps(price, reference_median),
             })
             .collect();
 
@@ -75,10 +78,10 @@ pub fn aggregate_prices(
     let rejected_sources = filter_result
         .rejected
         .into_iter()
-        .map(|(source, price, deviation)| RejectedSource {
+        .map(|(source, price, _)| RejectedSource {
             source,
             price,
-            deviation_bps: deviation,
+            deviation_bps: deviation_bps(price, median),
         })
         .collect();
 
@@ -368,6 +371,33 @@ mod tests {
         let result = aggregate_prices(&[100, 101, 160], &sources, 2, 200).unwrap();
         assert_eq!(result.sources_used, vec!["binance", "coinbase"]);
         assert_eq!(result.rejected_sources.len(), 1);
+        assert_eq!(result.rejected_sources[0].source, "pyth");
+        assert_eq!(result.rejected_sources[0].price, 160);
+        assert!((result.rejected_sources[0].deviation_bps - 6000.0).abs() < f64::EPSILON);
+    }
+
+    // #1039 -- RejectedSource.deviation_bps is computed in basis points relative to median
+    #[test]
+    fn aggregate_prices_populates_rejected_source_deviation_bps_correctly() {
+        let sources = vec![
+            "binance".to_string(),
+            "coinbase".to_string(),
+            "pyth".to_string(),
+        ];
+        // Outlier 160 vs filtered median 100 has relative deviation:
+        // |160 - 100| / 100 * 10,000 = 6000.0 bps
+        let result = aggregate_prices(&[100, 101, 160], &sources, 2, 200).unwrap();
+        assert_eq!(result.rejected_sources.len(), 1);
+        let rejected = &result.rejected_sources[0];
+        assert_eq!(rejected.source, "pyth");
+        assert_eq!(rejected.price, 160);
+        // Previously populated with raw difference (59.0), now correctly 6000.0 bps
+        assert!((rejected.deviation_bps - 6000.0).abs() < 1e-6);
+
+        // Also verify the error branch when filtered_prices.len() < min_sources
+        let err = aggregate_prices(&[100, 101, 1000], &sources, 3, 200).unwrap_err();
+        assert!(err.contains("insufficient sources after filtering"));
+        assert!(err.contains("deviation_bps:"));
     }
 
     #[test]
