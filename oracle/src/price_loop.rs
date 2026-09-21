@@ -26,8 +26,11 @@ pub enum PriceSourceError {
 }
 
 impl CachedPrice {
+    /// Check whether a cached price entry has exceeded its validity window
+    /// or exhibits backward clock drift (`now < self.timestamp`).
+    #[inline]
     pub fn is_stale(&self, stale_after_seconds: u64, now: u64) -> bool {
-        now.saturating_sub(self.timestamp) >= stale_after_seconds
+        now < self.timestamp || now.saturating_sub(self.timestamp) >= stale_after_seconds
     }
 }
 
@@ -731,13 +734,44 @@ mod tests {
 
         // Edge cases
         assert!(!price.is_stale(60, 1000));
-        assert!(!price.is_stale(60, 0));
+        assert!(price.is_stale(60, 0));
         assert!(price.is_stale(0, 1001));
         assert!(price.is_stale(0, 1000));
     }
 
     #[test]
-    fn test_cached_price_is_stale_saturating_sub() {
+    fn test_cached_price_is_stale_clock_drift() {
+        let price = CachedPrice {
+            token_address: "test".to_string(),
+            symbol: "TEST".to_string(),
+            display_symbol: "TEST".to_string(),
+            keeper_index: 0,
+            min: 100,
+            max: 100,
+            median: 100,
+            timestamp: 1000,
+            ledger_seq: 12345,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+
+        // When wall clock is behind cached price timestamp (negative age / clock skew),
+        // it must be treated as stale rather than zero-age fresh (fixes #1041).
+        assert!(price.is_stale(60, 999));
+        assert!(price.is_stale(60, 500));
+        assert!(price.is_stale(60, 0));
+
+        // Normal fresh boundary
+        assert!(!price.is_stale(60, 1000));
+        assert!(!price.is_stale(60, 1059));
+
+        // Normal stale boundary
+        assert!(price.is_stale(60, 1060));
+        assert!(price.is_stale(60, 1061));
+    }
+
+    #[test]
+    fn test_cached_price_is_stale_saturating_sub_overflow_guard() {
         let price = CachedPrice {
             token_address: "test".to_string(),
             symbol: "TEST".to_string(),
@@ -752,8 +786,8 @@ mod tests {
             signature: "sig".to_string(),
         };
 
-        // Should not overflow due to saturating_sub
-        assert!(!price.is_stale(60, 1000));
+        // Timestamp far in future (u64::MAX) relative to now (1000) is clock drift, treated as stale
+        assert!(price.is_stale(60, 1000));
     }
 
     #[test]
