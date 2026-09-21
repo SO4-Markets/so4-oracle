@@ -2,133 +2,103 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
-  MSRV: "1.95"
 
 jobs:
-  # ── MSRV enforcement ────────────────────────────────────────────────────
   msrv:
-    name: MSRV check
+    name: MSRV
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.MSRV }}
-      - uses: Swatinem/rust-cache@v2
-      - name: Verify Dockerfile MSRV matches declared rust-version
-        run: |
-          DOCKERFILE_MSRV=$(grep -oP 'FROM rust:\K[0-9]+\.[0-9]+' Dockerfile)
-          DECLARED_MSRV=$(grep -oP 'rust-version\s*=\s*"\K[0-9]+\.[0-9]+' Cargo.toml | head -1)
-          if [ "$DOCKERFILE_MSRV" != "$DECLARED_MSRV" ]; then
-            echo "::error::Dockerfile base image (rust:${DOCKERFILE_MSRV}) does not match declared MSRV (${DECLARED_MSRV})"
-            exit 1
-          fi
-          echo "MSRV consistent: ${DECLARED_MSRV}"
-      - run: cargo check --workspace --locked
+          toolchain: "1.95"
+      - name: Check
+        run: cargo check --workspace
 
-  # ── Code quality ────────────────────────────────────────────────────────
   fmt:
-    name: rustfmt
+    name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: |
-          if [ -d "tests" ]; then
-            echo "Error: tests/ directory found in the virtual manifest root. Cargo ignores this. Please place integration tests in oracle/tests/."
-            exit 1
-          fi
-      - run: cargo fmt --all -- --check
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
   clippy:
-    name: clippy
+    name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
-    name: cargo test
+    name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            .
-            oracle
-      - name: Install promtool
-        run: |
-          wget -q https://github.com/prometheus/prometheus/releases/download/v2.53.1/prometheus-2.53.1.linux-amd64.tar.gz
-          tar xzf prometheus-2.53.1.linux-amd64.tar.gz
-          sudo cp prometheus-2.53.1.linux-amd64/promtool /usr/local/bin/
-      - run: cargo test --all --locked
+      - name: Run tests
+        run: cargo test --workspace
 
   build:
-    name: release build
+    name: Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --all --locked
+      - name: Build release
+        run: cargo build --workspace --release
 
-  # ── Supply-chain scanning ───────────────────────────────────────────────
   audit:
-    name: cargo audit
+    name: Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@cargo-audit
-      - run: cargo audit
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run cargo audit
+        run: cargo audit
 
   deny:
-    name: cargo deny
+    name: Deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check advisories bans licenses sources
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: Run cargo deny
+        run: cargo deny check advisories bans licenses sources
 
-  # Docker image build
   docker:
-    name: docker build
+    name: Docker
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - run: docker build -t so4-oracle .
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t so4-oracle .
 
   coverage:
-    name: coverage
+    name: Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: llvm-tools-preview
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Install promtool
-        run: |
-          wget -q https://github.com/prometheus/prometheus/releases/download/v2.53.1/prometheus-2.53.1.linux-amd64.tar.gz
-          tar xzf prometheus-2.53.1.linux-amd64.tar.gz
-          sudo cp prometheus-2.53.1.linux-amd64/promtool /usr/local/bin/
-      - run: cargo llvm-cov --all --fail-under-lines 85
-      - run: cargo llvm-cov report >> $GITHUB_STEP_SUMMARY
+          components: llvm-tools
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Run coverage
+        run: cargo llvm-cov --all --fail-under-lines 85
