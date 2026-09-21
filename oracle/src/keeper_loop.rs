@@ -21,6 +21,22 @@ const SIMULATE_RETRY_ATTEMPTS: u32 = 3;
 const SIMULATE_RETRY_BASE_DELAY_MS: u64 = 100;
 /// Hard cap on a single keeper cycle — closes #490.
 const KEEPER_CYCLE_TIMEOUT_SECS: u64 = 50;
+/// Maximum character length of raw RPC error JSON embedded into log fields / error messages (#578, #1005).
+const MAX_RPC_ERROR_PREVIEW_LEN: usize = 256;
+
+/// Truncate a raw RPC error JSON payload for structured error formatting and logging (#578, #1005).
+///
+/// Returns a string preview capped at `MAX_RPC_ERROR_PREVIEW_LEN` characters with a `…` suffix
+/// when truncated, preventing unbounded payloads from inflating log shipping pipelines.
+fn truncate_rpc_error(error: &serde_json::Value) -> String {
+    let s = error.to_string();
+    if s.chars().count() > MAX_RPC_ERROR_PREVIEW_LEN {
+        let preview: String = s.chars().take(MAX_RPC_ERROR_PREVIEW_LEN).collect();
+        format!("{preview}…")
+    } else {
+        s
+    }
+}
 
 #[derive(Debug)]
 enum SequenceFetchError {
@@ -900,8 +916,9 @@ async fn get_account_sequence_once(state: &Arc<AppState>) -> Result<u64, Sequenc
     })?;
 
     if let Some(error) = response_json.get("error") {
+        let error_preview = truncate_rpc_error(error);
         return Err(SequenceFetchError::Network(format!(
-            "getAccount error: {error}"
+            "getAccount error: {error_preview}"
         )));
     }
 
@@ -982,7 +999,8 @@ async fn simulate_contract_call_once(
         serde_json::from_str(&body).map_err(|e| format!("Failed to parse RPC response: {e}"))?;
 
     if let Some(error) = response_json.get("error") {
-        return Err(format!("Simulation error: {error}"));
+        let error_preview = truncate_rpc_error(error);
+        return Err(format!("Simulation error: {error_preview}"));
     }
 
     let result = response_json
@@ -1205,5 +1223,34 @@ mod tests {
             .collect();
         assert_eq!(stale_filtered.len(), 1);
         assert_eq!(stale_filtered[0].1.symbol, "STALE");
+    }
+
+    /// Verifies that truncate_rpc_error preserves small RPC error JSON untouched.
+    /// Closes #1005.
+    #[test]
+    fn test_truncate_rpc_error_preserves_short_error() {
+        let err = serde_json::json!({
+            "code": -32600,
+            "message": "invalid request"
+        });
+        let preview = truncate_rpc_error(&err);
+        assert_eq!(preview, err.to_string());
+        assert!(!preview.ends_with('…'));
+    }
+
+    /// Verifies that truncate_rpc_error caps oversized RPC error JSON to
+    /// MAX_RPC_ERROR_PREVIEW_LEN characters plus the ellipsis suffix.
+    /// Closes #1005.
+    #[test]
+    fn test_truncate_rpc_error_caps_large_error_payload() {
+        let large_msg = "x".repeat(1000);
+        let err = serde_json::json!({
+            "code": -32000,
+            "message": large_msg
+        });
+        let preview = truncate_rpc_error(&err);
+        assert!(preview.ends_with('…'));
+        let chars_without_suffix: usize = preview.chars().count() - 1;
+        assert_eq!(chars_without_suffix, MAX_RPC_ERROR_PREVIEW_LEN);
     }
 }
