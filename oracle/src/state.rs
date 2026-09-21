@@ -160,6 +160,9 @@ pub struct AppState {
     pub keeper_status: Arc<RwLock<KeeperStatus>>,
     pub in_flight_keys: Arc<Mutex<HashMap<String, Instant>>>,
     pub ready_cache: Arc<RwLock<ReadyCache>>,
+    /// Serializes external readiness checks (RPC + Horizon balance) to eliminate
+    /// the check-then-populate race on `ready_cache` under concurrent load (#1021).
+    pub ready_check_lock: Arc<Mutex<()>>,
     pub metrics: Arc<Metrics>,
     pub shutdown_token: CancellationToken,
     /// Per-order-key count of consecutive `freeze_order` failures.
@@ -196,6 +199,7 @@ impl AppState {
             keeper_status: Arc::new(RwLock::new(KeeperStatus::default())),
             in_flight_keys: Arc::new(Mutex::new(HashMap::new())),
             ready_cache: Arc::new(RwLock::new(ReadyCache::default())),
+            ready_check_lock: Arc::new(Mutex::new(())),
             metrics: Metrics::new(),
             shutdown_token: CancellationToken::new(),
             freeze_failure_counts: Arc::new(Mutex::new(HashMap::new())),

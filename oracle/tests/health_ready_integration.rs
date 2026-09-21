@@ -666,3 +666,84 @@ async fn get_ready_returns_503_when_keeper_balance_check_fails() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "keeper_balance_check_failed");
 }
+
+// #1021 — concurrent /ready requests during a cache miss must be coalesced into a single
+// external check instead of racing independently and amplifying outbound RPC/Horizon traffic
+#[tokio::test]
+async fn concurrent_get_ready_coalesces_into_single_external_check() {
+    let rpc_mock = MockServer::start().await;
+    let horizon_mock = MockServer::start().await;
+
+    let rpc_hits = Arc::new(AtomicUsize::new(0));
+    let rpc_hits_for_mock = Arc::clone(&rpc_hits);
+
+    wiremock::Mock::given(method("GET"))
+        .respond_with(move |_req: &WireMockRequest| {
+            rpc_hits_for_mock.fetch_add(1, Ordering::SeqCst);
+            // Delay slightly to ensure concurrent requests overlap during the in-flight check
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            ResponseTemplate::new(200).set_body_string("ok")
+        })
+        .mount(&rpc_mock)
+        .await;
+
+    let horizon_hits = Arc::new(AtomicUsize::new(0));
+    let horizon_hits_for_mock = Arc::clone(&horizon_hits);
+
+    wiremock::Mock::given(method("GET"))
+        .respond_with(move |_req: &WireMockRequest| {
+            horizon_hits_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                "balances": [{"asset_type": "native", "balance": "100.0000000"}]
+            }))
+        })
+        .mount(&horizon_mock)
+        .await;
+
+    let config = test_config(&rpc_mock.uri(), &horizon_mock.uri());
+    let state = Arc::new(AppState::new(config));
+
+    // Populate price cache
+    {
+        let mut cache = state.price_cache.write().await;
+        cache
+            .prices
+            .insert("BTC".to_string(), sample_cached_price());
+    }
+
+    // Set price cycle and keeper cycle as recent
+    {
+        let mut cycle = state.cycle_status.write().await;
+        cycle.last_price_cycle_at = Some(SystemTime::now());
+        cycle.last_keeper_cycle_at = Some(SystemTime::now());
+    }
+
+    let app = build_router(state);
+
+    // Dispatch 5 concurrent GET /ready requests simultaneously
+    let mut handles = vec![];
+    for _ in 0..5 {
+        let app_clone = app.clone();
+        handles.push(tokio::spawn(async move {
+            app_clone
+                .oneshot(
+                    Request::builder()
+                        .uri("/ready")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }));
+    }
+
+    for h in handles {
+        let resp = h.await.unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // External checks must be coalesced: exactly 1 call each despite 5 concurrent requests
+    assert_eq!(rpc_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(horizon_hits.load(Ordering::SeqCst), 1);
+}

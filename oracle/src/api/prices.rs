@@ -160,6 +160,39 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
         }
     }
 
+    // Slow path: serialize in-flight external checks to coalesce concurrent misses (#1021)
+    let _check_guard = state.ready_check_lock.lock().await;
+
+    // Double-check: another concurrent request may have completed the check and populated cache
+    {
+        let cache = state.ready_cache.read().await;
+        if let Some(last) = cache.last_checked {
+            if last.elapsed() < std::time::Duration::from_secs(3) {
+                if let Some((status, msg)) = cache.last_error.clone() {
+                    return Err(ApiError::new(status, msg));
+                }
+                let cycle = state.cycle_status.read().await;
+                let last_price_cycle_secs_ago = cycle
+                    .last_price_cycle_at
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|d| d.as_secs());
+                let last_keeper_cycle_secs_ago = cycle
+                    .last_keeper_cycle_at
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|d| d.as_secs());
+                return Ok(Json(HealthResponse {
+                    status: "ok",
+                    last_price_cycle_secs_ago,
+                    last_keeper_cycle_secs_ago,
+                    price_cycle_count: metrics.price_cycle_count,
+                    keeper_cycle_count: metrics.keeper_cycle_count,
+                    token_fetch_failures: metrics.token_fetch_failures,
+                    submit_failures: metrics.submit_failures,
+                }));
+            }
+        }
+    }
+
     let check_res = perform_external_ready_checks(&state).await;
     {
         let mut cache = state.ready_cache.write().await;
