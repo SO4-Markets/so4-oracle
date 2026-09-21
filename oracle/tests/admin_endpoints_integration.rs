@@ -522,3 +522,203 @@ async fn keeper_balance_reports_unfunded_when_below_minimum() {
     assert_eq!(json["balance_xlm"], 3.0);
     assert_eq!(json["is_funded"], false);
 }
+
+// ── #1030 — GET /oracle/status limit support and default cap on recent_errors ─
+
+#[tokio::test]
+async fn oracle_status_returns_401_without_token() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/oracle/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn oracle_status_default_caps_recent_errors() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    {
+        let mut failures = state.failures.lock().await;
+        for i in 0..25 {
+            failures.push(FailedSubmission {
+                at: SystemTime::now(),
+                operation: format!("op_{i}"),
+                network: "testnet".to_string(),
+                token: String::new(),
+                symbol: String::new(),
+                min: 0,
+                max: 0,
+                tx_hash: None,
+                error: "err".to_string(),
+                timestamp: 0,
+                ledger_seq: 0,
+            });
+        }
+    }
+
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/oracle/status")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let errors = json["recent_errors"].as_array().unwrap();
+    assert_eq!(errors.len(), oracle::api::admin::DEFAULT_ORACLE_STATUS_ERRORS_LIMIT);
+    assert_eq!(errors.len(), 20);
+    // Most recent first
+    assert_eq!(errors[0]["operation"], "op_24");
+}
+
+#[tokio::test]
+async fn oracle_status_respects_custom_limit() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    {
+        let mut failures = state.failures.lock().await;
+        for i in 0..10 {
+            failures.push(FailedSubmission {
+                at: SystemTime::now(),
+                operation: format!("op_{i}"),
+                network: "testnet".to_string(),
+                token: String::new(),
+                symbol: String::new(),
+                min: 0,
+                max: 0,
+                tx_hash: None,
+                error: "err".to_string(),
+                timestamp: 0,
+                ledger_seq: 0,
+            });
+        }
+    }
+
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/oracle/status?limit=3")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let errors = json["recent_errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 3);
+    assert_eq!(errors[0]["operation"], "op_9");
+}
+
+#[tokio::test]
+async fn oracle_status_limit_zero_returns_empty_errors() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    {
+        let mut failures = state.failures.lock().await;
+        for i in 0..5 {
+            failures.push(FailedSubmission {
+                at: SystemTime::now(),
+                operation: format!("op_{i}"),
+                network: "testnet".to_string(),
+                token: String::new(),
+                symbol: String::new(),
+                min: 0,
+                max: 0,
+                tx_hash: None,
+                error: "err".to_string(),
+                timestamp: 0,
+                ledger_seq: 0,
+            });
+        }
+    }
+
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/oracle/status?limit=0")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let errors = json["recent_errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 0);
+}
+
+#[tokio::test]
+async fn oracle_status_rejects_non_numeric_limit_as_json() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/oracle/status?limit=invalid")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["error"].is_string());
+}
+

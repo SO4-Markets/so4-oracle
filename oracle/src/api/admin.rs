@@ -1,16 +1,42 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Path, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::header::CONTENT_TYPE;
+use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use super::{AdminAuth, ApiError};
-use crate::state::{AppState, CachedPrice, FailedSubmission};
+use crate::state::{AppState, CachedPrice, FailedSubmission, FAILURE_RING_CAPACITY};
+
+pub const DEFAULT_ORACLE_STATUS_ERRORS_LIMIT: usize = 20;
+
+#[derive(Debug, Deserialize, Default)]
+pub struct OracleStatusQuery {
+    pub limit: Option<usize>,
+}
+
+// #602/#1030 — axum's built-in `Query` rejection renders as a bare text/plain body,
+// which breaks the `{"error": "..."}` envelope every other endpoint returns.
+// Extracting through this impl maps the rejection onto `ApiError` so a malformed
+// `?limit=` value stays parseable for clients that unconditionally read JSON.
+impl FromRequestParts<Arc<AppState>> for OracleStatusQuery {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        Query::<Self>::from_request_parts(parts, state)
+            .await
+            .map(|Query(query)| query)
+            .map_err(|rejection| ApiError::new(rejection.status(), rejection.body_text()))
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct OracleStatusResponse {
@@ -44,6 +70,7 @@ pub struct KeeperStatusResponse {
 
 pub async fn oracle_status(
     _auth: AdminAuth,
+    query: OracleStatusQuery,
     State(state): State<Arc<AppState>>,
 ) -> Json<OracleStatusResponse> {
     let last_cycle_time = state
@@ -60,7 +87,19 @@ pub async fn oracle_status(
         .values()
         .cloned()
         .collect();
-    let recent_errors = state.failures.lock().await.iter().rev().cloned().collect();
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_ORACLE_STATUS_ERRORS_LIMIT)
+        .min(FAILURE_RING_CAPACITY);
+    let recent_errors = state
+        .failures
+        .lock()
+        .await
+        .iter()
+        .rev()
+        .take(limit)
+        .cloned()
+        .collect();
 
     Json(OracleStatusResponse {
         last_cycle_time,
