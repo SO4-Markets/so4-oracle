@@ -29,23 +29,63 @@ cargo test --workspace
 
 **Environment variables**
 
-Key variables (see `oracle/src/config.rs` for the full list):
+Complete environment variables read by `Config::from_lookup` (see `oracle/src/config.rs` and `oracle/README.md`):
+
+#### Required Contract IDs
+All 7 Soroban contract IDs are strictly required for the service to start:
 
 | Variable | Description |
 |---|---|
-| `PRICE_FEED_CONFIG` | JSON array of `TokenConfig` entries (see `config/tokens.json` for the schema) |
-| `STELLAR_RPC_URL` | Soroban RPC endpoint |
-| `HORIZON_URL` | Stellar Horizon endpoint |
-| `STELLAR_NETWORK` | `testnet` or `mainnet` — the network passphrase is derived from this automatically, it is not itself a configurable variable |
-| `KEEPER_SECRET_KEY` | Stellar secret key for the keeper account |
-| `ORACLE_CONTRACT_ID` | Deployed oracle contract address |
-| `ADMIN_API_TOKEN` | Bearer token for admin routes (`/oracle/status`, `/metrics`, etc.) |
+| `ORACLE_CONTRACT_ID` | Deployed oracle contract address (or `ORACLE` alias on testnet) |
+| `ROLE_STORE` | Deployed role store contract address |
+| `DATA_STORE` | Deployed data store contract address |
+| `ORDER_HANDLER` | Deployed order handler contract address |
+| `DEPOSIT_HANDLER` | Deployed deposit handler contract address |
+| `WITHDRAWAL_HANDLER` | Deployed withdrawal handler contract address |
+| `READER` | Deployed reader contract address |
+
+#### Required Keeper Credentials
+Both signing credentials and the public account ID are required:
+
+| Variable | Format / Description |
+|---|---|
+| `KEEPER_PRIVATE_KEY` | 64-character hex-encoded Ed25519 signing key (32 bytes) for transaction signatures |
+| `KEEPER_SECRET_KEY` | Stellar `S...`-prefixed secret key Strkey for the keeper account |
+| `KEEPER_ACCOUNT_ID` | Stellar `G...`-prefixed public account Strkey for the keeper account |
+
+#### Network & Endpoints
+
+| Variable | Default | Description |
+|---|---|---|
+| `STELLAR_NETWORK` | `testnet` | Target network: `testnet` or `mainnet` (network passphrase is automatically derived) |
+| `STELLAR_RPC_URL` | Testnet public RPC | Soroban RPC endpoint (optional on testnet; required on mainnet) |
+| `HORIZON_URL` | Public Horizon | Stellar Horizon endpoint for keeper balance queries |
+| `BIND_ADDR` | `0.0.0.0:8080` | Local HTTP API bind address and listening port |
+| `PRICE_FEED_CONFIG` | Embedded `config/tokens.json` | JSON array of `TokenConfig` entries (see `config/tokens.json` for schema) |
+
+#### Worker Loop Tuning & Defaults
+
+| Variable | Default | Description |
+|---|---|---|
+| `PRICE_LOOP_MS` | `1000` | Price fetch and submission cycle interval in milliseconds |
+| `KEEPER_LOOP_MS` | `1500` | Keeper execution loop cycle interval in milliseconds |
+| `MIN_KEEPER_BALANCE_XLM` | `10` | Minimum keeper account balance in XLM before triggering alerts and 503 readiness degradation |
+| `SET_PRICES_TX_FEE` | `100` | Transaction fee in stroops for `set_prices` contract calls |
+| `KEEPER_TX_FEE` | `100` | Transaction fee in stroops for keeper contract calls |
+| `KEEPER_INDEX` | `0` | Instance index offset for this keeper process |
+
+#### Optional Authentication & API Keys
+
+| Variable | Default | Description |
+|---|---|---|
+| `ADMIN_API_TOKEN` | None | Bearer token for admin routes (`/oracle/status`, `/keeper/*`, etc.). When unset, admin endpoints return 503. |
+| `PYTH_API_KEY` | None | Optional API key for authenticating with Pyth price feed services |
 
 **Run locally**
 
 ```bash
 cargo run -p oracle
-# → listening on 0.0.0.0:3000 (or whatever BIND_ADDR is set to)
+# → listening on 0.0.0.0:8080 (or whatever BIND_ADDR is set to)
 ```
 
 Watch mode (rebuilds on save):
