@@ -174,7 +174,7 @@ pub async fn keeper_balance(
         min_balance_xlm: state.config.min_keeper_balance_xlm,
     };
 
-    match crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min).await {
+    match crate::keeper::check_keeper_balance_with_retry(&keeper_cfg, &state.keeper_balance_below_min).await {
         Ok(stroops) => {
             let response = crate::keeper::build_balance_response(&keeper_cfg, stroops);
             Ok(Json(BalanceResponse {

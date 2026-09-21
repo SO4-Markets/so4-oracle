@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use super::{AdminAuth, ApiError};
 use crate::state::{AppState, CachedPrice, FailedSubmission};
 
-const READY_BALANCE_RETRY_ATTEMPTS: u32 = 3;
-const READY_BALANCE_RETRY_BASE_DELAY_MS: u64 = 100;
+pub const READY_BALANCE_RETRY_ATTEMPTS: u32 = crate::keeper::KEEPER_BALANCE_RETRY_ATTEMPTS;
+pub const READY_BALANCE_RETRY_BASE_DELAY_MS: u64 = crate::keeper::KEEPER_BALANCE_RETRY_BASE_DELAY_MS;
 
 #[derive(Debug, Deserialize)]
 pub struct FailedSubmissionsQuery {
@@ -221,7 +221,7 @@ async fn perform_external_ready_checks(state: &AppState) -> Result<(), ApiError>
         min_balance_xlm: state.config.min_keeper_balance_xlm,
     };
 
-    match check_keeper_balance_for_ready(&keeper_cfg, &state.keeper_balance_below_min).await {
+    match crate::keeper::check_keeper_balance_with_retry(&keeper_cfg, &state.keeper_balance_below_min).await {
         Ok(_) => {}
         Err(crate::stellar_rpc::RpcError::BalanceBelowMinimum { .. }) => {
             return Err(ApiError::new(
@@ -240,37 +240,12 @@ async fn perform_external_ready_checks(state: &AppState) -> Result<(), ApiError>
     Ok(())
 }
 
-async fn check_keeper_balance_for_ready(
+#[inline]
+pub(crate) async fn check_keeper_balance_for_ready(
     keeper_cfg: &crate::keeper::KeeperBalanceConfig,
     below_min: &Arc<AtomicBool>,
 ) -> Result<i64, crate::stellar_rpc::RpcError> {
-    let mut last_error = None;
-
-    for attempt in 1..=READY_BALANCE_RETRY_ATTEMPTS {
-        match crate::keeper::check_keeper_balance(keeper_cfg, below_min).await {
-            Ok(stroops) => return Ok(stroops),
-            Err(error @ crate::stellar_rpc::RpcError::BalanceBelowMinimum { .. }) => {
-                return Err(error);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    attempt,
-                    max_attempts = READY_BALANCE_RETRY_ATTEMPTS,
-                    error = %error,
-                    "ready keeper balance attempt failed"
-                );
-                last_error = Some(error);
-                if attempt < READY_BALANCE_RETRY_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(
-                        READY_BALANCE_RETRY_BASE_DELAY_MS * 2_u64.pow(attempt - 1),
-                    ))
-                    .await;
-                }
-            }
-        }
-    }
-
-    Err(last_error.expect("READY_BALANCE_RETRY_ATTEMPTS is greater than zero"))
+    crate::keeper::check_keeper_balance_with_retry(keeper_cfg, below_min).await
 }
 
 pub async fn prices(

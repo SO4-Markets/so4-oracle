@@ -16,6 +16,48 @@ pub struct KeeperBalanceConfig {
     pub min_balance_xlm: f64,
 }
 
+/// Default retry attempts for transient keeper balance check failures.
+pub const KEEPER_BALANCE_RETRY_ATTEMPTS: u32 = 3;
+/// Base backoff delay in milliseconds for transient keeper balance check retries.
+pub const KEEPER_BALANCE_RETRY_BASE_DELAY_MS: u64 = 100;
+
+/// Check the keeper balance with retries for transient RPC/network errors.
+///
+/// Returns the current balance in stroops on success.
+/// Non-transient errors like `BalanceBelowMinimum` are returned immediately without retrying.
+pub async fn check_keeper_balance_with_retry(
+    cfg: &KeeperBalanceConfig,
+    below_min: &Arc<AtomicBool>,
+) -> Result<i64, RpcError> {
+    let mut last_error = None;
+
+    for attempt in 1..=KEEPER_BALANCE_RETRY_ATTEMPTS {
+        match check_keeper_balance(cfg, below_min).await {
+            Ok(stroops) => return Ok(stroops),
+            Err(error @ RpcError::BalanceBelowMinimum { .. }) => {
+                return Err(error);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    attempt,
+                    max_attempts = KEEPER_BALANCE_RETRY_ATTEMPTS,
+                    error = %error,
+                    "keeper balance check attempt failed"
+                );
+                last_error = Some(error);
+                if attempt < KEEPER_BALANCE_RETRY_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        KEEPER_BALANCE_RETRY_BASE_DELAY_MS * 2_u64.pow(attempt - 1),
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+
+    Err(last_error.expect("KEEPER_BALANCE_RETRY_ATTEMPTS is greater than zero"))
+}
+
 /// Check the keeper balance.  Returns the current balance in stroops.
 ///
 /// Logs `error!` only on the transition into the low-balance state (and
@@ -201,5 +243,77 @@ mod tests {
         let below_min = Arc::new(AtomicBool::new(false));
         let err = check_keeper_balance(&cfg, &below_min).await.unwrap_err();
         assert!(matches!(err, RpcError::NetworkError(_)));
+    }
+
+    #[tokio::test]
+    async fn check_keeper_balance_with_retry_succeeds_after_transient_failure() {
+        use std::sync::atomic::AtomicUsize;
+        use wiremock::matchers::path;
+        use wiremock::Request as WireMockRequest;
+
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_mock = Arc::clone(&attempts);
+
+        Mock::given(method("GET"))
+            .and(path("/accounts/GKEEPER"))
+            .respond_with(move |_req: &WireMockRequest| {
+                let attempt = attempts_for_mock.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    ResponseTemplate::new(500).set_body_string("transient horizon error")
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "id": "GKEEPER",
+                        "balances": [{"asset_type": "native", "balance": "25.0000000"}]
+                    }))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let cfg = KeeperBalanceConfig {
+            horizon_url: server.uri(),
+            account_id: "GKEEPER".to_string(),
+            min_balance_xlm: 10.0,
+        };
+
+        let below_min = Arc::new(AtomicBool::new(false));
+        let stroops = check_keeper_balance_with_retry(&cfg, &below_min).await.unwrap();
+        assert_eq!(stroops, 250_000_000);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn check_keeper_balance_with_retry_fails_immediately_on_below_minimum() {
+        use std::sync::atomic::AtomicUsize;
+        use wiremock::matchers::path;
+        use wiremock::Request as WireMockRequest;
+
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_mock = Arc::clone(&attempts);
+
+        Mock::given(method("GET"))
+            .and(path("/accounts/GKEEPER"))
+            .respond_with(move |_req: &WireMockRequest| {
+                attempts_for_mock.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "GKEEPER",
+                    "balances": [{"asset_type": "native", "balance": "3.0000000"}]
+                }))
+            })
+            .mount(&server)
+            .await;
+
+        let cfg = KeeperBalanceConfig {
+            horizon_url: server.uri(),
+            account_id: "GKEEPER".to_string(),
+            min_balance_xlm: 10.0,
+        };
+
+        let below_min = Arc::new(AtomicBool::new(false));
+        let err = check_keeper_balance_with_retry(&cfg, &below_min).await.unwrap_err();
+        assert!(matches!(err, RpcError::BalanceBelowMinimum { .. }));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }

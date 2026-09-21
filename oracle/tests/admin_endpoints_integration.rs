@@ -1,10 +1,11 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 use wiremock::matchers::method;
-use wiremock::{MockServer, ResponseTemplate};
+use wiremock::{MockServer, Request as WireMockRequest, ResponseTemplate};
 
 mod common;
 
@@ -521,4 +522,90 @@ async fn keeper_balance_reports_unfunded_when_below_minimum() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["balance_xlm"], 3.0);
     assert_eq!(json["is_funded"], false);
+}
+
+#[tokio::test]
+async fn keeper_balance_retries_transient_horizon_failure() {
+    let horizon_mock = MockServer::start().await;
+
+    let balance_attempts = Arc::new(AtomicUsize::new(0));
+    let balance_attempts_for_mock = Arc::clone(&balance_attempts);
+    wiremock::Mock::given(method("GET"))
+        .respond_with(move |_req: &WireMockRequest| {
+            let attempt = balance_attempts_for_mock.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                ResponseTemplate::new(500).set_body_string("transient horizon error")
+            } else {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                    "balances": [{"asset_type": "native", "balance": "100.5000000"}]
+                }))
+            }
+        })
+        .mount(&horizon_mock)
+        .await;
+
+    let config = test_config("http://127.0.0.1:9", &horizon_mock.uri());
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/keeper/balance")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(balance_attempts.load(Ordering::SeqCst), 2);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["balance_xlm"], 100.5);
+    assert_eq!(json["is_funded"], true);
+}
+
+#[tokio::test]
+async fn keeper_balance_returns_503_when_horizon_fails_all_retries() {
+    let horizon_mock = MockServer::start().await;
+
+    let balance_attempts = Arc::new(AtomicUsize::new(0));
+    let balance_attempts_for_mock = Arc::clone(&balance_attempts);
+    wiremock::Mock::given(method("GET"))
+        .respond_with(move |_req: &WireMockRequest| {
+            balance_attempts_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(500).set_body_string("persistent horizon error")
+        })
+        .mount(&horizon_mock)
+        .await;
+
+    let config = test_config("http://127.0.0.1:9", &horizon_mock.uri());
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/keeper/balance")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(balance_attempts.load(Ordering::SeqCst), 3);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "keeper_balance_check_failed");
 }
