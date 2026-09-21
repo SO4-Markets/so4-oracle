@@ -666,3 +666,64 @@ async fn get_ready_returns_503_when_keeper_balance_check_fails() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "keeper_balance_check_failed");
 }
+
+// #1042 -- GET /ready returns 503 when external checks exceed timeout bound
+#[tokio::test]
+async fn get_ready_returns_503_when_external_checks_timeout() {
+    let rpc_mock = MockServer::start().await;
+    let horizon_mock = MockServer::start().await;
+
+    // Simulate RPC endpoint hanging longer than READY_EXTERNAL_CHECKS_TIMEOUT_SECS (10s)
+    wiremock::Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(12))
+                .set_body_string("ok"),
+        )
+        .mount(&rpc_mock)
+        .await;
+
+    wiremock::Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "balances": [{"asset_type": "native", "balance": "100.0000000"}]
+        })))
+        .mount(&horizon_mock)
+        .await;
+
+    let config = test_config(&rpc_mock.uri(), &horizon_mock.uri());
+    let state = Arc::new(AppState::new(config));
+
+    // Populate price cache and set loops as recent
+    {
+        let mut cache = state.price_cache.write().await;
+        cache
+            .prices
+            .insert("BTC".to_string(), sample_cached_price());
+    }
+    {
+        let mut cycle = state.cycle_status.write().await;
+        cycle.last_price_cycle_at = Some(SystemTime::now());
+        cycle.last_keeper_cycle_at = Some(SystemTime::now());
+    }
+
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 503);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "external_checks_timeout");
+}

@@ -60,6 +60,9 @@ primary_region = 'iad'
     timeout = '3s'
     path = '/health'
 
+  # External readiness checks are capped at READY_EXTERNAL_CHECKS_TIMEOUT_SECS (10s).
+  # Timeout must remain >= 20s to ensure the service returns an explicit 503 response
+  # rather than an ungraceful platform connection abort (#1042).
   [checks.ready]
     port = 8080
     type = 'http'

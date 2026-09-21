@@ -11,7 +11,12 @@ use serde::{Deserialize, Serialize};
 use super::{AdminAuth, ApiError};
 use crate::state::{AppState, CachedPrice, FailedSubmission};
 
-const READY_BALANCE_RETRY_ATTEMPTS: u32 = 3;
+/// Hard ceiling on the total duration of external readiness checks (RPC reachability +
+/// keeper balance retries). Must remain strictly below fly.toml's [checks.ready] timeout (20s)
+/// and railway.json's healthcheckTimeout (30s) so an upstream outage yields a prompt 503
+/// rather than an ungraceful platform connection abort (#1042).
+const READY_EXTERNAL_CHECKS_TIMEOUT_SECS: u64 = 10;
+const READY_BALANCE_RETRY_ATTEMPTS: u32 = 2;
 const READY_BALANCE_RETRY_BASE_DELAY_MS: u64 = 100;
 
 #[derive(Debug, Deserialize)]
@@ -160,7 +165,27 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
         }
     }
 
-    let check_res = perform_external_ready_checks(&state).await;
+    // Bound total duration of external reachability and balance checks strictly below
+    // deployment platform health-check timeouts (fly.toml: 20s, railway.json: 30s)
+    // so an upstream hang yields a prompt 503 rather than a platform timeout kill (#1042).
+    let check_res = match tokio::time::timeout(
+        Duration::from_secs(READY_EXTERNAL_CHECKS_TIMEOUT_SECS),
+        perform_external_ready_checks(&state),
+    )
+    .await
+    {
+        Ok(res) => res,
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = READY_EXTERNAL_CHECKS_TIMEOUT_SECS,
+                "external ready checks timed out"
+            );
+            Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "external_checks_timeout",
+            ))
+        }
+    };
     {
         let mut cache = state.ready_cache.write().await;
         cache.last_checked = Some(std::time::Instant::now());
@@ -331,5 +356,12 @@ mod tests {
         assert_eq!(body.keeper_cycle_count, 0);
         assert!(body.last_price_cycle_secs_ago.is_none());
         assert!(body.last_keeper_cycle_secs_ago.is_none());
+    }
+
+    // #1042 -- external ready checks timeout must be strictly bounded below platform timeouts
+    #[test]
+    fn test_ready_external_checks_timeout_within_platform_bounds() {
+        assert!(READY_EXTERNAL_CHECKS_TIMEOUT_SECS <= 10);
+        assert!(READY_BALANCE_RETRY_ATTEMPTS <= 2);
     }
 }
