@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::Request;
+use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 use wiremock::MockServer;
 
@@ -205,4 +205,34 @@ async fn trace_span_carries_the_request_id_not_an_empty_string() {
         !logs.contains("\"request_id\":\"\""),
         "the trace span's request_id must not be empty:\n{logs}"
     );
+}
+
+/// #1027 -- unmatched routes return standard JSON error envelope with 404
+#[tokio::test]
+async fn test_unmatched_route_returns_json_error_envelope() {
+    let mock_server = MockServer::start().await;
+    let config = test_config(&mock_server.uri(), "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    let app = build_router(state);
+
+    let req = Request::builder()
+        .uri("/nonexistent-endpoint-abc")
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        res.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json, serde_json::json!({ "error": "not_found" }));
 }

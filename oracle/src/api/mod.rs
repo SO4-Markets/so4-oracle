@@ -138,6 +138,15 @@ async fn track_metrics(
     response
 }
 
+/// Fallback handler for unmatched routes (#1027).
+///
+/// Ensures any request to an unregistered path returns the API's standard
+/// JSON error envelope `{"error": "not_found"}` with HTTP 404, matching all
+/// other error paths in this service.
+async fn not_found_fallback() -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, "not_found")
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
         .allow_methods([Method::GET])
@@ -216,6 +225,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/oracle/failed-submissions",
             get(prices::failed_submissions),
         )
+        .fallback(not_found_fallback)
         .with_state(state.clone())
         // Layer ordering: `.layer()` calls chained directly on a `Router` make
         // the LAST-added layer the OUTERMOST — it sees the request first. So
@@ -299,5 +309,32 @@ mod tests {
             !metrics_out.contains(test_admin_token),
             "admin token found in metrics"
         );
+    }
+
+    #[tokio::test]
+    async fn unmatched_route_returns_json_404_envelope() {
+        let config = Config::default_for_tests();
+        let state = Arc::new(AppState::new(Arc::new(config)));
+        let app = super::build_router(state);
+
+        let req = Request::builder()
+            .uri("/unmatched-route-test-404")
+            .body(Body::empty())
+            .unwrap();
+
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            res.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json, serde_json::json!({ "error": "not_found" }));
     }
 }
