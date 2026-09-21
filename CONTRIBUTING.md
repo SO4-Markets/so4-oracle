@@ -83,7 +83,7 @@ so4-oracle/
 └── tests/                   Integration tests
 ```
 
-There is **no** Cloudflare Worker, `wrangler.toml`, or `apis/` crate in this repository. The oracle is a plain Axum binary deployed via Docker (see `Dockerfile`) on Fly.io / Railway (see `fly.toml`, `railway.json`).
+There is **no** Cloudflare Worker, `wrangler.toml`, or `apis/` crate in this repository. The oracle is a plain Axum binary deployed via Docker (see `Dockerfile`) on Fly.io / Railway (see `fly.toml`, `railway.json`). It must run as a **single instance**: double-submission locks (`in_flight_keys`) and failure blacklists live in in-process memory without distributed coordination (#1019).
 
 ---
 

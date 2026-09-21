@@ -5,6 +5,7 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
+    "numReplicas": 1,
     "startCommand": "/app/oracle",
     "healthcheckPath": "/ready",
     "healthcheckTimeout": 30,

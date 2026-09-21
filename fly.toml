@@ -41,6 +41,10 @@ primary_region = 'iad'
   auto_stop_machines = true
   auto_start_machines = true
   min_machines_running = 1
+  # Enforce single-instance constraint (#1019): in-flight key tracking
+  # and failure blacklists reside in in-process memory. Running multiple
+  # replicas causes competing keeper transactions and duplicate execution races.
+  max_machines_running = 1
 
   [http_service.concurrency]
     type = 'connections'

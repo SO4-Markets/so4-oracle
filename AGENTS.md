@@ -32,6 +32,7 @@ If the `Dockerfile` or dependencies changed, you must also run:
 - Every PR states which of the gate commands were run and their results. No PR is opened for work that has not been run.
 
 ## 4. Repository-Specific Traps
+- **Single-Instance Deployment**: Must run as exactly one instance (no horizontal scaling). In-flight submission locks (`in_flight_keys`), failure counts, and execution blacklists live in in-process memory (`AppState`). Running multiple replicas causes competing keeper transactions and duplicate execution races (#1019).
 - **Environment Variables**: Read verbatim by `Config::from_env()`. A near-miss like `ORDER_HANDLER_CONTRACT_ID` is silently ignored and the process exits.
 - **Tokens Config**: `config/tokens.json` is embedded via `include_str!` at compile time and must exist in the Docker builder stage before `cargo build`.
 - **Panics**: `[profile.release]` sets `panic = "abort"`. The keeper loop must never panic—errors are recorded and the loop continues.

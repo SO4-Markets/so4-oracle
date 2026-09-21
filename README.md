@@ -111,6 +111,8 @@ cargo build --release --bin oracle
 
 ## Deployment
 
+> **Important (Single-Instance Constraint):** The oracle service must run as **exactly one instance** (single replica). Double-submission prevention (`in_flight_keys`), consecutive-failure tracking, and order blacklists reside in in-process memory (`AppState`). Horizontally scaling to multiple replicas causes independent instances to poll the same pending contract keys and race on transaction submission without coordination. Deployment manifests (`fly.toml`, `railway.json`) enforce single-replica limits by default (`max_machines_running = 1`, `numReplicas = 1`).
+
 ### Docker
 
 ```bash
