@@ -3,8 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{FromRequestParts, Query, State};
+use axum::http::header::CACHE_CONTROL;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
@@ -273,14 +275,17 @@ async fn check_keeper_balance_for_ready(
     Err(last_error.expect("READY_BALANCE_RETRY_ATTEMPTS is greater than zero"))
 }
 
+// #1026 — GET /prices must explicitly set Cache-Control: no-store so browsers
+// and intermediate CDNs never cache and serve stale price feeds to trading frontends.
 pub async fn prices(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<CachedPrice>>, ApiError> {
+) -> Result<Response, ApiError> {
     let cache = state.price_cache.read().await;
     if cache.prices.is_empty() {
         return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "no_prices"));
     }
-    Ok(Json(cache.prices.values().cloned().collect()))
+    let prices: Vec<CachedPrice> = cache.prices.values().cloned().collect();
+    Ok(([(CACHE_CONTROL, "no-store")], Json(prices)).into_response())
 }
 
 pub async fn failed_submissions(
@@ -319,6 +324,22 @@ mod tests {
         Arc::new(AppState::new(config))
     }
 
+    fn test_cached_price() -> CachedPrice {
+        CachedPrice {
+            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            symbol: "TUSDC".to_string(),
+            display_symbol: "USDC".to_string(),
+            min: 1_000_000_000_000_000_000_000_000_000_000,
+            max: 1_000_000_000_000_000_000_000_000_000_000,
+            median: 1_000_000_000_000_000_000_000_000_000_000,
+            timestamp: 1718400000,
+            ledger_seq: 12345,
+            sources_used: vec!["fixed".to_string()],
+            signature: "00".repeat(64),
+            keeper_index: 0,
+        }
+    }
+
     // #339 — GET /health must return 200 with {"status":"ok"}, no auth required
     // #497 — health now also surfaces cycle timestamps and failure counters
     #[tokio::test]
@@ -331,5 +352,38 @@ mod tests {
         assert_eq!(body.keeper_cycle_count, 0);
         assert!(body.last_price_cycle_secs_ago.is_none());
         assert!(body.last_keeper_cycle_secs_ago.is_none());
+    }
+
+    // #1026 — GET /prices must return Cache-Control: no-store
+    #[tokio::test]
+    async fn prices_sets_cache_control_no_store() {
+        let state = test_state();
+        {
+            let mut cache = state.price_cache.write().await;
+            cache.prices.insert("TUSDC".to_string(), test_cached_price());
+        }
+
+        let response = prices(State(state))
+            .await
+            .expect("prices should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(CACHE_CONTROL)
+                .expect("cache-control header must be present"),
+            "no-store"
+        );
+    }
+
+    // #1026 — GET /prices with empty cache returns 503 SERVICE_UNAVAILABLE
+    #[tokio::test]
+    async fn prices_empty_cache_returns_service_unavailable() {
+        let state = test_state();
+        let err = prices(State(state))
+            .await
+            .expect_err("should return error when cache is empty");
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.message, "no_prices");
     }
 }

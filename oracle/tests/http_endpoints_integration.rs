@@ -47,6 +47,14 @@ async fn http_get_prices_with_populated_cache() {
     let response = client.get(&url).send().await.unwrap();
 
     assert_eq!(response.status(), 200);
+    // #1026 — verify Cache-Control: no-store is delivered over HTTP
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
     let body: serde_json::Value = response.json().await.unwrap();
     assert!(body.is_array());
     let prices = body.as_array().unwrap();
