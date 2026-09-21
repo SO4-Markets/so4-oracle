@@ -1,4 +1,4 @@
-use crate::retry::Retryable;
+use crate::retry::{retry_with_backoff, Retryable};
 use serde::Deserialize;
 
 use crate::stellar_rpc::{rpc_post, JsonRpcRequest, JsonRpcResponse, RpcError};
@@ -8,6 +8,13 @@ const MAX_POLL_ATTEMPTS: u32 = 10;
 const INITIAL_BACKOFF_MS: u64 = 1_000;
 #[cfg(test)]
 const INITIAL_BACKOFF_MS: u64 = 1;
+
+/// Maximum number of retry attempts for `send_transaction_xdr` on transient RPC/network errors.
+const SEND_TRANSACTION_RETRY_ATTEMPTS: u32 = 3;
+#[cfg(not(test))]
+const SEND_TRANSACTION_RETRY_BASE_DELAY_MS: u64 = 100;
+#[cfg(test)]
+const SEND_TRANSACTION_RETRY_BASE_DELAY_MS: u64 = 1;
 
 /// Maximum number of diagnostic-event XDR entries logged at warn/error level.
 /// Full payload capture is already available in the admin-gated failure ring
@@ -139,6 +146,10 @@ pub fn parse_get_transaction_response(body: &str) -> Result<GetTransactionResult
 // ── Async submission + polling ───────────────────────────────────────────────
 
 /// Submit a base64-encoded signed transaction XDR and return the transaction hash.
+///
+/// Wraps the underlying `rpc_post` in [`retry_with_backoff`] to absorb transient
+/// network blips (connection resets, 5xx/429 HTTP statuses) before obtaining a
+/// submission result, matching the retry resiliency of other RPC call sites.
 async fn send_transaction_xdr(rpc_url: &str, signed_xdr: &str) -> Result<String, SubmitError> {
     let payload = serde_json::to_string(&JsonRpcRequest {
         jsonrpc: "2.0",
@@ -148,7 +159,14 @@ async fn send_transaction_xdr(rpc_url: &str, signed_xdr: &str) -> Result<String,
     })
     .map_err(|e| SubmitError::JsonError(e.to_string()))?;
 
-    let body = rpc_post(rpc_url, payload).await.map_err(SubmitError::Rpc)?;
+    let body = retry_with_backoff(
+        || async { rpc_post(rpc_url, payload.clone()).await },
+        SEND_TRANSACTION_RETRY_ATTEMPTS,
+        SEND_TRANSACTION_RETRY_BASE_DELAY_MS,
+        30_000,
+    )
+    .await
+    .map_err(SubmitError::Rpc)?;
 
     let result = parse_send_response(&body)?;
 
@@ -820,7 +838,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/"))
             .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
-            .expect(1)
+            .expect(SEND_TRANSACTION_RETRY_ATTEMPTS as u64)
             .mount(&mock_server)
             .await;
 
@@ -830,6 +848,96 @@ mod tests {
         let result = submit_and_poll(&rpc_url, signed_xdr).await;
 
         assert!(matches!(result, Err(SubmitError::Rpc(_))));
+    }
+
+    /// Verifies that send_transaction_xdr retries transient HTTP 5xx errors and
+    /// succeeds once the RPC endpoint responds with PENDING. Closes #1023.
+    #[tokio::test]
+    async fn test_send_transaction_retries_transient_http_500_then_succeeds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let mock_server = MockServer::start().await;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(move |_req: &wiremock::Request| {
+                let call = counter_clone.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    ResponseTemplate::new(500).set_body_string("Internal Server Error")
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "status": "PENDING",
+                            "hash": "tx_retry_success_hash"
+                        }
+                    }))
+                }
+            })
+            .expect(2)
+            .mount(&mock_server)
+            .await;
+
+        let signed_xdr = "AAAAAA==";
+        let rpc_url = mock_server.uri();
+
+        let hash = send_transaction_xdr(&rpc_url, signed_xdr).await.unwrap();
+        assert_eq!(hash, "tx_retry_success_hash");
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    /// Verifies that send_transaction_xdr fails fast on non-retryable 4xx errors
+    /// without burning retry attempts. Closes #1023.
+    #[tokio::test]
+    async fn test_send_transaction_fails_fast_on_non_retryable_http_400() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("Bad Request"))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let signed_xdr = "AAAAAA==";
+        let rpc_url = mock_server.uri();
+
+        let result = send_transaction_xdr(&rpc_url, signed_xdr).await;
+        match result {
+            Err(SubmitError::Rpc(RpcError::HttpError { status, .. })) => {
+                assert_eq!(status, 400);
+            }
+            other => panic!("Expected HttpError(400), got: {other:?}"),
+        }
+    }
+
+    /// Verifies that send_transaction_xdr exhausts retry attempts on persistent
+    /// 503 errors and propagates the final RpcError. Closes #1023.
+    #[tokio::test]
+    async fn test_send_transaction_exhausts_retries_on_persistent_503() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
+            .expect(SEND_TRANSACTION_RETRY_ATTEMPTS as u64)
+            .mount(&mock_server)
+            .await;
+
+        let signed_xdr = "AAAAAA==";
+        let rpc_url = mock_server.uri();
+
+        let result = send_transaction_xdr(&rpc_url, signed_xdr).await;
+        match result {
+            Err(SubmitError::Rpc(RpcError::HttpError { status, .. })) => {
+                assert_eq!(status, 503);
+            }
+            other => panic!("Expected HttpError(503), got: {other:?}"),
+        }
     }
 
     #[tokio::test]
