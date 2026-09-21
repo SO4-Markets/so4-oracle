@@ -138,6 +138,31 @@ async fn track_metrics(
     response
 }
 
+async fn handle_method_not_allowed(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let response = next.run(request).await;
+
+    if response.status() == StatusCode::METHOD_NOT_ALLOWED {
+        let (mut parts, _) = response.into_parts();
+        let err_response =
+            ApiError::new(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed").into_response();
+        let (err_parts, err_body) = err_response.into_parts();
+
+        parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+        for (name, value) in err_parts.headers {
+            if let Some(name) = name {
+                parts.headers.insert(name, value);
+            }
+        }
+
+        Response::from_parts(parts, err_body)
+    } else {
+        response
+    }
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
         .allow_methods([Method::GET])
@@ -224,6 +249,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // `make_span_with` reads it; otherwise every span's `request_id` is
         // "" (#790). `PropagateRequestIdLayer` only needs to run after the
         // handler, so it stays innermost.
+        .layer(axum::middleware::from_fn(handle_method_not_allowed))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(trace_layer)
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -299,5 +325,220 @@ mod tests {
             !metrics_out.contains(test_admin_token),
             "admin token found in metrics"
         );
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_methods_on_get_endpoints_return_json_405() {
+        let config = Config::default_for_tests();
+        let state = Arc::new(AppState::new(Arc::new(config)));
+        let app = super::build_router(state);
+
+        let endpoints = [
+            "/health",
+            "/ready",
+            "/prices",
+            "/metrics",
+            "/oracle/status",
+            "/keeper/status",
+            "/keeper/balance",
+            "/oracle/failed-submissions",
+        ];
+        let unsupported_methods = [
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+        ];
+
+        for endpoint in &endpoints {
+            for method in &unsupported_methods {
+                let req = Request::builder()
+                    .method(method.clone())
+                    .uri(*endpoint)
+                    .body(Body::empty())
+                    .unwrap();
+
+                let res = app.clone().oneshot(req).await.unwrap();
+
+                assert_eq!(
+                    res.status(),
+                    axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                    "Expected 405 for {method} {endpoint}"
+                );
+
+                let content_type = res
+                    .headers()
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                assert_eq!(
+                    content_type, "application/json",
+                    "Expected Content-Type: application/json for {method} {endpoint}, got: {content_type}"
+                );
+
+                let allow = res
+                    .headers()
+                    .get(axum::http::header::ALLOW)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                assert!(
+                    allow.contains("GET"),
+                    "Expected allow header containing GET for {method} {endpoint}, got: {allow}"
+                );
+
+                let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    json,
+                    serde_json::json!({ "error": "method_not_allowed" }),
+                    "Payload mismatch for {method} {endpoint}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_methods_on_delete_endpoint_return_json_405() {
+        let config = Config::default_for_tests();
+        let state = Arc::new(AppState::new(Arc::new(config)));
+        let app = super::build_router(state);
+
+        let endpoint = "/keeper/blacklist/test-key-123";
+        let unsupported_methods = [
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
+        ];
+
+        for method in &unsupported_methods {
+            let req = Request::builder()
+                .method(method.clone())
+                .uri(endpoint)
+                .body(Body::empty())
+                .unwrap();
+
+            let res = app.clone().oneshot(req).await.unwrap();
+
+            assert_eq!(
+                res.status(),
+                axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                "Expected 405 for {method} {endpoint}"
+            );
+
+            let content_type = res
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                content_type, "application/json",
+                "Expected Content-Type: application/json for {method} {endpoint}, got: {content_type}"
+            );
+
+            let allow = res
+                .headers()
+                .get(axum::http::header::ALLOW)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert!(
+                allow.contains("DELETE"),
+                "Expected allow header containing DELETE for {method} {endpoint}, got: {allow}"
+            );
+
+            let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({ "error": "method_not_allowed" }),
+                "Payload mismatch for {method} {endpoint}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_protocol_headers_preserved_on_method_not_allowed() {
+        let config = Config::default_for_tests();
+        let state = Arc::new(AppState::new(Arc::new(config)));
+        let app = super::build_router(state);
+
+        let req = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/prices")
+            .header("x-request-id", "unit-test-req-id-405")
+            .body(Body::empty())
+            .unwrap();
+
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            res.headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("unit-test-req-id-405")
+        );
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let allow = res
+            .headers()
+            .get(axum::http::header::ALLOW)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(allow.contains("GET"));
+    }
+
+    #[tokio::test]
+    async fn test_unmatched_routes_and_valid_routes_unaffected() {
+        let config = Config::default_for_tests();
+        let state = Arc::new(AppState::new(Arc::new(config)));
+        let app = super::build_router(state);
+
+        // 1. GET /health returns 200 OK
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+
+        // 2. Unmatched path GET /unmatched-path returns 404 NOT FOUND
+        let res_404_get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/unmatched-path")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res_404_get.status(), axum::http::StatusCode::NOT_FOUND);
+
+        // 3. Unmatched path POST /unmatched-path returns 404 NOT FOUND
+        let res_404_post = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/unmatched-path")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res_404_post.status(), axum::http::StatusCode::NOT_FOUND);
     }
 }
