@@ -129,13 +129,26 @@ docker run -p 8080:8080 \
 ### Systemd
 
 ```bash
+# Build the binary
+cargo build --release --bin oracle
+
+# Create system user and service directory
+id -u oracle > /dev/null 2>&1 || sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin oracle
+sudo mkdir -p /opt/oracle
+sudo cp target/release/oracle /opt/oracle/oracle
+
+# Create environment file from template and configure credentials
+sudo cp .env.example /opt/oracle/.env
+sudo chmod 600 /opt/oracle/.env
+
+# Ensure daemon ownership across oracle directory
+sudo chown -R oracle:oracle /opt/oracle
+
 # Copy the service file
 sudo cp oracle.service /etc/systemd/system/
 
-# Create environment file
-sudo cp .env /opt/oracle/.env
-
 # Enable and start
+sudo systemctl daemon-reload
 sudo systemctl enable oracle
 sudo systemctl start oracle
 ```
