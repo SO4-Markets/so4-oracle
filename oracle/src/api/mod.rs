@@ -10,6 +10,7 @@ use axum::routing::{delete, get};
 use axum::{Json, Router};
 use serde::Serialize;
 use std::time::Duration;
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
@@ -200,7 +201,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             },
         );
 
-    Router::new()
+    let router = Router::new()
         .route("/health", get(prices::health))
         .route("/ready", get(prices::ready))
         .merge(public)
@@ -215,7 +216,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/oracle/failed-submissions",
             get(prices::failed_submissions),
-        )
+        );
+
+    #[cfg(test)]
+    let router = router.route(
+        "/test_panic",
+        get(|| async {
+            panic!("intentional panic for CatchPanicLayer test");
+        }),
+    );
+
+    router
         .with_state(state.clone())
         // Layer ordering: `.layer()` calls chained directly on a `Router` make
         // the LAST-added layer the OUTERMOST — it sees the request first. So
@@ -224,6 +235,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // `make_span_with` reads it; otherwise every span's `request_id` is
         // "" (#790). `PropagateRequestIdLayer` only needs to run after the
         // handler, so it stays innermost.
+        // `CatchPanicLayer` intercepts panics originating inside HTTP request
+        // handlers and converts them into 500 Internal Server Error responses
+        // before they can bubble up and abort the process (#1044).
+        .layer(CatchPanicLayer::new())
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(trace_layer)
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -299,5 +314,22 @@ mod tests {
             !metrics_out.contains(test_admin_token),
             "admin token found in metrics"
         );
+    }
+
+    #[tokio::test]
+    async fn test_catch_panic_layer_recovers_from_handler_panic() {
+        use axum::http::StatusCode;
+
+        let config = Arc::new(Config::default_for_tests());
+        let state = Arc::new(AppState::new(config));
+        let app = super::build_router(state);
+
+        let request = Request::builder()
+            .uri("/test_panic")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.expect("router handles panicking request");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

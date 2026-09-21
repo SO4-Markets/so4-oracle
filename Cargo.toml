@@ -13,6 +13,7 @@ mismatched_lifetime_syntaxes = "allow"
 # ensures the probe reflects real liveness (/ready inspects state.cycle_status).
 # Setting panic = "abort" ensures any unexpected panic crashes the process,
 # allowing the ON_FAILURE restart policy to detect and restart it.
+# HTTP request handlers are isolated via CatchPanicLayer in build_router (#1044).
 [profile.release]
 overflow-checks = true
 panic = "abort"
