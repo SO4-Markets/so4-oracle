@@ -47,7 +47,10 @@ USER oracle
 EXPOSE 8080
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+# Timeout is set to 20s to align with fly.toml's [checks.ready] timeout and provide
+# sufficient headroom for external RPC reachability and keeper balance checks
+# (including retries), preventing spurious health check failures under transient latency (#1043).
+HEALTHCHECK --interval=30s --timeout=20s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/ready || exit 1
 
 # Run the binary
