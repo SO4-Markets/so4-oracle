@@ -139,7 +139,67 @@ mod tests {
     fn test_strkey_to_sc_address_account() {
         let addr = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
         let sc_addr = strkey_to_sc_address(addr).unwrap();
-        assert!(matches!(sc_addr, stellar_xdr::ScAddress::Account(_)));
+        match sc_addr {
+            stellar_xdr::ScAddress::Account(stellar_xdr::AccountId(
+                stellar_xdr::PublicKey::PublicKeyTypeEd25519(stellar_xdr::Uint256(bytes)),
+            )) => {
+                let roundtrip = stellar_strkey::ed25519::PublicKey(bytes).to_string();
+                assert_eq!(roundtrip, addr);
+            }
+            other => panic!("expected ScAddress::Account, got {other:?}"),
+        }
+    }
+
+    // #1031 — strkey_to_sc_address Contract branch coverage
+    #[test]
+    fn test_strkey_to_sc_address_contract() {
+        let contract = "CAHNXBBSXVMGI6G3FUBY3OTNWKQ7434FDDEEE7ZT733WIW6NUZL4ONU6";
+        let sc_addr = strkey_to_sc_address(contract).unwrap();
+        match sc_addr {
+            stellar_xdr::ScAddress::Contract(stellar_xdr::ContractId(stellar_xdr::Hash(bytes))) => {
+                let roundtrip = stellar_strkey::Contract(bytes).to_string();
+                assert_eq!(roundtrip, contract);
+            }
+            other => panic!("expected ScAddress::Contract, got {other:?}"),
+        }
+    }
+
+    // #1031 — strkey_to_sc_address rejects unsupported strkey types (e.g. secret seed, muxed account)
+    #[test]
+    fn test_strkey_to_sc_address_rejects_unsupported_types() {
+        // S... secret seed
+        let secret = "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let err_secret = strkey_to_sc_address(secret).unwrap_err();
+        assert!(
+            err_secret.starts_with("unsupported strkey type"),
+            "expected unsupported strkey error for secret seed, got: {err_secret}"
+        );
+
+        // M... muxed account
+        let pk = stellar_strkey::ed25519::PublicKey::from_string(
+            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+        )
+        .unwrap();
+        let muxed_strkey = stellar_strkey::ed25519::MuxedAccount {
+            ed25519: pk.0,
+            id: 1,
+        }
+        .to_string();
+        let err_muxed = strkey_to_sc_address(&muxed_strkey).unwrap_err();
+        assert!(
+            err_muxed.starts_with("unsupported strkey type"),
+            "expected unsupported strkey error for muxed account, got: {err_muxed}"
+        );
+    }
+
+    // #1031 — strkey_to_sc_address rejects malformed strkey strings
+    #[test]
+    fn test_strkey_to_sc_address_rejects_malformed_strkey() {
+        let err = strkey_to_sc_address("GAUHMCMUP5FZO5675").unwrap_err();
+        assert!(
+            err.starts_with("invalid strkey"),
+            "expected invalid strkey error, got: {err}"
+        );
     }
 
     #[test]
