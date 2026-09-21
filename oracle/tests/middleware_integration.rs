@@ -206,3 +206,118 @@ async fn trace_span_carries_the_request_id_not_an_empty_string() {
         "the trace span's request_id must not be empty:\n{logs}"
     );
 }
+
+/// #1012 — Verify CORS is enabled for the public `/prices` endpoint (both GET and preflight OPTIONS).
+#[tokio::test]
+async fn test_cors_public_prices_allows_cross_origin() {
+    let mock_server = MockServer::start().await;
+    let config = test_config(&mock_server.uri(), "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(Arc::clone(&state));
+
+    // 1. GET /prices with Origin header returns Access-Control-Allow-Origin: *
+    let req = Request::builder()
+        .method("GET")
+        .uri("/prices")
+        .header("origin", "https://app.so4.markets")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+
+    let allow_origin = res
+        .headers()
+        .get("access-control-allow-origin")
+        .expect("GET /prices must include access-control-allow-origin header");
+    assert_eq!(allow_origin, "*");
+
+    // 2. Preflight OPTIONS /prices with Origin and Access-Control-Request-Method headers
+    let preflight_req = Request::builder()
+        .method("OPTIONS")
+        .uri("/prices")
+        .header("origin", "https://app.so4.markets")
+        .header("access-control-request-method", "GET")
+        .body(Body::empty())
+        .unwrap();
+    let preflight_res = app.oneshot(preflight_req).await.unwrap();
+
+    let preflight_allow_origin = preflight_res
+        .headers()
+        .get("access-control-allow-origin")
+        .expect("OPTIONS /prices preflight must include access-control-allow-origin header");
+    assert_eq!(preflight_allow_origin, "*");
+}
+
+/// #1012 — Verify CORS is NOT enabled for admin and health endpoints, asserting the intentional
+/// security boundary between public browser-facing feeds and internal management routes.
+#[tokio::test]
+async fn test_cors_admin_and_health_routes_reject_cross_origin() {
+    let mock_server = MockServer::start().await;
+    let config = test_config(&mock_server.uri(), "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    // 1. /health should not return CORS headers
+    let req_health = Request::builder()
+        .method("GET")
+        .uri("/health")
+        .header("origin", "https://malicious-site.com")
+        .body(Body::empty())
+        .unwrap();
+    let res_health = app.clone().oneshot(req_health).await.unwrap();
+    assert!(
+        res_health
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none(),
+        "/health must not return access-control-allow-origin"
+    );
+
+    // 2. /ready should not return CORS headers
+    let req_ready = Request::builder()
+        .method("GET")
+        .uri("/ready")
+        .header("origin", "https://malicious-site.com")
+        .body(Body::empty())
+        .unwrap();
+    let res_ready = app.clone().oneshot(req_ready).await.unwrap();
+    assert!(
+        res_ready
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none(),
+        "/ready must not return access-control-allow-origin"
+    );
+
+    // 3. Admin endpoint /oracle/status should not return CORS headers
+    let req_admin = Request::builder()
+        .method("GET")
+        .uri("/oracle/status")
+        .header("origin", "https://malicious-site.com")
+        .body(Body::empty())
+        .unwrap();
+    let res_admin = app.clone().oneshot(req_admin).await.unwrap();
+    assert!(
+        res_admin
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none(),
+        "/oracle/status must not return access-control-allow-origin"
+    );
+
+    // 4. Preflight OPTIONS on admin route should not return CORS allow-origin
+    let req_options_admin = Request::builder()
+        .method("OPTIONS")
+        .uri("/oracle/status")
+        .header("origin", "https://malicious-site.com")
+        .header("access-control-request-method", "GET")
+        .body(Body::empty())
+        .unwrap();
+    let res_options_admin = app.oneshot(req_options_admin).await.unwrap();
+    assert!(
+        res_options_admin
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none(),
+        "OPTIONS /oracle/status must not return access-control-allow-origin"
+    );
+}
