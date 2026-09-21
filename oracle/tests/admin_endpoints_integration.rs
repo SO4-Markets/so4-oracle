@@ -522,3 +522,71 @@ async fn keeper_balance_reports_unfunded_when_below_minimum() {
     assert_eq!(json["balance_xlm"], 3.0);
     assert_eq!(json["is_funded"], false);
 }
+
+// ── #1010 — GET /metrics ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn metrics_returns_401_without_token() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn metrics_returns_prometheus_exposition_content_type() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    // Seed test metrics so body is non-empty
+    state.metrics.record_price_cycle(120, 3, 1);
+    state.metrics.record_http_request("/prices", "GET", 200, 15);
+
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // #1010: Verify Content-Type matches the Prometheus exposition format specification exactly
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .expect("GET /metrics must include Content-Type header")
+        .to_str()
+        .expect("Content-Type must be valid UTF-8 string");
+
+    assert_eq!(
+        content_type, "text/plain; version=0.0.4; charset=utf-8",
+        "GET /metrics Content-Type header must match Prometheus exposition format spec"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_str = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        body_str.contains("oracle_price_cycle_duration_ms"),
+        "metrics response body should include recorded oracle metrics"
+    );
+}
