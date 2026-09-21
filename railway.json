@@ -12,7 +12,6 @@
     "restartPolicyMaxRetries": 100
   },
   "variables": {
-    "PORT": "8080",
     "BIND_ADDR": "0.0.0.0:8080",
     "STELLAR_NETWORK": "YOUR_STELLAR_NETWORK",
     "STELLAR_RPC_URL": "YOUR_STELLAR_RPC_URL",
