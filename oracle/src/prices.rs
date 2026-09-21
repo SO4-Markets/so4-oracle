@@ -281,19 +281,41 @@ mod tests {
     #[test]
     fn two_sources_uses_average_median_equal_spread() {
         let prices = vec![1000i128, 2000];
-        let p = compute_confidence_interval(&prices).unwrap();
 
-        assert_eq!(p.min, 1485, "Expected mid (1500) - 1% (15)");
-        assert_eq!(p.max, 1515, "Expected mid (1500) + 1% (15)");
+        // Production 50 bps (#1046)
+        let p50 = compute_confidence_interval_with_spread(&prices, 50).unwrap();
+        assert_eq!(p50.min, 1493, "Expected mid (1500) - 0.5% (7)");
+        assert_eq!(p50.max, 1507, "Expected mid (1500) + 0.5% (7)");
+
+        // Production 100 bps (default wrapper)
+        let p100 = compute_confidence_interval(&prices).unwrap();
+        assert_eq!(p100.min, 1485, "Expected mid (1500) - 1% (15)");
+        assert_eq!(p100.max, 1515, "Expected mid (1500) + 1% (15)");
+
+        // Production 150 bps (#1046)
+        let p150 = compute_confidence_interval_with_spread(&prices, 150).unwrap();
+        assert_eq!(p150.min, 1478, "Expected mid (1500) - 1.5% (22)");
+        assert_eq!(p150.max, 1522, "Expected mid (1500) + 1.5% (22)");
     }
 
     #[test]
     fn single_source_uses_fallback_equal_spread() {
         let prices = vec![5000i128];
-        let p = compute_confidence_interval(&prices).unwrap();
 
-        assert_eq!(p.min, 4950, "Expected 5000 - 1% spread (50)");
-        assert_eq!(p.max, 5050, "Expected 5000 + 1% spread (50)");
+        // Production 50 bps (#1046)
+        let p50 = compute_confidence_interval_with_spread(&prices, 50).unwrap();
+        assert_eq!(p50.min, 4975, "Expected 5000 - 0.5% spread (25)");
+        assert_eq!(p50.max, 5025, "Expected 5000 + 0.5% spread (25)");
+
+        // Production 100 bps (default wrapper)
+        let p100 = compute_confidence_interval(&prices).unwrap();
+        assert_eq!(p100.min, 4950, "Expected 5000 - 1% spread (50)");
+        assert_eq!(p100.max, 5050, "Expected 5000 + 1% spread (50)");
+
+        // Production 150 bps (#1046)
+        let p150 = compute_confidence_interval_with_spread(&prices, 150).unwrap();
+        assert_eq!(p150.min, 4925, "Expected 5000 - 1.5% spread (75)");
+        assert_eq!(p150.max, 5075, "Expected 5000 + 1.5% spread (75)");
     }
 
     #[test]
@@ -304,8 +326,10 @@ mod tests {
     #[test]
     fn min_is_less_than_or_equal_to_max() {
         let prices = vec![42i128, 43, 44, 45, 46];
-        let p = compute_confidence_interval(&prices).unwrap();
-        assert!(p.min <= p.max);
+        for spread in [50, 100, 150] {
+            let p = compute_confidence_interval_with_spread(&prices, spread).unwrap();
+            assert!(p.min <= p.max);
+        }
     }
 
     #[test]
@@ -616,25 +640,30 @@ mod tests {
             vec![50, 75, 100, 125, 150, 175, 200],
             vec![10i128, 20, 30],
         ];
+        let spreads = [50, 100, 150];
 
         for prices in test_cases {
             let min_input = *prices.iter().min().unwrap();
             let max_input = *prices.iter().max().unwrap();
 
-            let p = compute_confidence_interval(&prices).unwrap();
+            for spread in spreads {
+                let p = compute_confidence_interval_with_spread(&prices, spread).unwrap();
 
-            assert!(
-                p.min >= min_input,
-                "computed min {} should be >= input min {}",
-                p.min,
-                min_input
-            );
-            assert!(
-                p.max <= max_input,
-                "computed max {} should be <= input max {}",
-                p.max,
-                max_input
-            );
+                assert!(
+                    p.min >= min_input,
+                    "computed min {} should be >= input min {} at spread {} bps",
+                    p.min,
+                    min_input,
+                    spread
+                );
+                assert!(
+                    p.max <= max_input,
+                    "computed max {} should be <= input max {} at spread {} bps",
+                    p.max,
+                    max_input,
+                    spread
+                );
+            }
         }
     }
 
@@ -647,16 +676,20 @@ mod tests {
             vec![999_999_999i128, 1_000_000_000, 1_000_000_001],
             vec![0i128, 0, 0, 0],
         ];
+        let spreads = [0, 50, 100, 150, 500, 10_000];
 
         for prices in test_cases {
-            let p = compute_confidence_interval(&prices).unwrap();
-            assert!(
-                p.min <= p.max,
-                "invariant violated: min {} > max {} for prices {:?}",
-                p.min,
-                p.max,
-                prices
-            );
+            for spread in spreads {
+                let p = compute_confidence_interval_with_spread(&prices, spread).unwrap();
+                assert!(
+                    p.min <= p.max,
+                    "invariant violated: min {} > max {} for prices {:?} at spread {} bps",
+                    p.min,
+                    p.max,
+                    prices,
+                    spread
+                );
+            }
         }
     }
 
@@ -743,11 +776,22 @@ mod tests {
     #[test]
     fn property_confidence_interval_bounds_tight() {
         let prices = vec![100i128, 150, 200, 250, 300];
+        let spreads = [50, 100, 150];
 
-        let p = compute_confidence_interval(&prices).unwrap();
+        for spread in spreads {
+            let p = compute_confidence_interval_with_spread(&prices, spread).unwrap();
 
-        assert!(p.min >= 100, "lower bound should respect minimum input");
-        assert!(p.max <= 300, "upper bound should respect maximum input");
+            assert!(
+                p.min >= 100,
+                "lower bound should respect minimum input at spread {} bps",
+                spread
+            );
+            assert!(
+                p.max <= 300,
+                "upper bound should respect maximum input at spread {} bps",
+                spread
+            );
+        }
     }
 
     #[test]
@@ -769,5 +813,36 @@ mod tests {
         assert_eq!(result.filtered_prices.len(), 1);
         assert_eq!(result.filtered_prices[0], 42);
         assert_eq!(result.rejected.len(), 0);
+    }
+
+    #[test]
+    fn confidence_interval_with_spread_production_configured_spreads() {
+        // config/tokens.json configures max_deviation_bps of 50, 100, and 150.
+        // Exercise both fallback (<3 sources) and percentile (>=3 sources) paths
+        // across all production-configured spread parameters (#1046).
+        for spread in [50, 100, 150] {
+            // Single source fallback
+            let single = vec![10_000i128];
+            let p_single = compute_confidence_interval_with_spread(&single, spread).unwrap();
+            let expected_spread = 10_000 * (spread as i128) / 10_000;
+            assert_eq!(p_single.min, 10_000 - expected_spread);
+            assert_eq!(p_single.max, 10_000 + expected_spread);
+            assert!(p_single.min <= p_single.max);
+
+            // Two sources fallback
+            let two = vec![20_000i128, 40_000]; // mid = 30_000
+            let p_two = compute_confidence_interval_with_spread(&two, spread).unwrap();
+            let expected_spread_two = 30_000 * (spread as i128) / 10_000;
+            assert_eq!(p_two.min, 30_000 - expected_spread_two);
+            assert_eq!(p_two.max, 30_000 + expected_spread_two);
+            assert!(p_two.min <= p_two.max);
+
+            // Three sources percentile
+            let three = vec![10_000i128, 20_000, 30_000];
+            let p_three = compute_confidence_interval_with_spread(&three, spread).unwrap();
+            assert!(p_three.min <= p_three.max);
+            assert!(p_three.min >= 10_000);
+            assert!(p_three.max <= 30_000);
+        }
     }
 }
