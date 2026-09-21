@@ -30,6 +30,9 @@ primary_region = 'iad'
   KEEPER_PRIVATE_KEY = 'YOUR_KEEPER_PRIVATE_KEY_HEX'
   KEEPER_SECRET_KEY = 'YOUR_KEEPER_SECRET_KEY'
   KEEPER_ACCOUNT_ID = 'YOUR_KEEPER_ACCOUNT_ID'
+  # REQUIRED for admin routes (/oracle/status, /metrics, etc.). Set this as a Fly secret
+  # (`fly secrets set ADMIN_API_TOKEN=...`) rather than a plaintext value here.
+  ADMIN_API_TOKEN = 'YOUR_ADMIN_API_TOKEN'
   PRICE_LOOP_MS = '1000'
   KEEPER_LOOP_MS = '1500'
   MIN_KEEPER_BALANCE_XLM = '10'
