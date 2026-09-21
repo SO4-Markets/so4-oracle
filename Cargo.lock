@@ -1463,7 +1463,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64",
- "digest",
  "dotenvy",
  "ed25519-dalek",
  "futures",
