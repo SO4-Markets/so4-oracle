@@ -29,6 +29,10 @@ pub enum PythPriceError {
     },
     MissingPublishTime,
     InvalidPublishTime(i64),
+    FuturePublishTime {
+        publish_time: u64,
+        now_seconds: u64,
+    },
 }
 
 impl std::fmt::Display for PythPriceError {
@@ -63,6 +67,13 @@ impl std::fmt::Display for PythPriceError {
                 write!(f, "Pyth response is missing publish_time field")
             }
             Self::InvalidPublishTime(value) => write!(f, "invalid Pyth publish time: {value}"),
+            Self::FuturePublishTime {
+                publish_time,
+                now_seconds,
+            } => write!(
+                f,
+                "Pyth publish_time ({publish_time}s) is in the future relative to local clock ({now_seconds}s)"
+            ),
         }
     }
 }
@@ -83,7 +94,8 @@ impl crate::retry::Retryable for PythPriceError {
             | Self::MissingFeedId(_)
             | Self::ConfidenceTooWide { .. }
             | Self::MissingPublishTime
-            | Self::InvalidPublishTime(_) => false,
+            | Self::InvalidPublishTime(_)
+            | Self::FuturePublishTime { .. } => false,
         }
     }
 }
@@ -156,6 +168,11 @@ pub fn normalize_pyth_price(price_str: &str, exponent: i32) -> Result<i128, Pyth
         })
 }
 
+/// Maximum acceptable clock skew for future-dated Pyth publish times in seconds (#1032).
+/// Tolerates small NTP jitter between servers while rejecting prices that claim
+/// to originate from the future.
+pub const MAX_FUTURE_PUBLISH_DRIFT_SECONDS: u64 = 5;
+
 pub fn validate_pyth_price(
     data: &PythPriceData,
     now_seconds: u64,
@@ -170,6 +187,14 @@ pub fn validate_pyth_price(
         return Err(PythPriceError::InvalidPublishTime(publish_time));
     }
     let publish_time = publish_time as u64;
+
+    if publish_time > now_seconds.saturating_add(MAX_FUTURE_PUBLISH_DRIFT_SECONDS) {
+        return Err(PythPriceError::FuturePublishTime {
+            publish_time,
+            now_seconds,
+        });
+    }
+
     let age_seconds = now_seconds.saturating_sub(publish_time);
     if age_seconds > stale_after_seconds {
         return Err(PythPriceError::StalePrice {
@@ -860,5 +885,37 @@ mod tests {
             "expected ConfidenceTooWide with max_bps=50, got {:?}",
             err
         );
+    }
+
+    // #1032 -- validate_pyth_price rejects future-dated publish_time beyond clock drift tolerance
+    #[test]
+    fn validate_pyth_price_rejects_future_publish_time() {
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: Some("100000".to_string()),
+            expo: -8,
+            publish_time: Some(1_050),
+        };
+        let err = validate_pyth_price(&data, 1_000, 60, 50).unwrap_err();
+        assert_eq!(
+            err,
+            PythPriceError::FuturePublishTime {
+                publish_time: 1_050,
+                now_seconds: 1_000,
+            }
+        );
+    }
+
+    // #1032 -- validate_pyth_price permits minor future clock drift within tolerance
+    #[test]
+    fn validate_pyth_price_accepts_minor_future_clock_drift() {
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: Some("100000".to_string()),
+            expo: -8,
+            publish_time: Some(1_003),
+        };
+        let price = validate_pyth_price(&data, 1_000, 60, 50).unwrap();
+        assert_eq!(price, FLOAT_PRECISION);
     }
 }
