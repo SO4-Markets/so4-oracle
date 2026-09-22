@@ -1,5 +1,9 @@
+use base64::Engine;
 use crate::retry::Retryable;
 use serde::Deserialize;
+use stellar_xdr::{
+    Limits, ReadXdr, TransactionResult, TransactionResultCode, TransactionResultResult,
+};
 
 use crate::stellar_rpc::{rpc_post, JsonRpcRequest, JsonRpcResponse, RpcError};
 
@@ -50,9 +54,63 @@ fn truncate_events_for_log(events: &[String]) -> Vec<String> {
 pub enum SubmitError {
     Rpc(RpcError),
     JsonError(String),
-    Rejected { status: String },
+    Rejected {
+        status: String,
+        error_result_xdr: Option<String>,
+    },
     TransactionFailed { events: Vec<String> },
     PollTimeout { hash: String },
+}
+
+impl SubmitError {
+    /// Returns true if this error indicates the transaction was rejected due to a bad sequence number
+    /// (`txBAD_SEQ` in `error_result_xdr` or legacy substring in `status`).
+    pub fn is_bad_sequence(&self) -> bool {
+        match self {
+            SubmitError::Rejected {
+                status,
+                error_result_xdr,
+            } => {
+                if let Some(ref xdr) = error_result_xdr {
+                    if is_bad_sequence_xdr(xdr) {
+                        return true;
+                    }
+                }
+                let lower = status.to_ascii_lowercase();
+                lower.contains("bad_sequence")
+                    || lower.contains("bad_seq")
+                    || lower.contains("badseq")
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Decode a base64-encoded `TransactionResult` XDR and return whether it represents `txBAD_SEQ`.
+pub fn is_bad_sequence_xdr(xdr_base64: &str) -> bool {
+    let trimmed = xdr_base64.trim();
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
+    else {
+        return false;
+    };
+
+    let Ok(tx_result) = TransactionResult::from_xdr(&bytes, Limits::none()) else {
+        return false;
+    };
+
+    if tx_result.result.discriminant() == TransactionResultCode::TxBadSeq {
+        return true;
+    }
+
+    match &tx_result.result {
+        TransactionResultResult::TxFeeBumpInnerSuccess(pair)
+        | TransactionResultResult::TxFeeBumpInnerFailed(pair) => {
+            pair.result.result.discriminant() == TransactionResultCode::TxBadSeq
+        }
+        _ => false,
+    }
 }
 
 impl std::fmt::Display for SubmitError {
@@ -60,7 +118,13 @@ impl std::fmt::Display for SubmitError {
         match self {
             SubmitError::Rpc(e) => write!(f, "RPC error: {e}"),
             SubmitError::JsonError(msg) => write!(f, "JSON parse error: {msg}"),
-            SubmitError::Rejected { status } => write!(f, "transaction rejected: {status}"),
+            SubmitError::Rejected {
+                status,
+                error_result_xdr,
+            } => match error_result_xdr {
+                Some(xdr) => write!(f, "transaction rejected: {status} (error_result_xdr: {xdr})"),
+                None => write!(f, "transaction rejected: {status}"),
+            },
             SubmitError::TransactionFailed { events } => {
                 write!(
                     f,
@@ -155,6 +219,7 @@ async fn send_transaction_xdr(rpc_url: &str, signed_xdr: &str) -> Result<String,
     if result.status != "PENDING" {
         return Err(SubmitError::Rejected {
             status: result.status,
+            error_result_xdr: result.error_result_xdr,
         });
     }
 
@@ -410,8 +475,57 @@ mod tests {
     fn submit_error_display_rejected() {
         let err = SubmitError::Rejected {
             status: "ERROR".to_string(),
+            error_result_xdr: None,
         };
         assert_eq!(err.to_string(), "transaction rejected: ERROR");
+
+        let err_with_xdr = SubmitError::Rejected {
+            status: "ERROR".to_string(),
+            error_result_xdr: Some("AAAAAAAAAGT////7AAAAAA==".to_string()),
+        };
+        assert_eq!(
+            err_with_xdr.to_string(),
+            "transaction rejected: ERROR (error_result_xdr: AAAAAAAAAGT////7AAAAAA==)"
+        );
+    }
+
+    #[test]
+    fn test_is_bad_sequence_xdr() {
+        // Valid txBAD_SEQ XDR (fee: 100, code: -5, ext: 0)
+        assert!(is_bad_sequence_xdr("AAAAAAAAAGT////7AAAAAA=="));
+        // Valid txFAILED XDR (fee: 100, code: -1, 0 results, ext: 0)
+        assert!(!is_bad_sequence_xdr("AAAAAAAAAGT/////AAAAAAAAAAA="));
+        // Invalid base64
+        assert!(!is_bad_sequence_xdr("not_base64!#"));
+        // Invalid XDR bytes
+        assert!(!is_bad_sequence_xdr("AAAA"));
+    }
+
+    #[test]
+    fn test_submit_error_is_bad_sequence() {
+        let err_xdr_bad_seq = SubmitError::Rejected {
+            status: "ERROR".to_string(),
+            error_result_xdr: Some("AAAAAAAAAGT////7AAAAAA==".to_string()),
+        };
+        assert!(err_xdr_bad_seq.is_bad_sequence());
+
+        let err_xdr_other = SubmitError::Rejected {
+            status: "ERROR".to_string(),
+            error_result_xdr: Some("AAAAAAAAAGT/////AAAAAAAAAAA=".to_string()),
+        };
+        assert!(!err_xdr_other.is_bad_sequence());
+
+        let err_legacy_status = SubmitError::Rejected {
+            status: "BAD_SEQUENCE".to_string(),
+            error_result_xdr: None,
+        };
+        assert!(err_legacy_status.is_bad_sequence());
+
+        let err_other = SubmitError::Rejected {
+            status: "ERROR".to_string(),
+            error_result_xdr: None,
+        };
+        assert!(!err_other.is_bad_sequence());
     }
 
     #[test]
@@ -665,6 +779,7 @@ mod tests {
             match result {
                 Err(SubmitError::Rejected {
                     status: returned_status,
+                    ..
                 }) => {
                     assert_eq!(returned_status, status);
                 }
@@ -672,6 +787,44 @@ mod tests {
                     panic!("Expected SubmitError::Rejected with status '{status}', got: {other:?}")
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_submit_and_poll_captures_error_result_xdr() {
+        let mock_server = MockServer::start().await;
+
+        let send_response_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "status": "ERROR",
+                "hash": "abc123def456",
+                "errorResultXdr": "AAAAAAAAAGT////7AAAAAA=="
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(send_response_body))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let signed_xdr = "AAAAAA==";
+        let rpc_url = mock_server.uri();
+
+        let result = submit_and_poll(&rpc_url, signed_xdr).await;
+        match result {
+            Err(err @ SubmitError::Rejected { ref status, ref error_result_xdr }) => {
+                assert_eq!(status, "ERROR");
+                assert_eq!(
+                    error_result_xdr.as_deref(),
+                    Some("AAAAAAAAAGT////7AAAAAA==")
+                );
+                assert!(err.is_bad_sequence());
+            }
+            other => panic!("Expected SubmitError::Rejected with errorResultXdr, got: {other:?}"),
         }
     }
 

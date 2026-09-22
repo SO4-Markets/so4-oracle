@@ -780,12 +780,22 @@ async fn set_prices_on_chain(
 
 /// True if `error` indicates the submitted transaction was rejected for
 /// carrying a stale/incorrect account sequence number (e.g. RPC status
-/// `BAD_SEQUENCE`, or classic Horizon's `tx_bad_seq`), as opposed to any
-/// other submission failure. Used to decide when a locally-cached sequence
-/// number needs to be re-fetched from the network (#805).
+/// `BAD_SEQUENCE`, classic Horizon's `tx_bad_seq`, or decoded XDR with `txBAD_SEQ`),
+/// as opposed to any other submission failure. Used to decide when a locally-cached
+/// sequence number needs to be re-fetched from the network (#805, #998).
 fn is_bad_sequence_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
-    lower.contains("bad_sequence") || lower.contains("bad_seq") || lower.contains("badseq")
+    if lower.contains("bad_sequence") || lower.contains("bad_seq") || lower.contains("badseq") {
+        return true;
+    }
+    if let Some(pos) = error.find("error_result_xdr: ") {
+        let rest = &error[pos + "error_result_xdr: ".len()..];
+        let xdr = rest.trim_end_matches(')').trim();
+        if crate::submit::is_bad_sequence_xdr(xdr) {
+            return true;
+        }
+    }
+    crate::submit::is_bad_sequence_xdr(error.trim())
 }
 
 /// Execute a handler contract call, using and maintaining a per-cycle cached
@@ -855,7 +865,7 @@ async fn execute_handler(
         }
         Err(error) => {
             let msg = error.to_string();
-            if is_bad_sequence_error(&msg) {
+            if error.is_bad_sequence() || is_bad_sequence_error(&msg) {
                 // The cached sequence is stale relative to the network;
                 // drop it so the next call re-fetches instead of retrying
                 // with the same wrong value.
@@ -1205,5 +1215,30 @@ mod tests {
             .collect();
         assert_eq!(stale_filtered.len(), 1);
         assert_eq!(stale_filtered[0].1.symbol, "STALE");
+    }
+
+    #[test]
+    fn test_is_bad_sequence_error_legacy_and_xdr() {
+        // Legacy substring checks
+        assert!(is_bad_sequence_error("bad_sequence"));
+        assert!(is_bad_sequence_error("tx_bad_seq"));
+        assert!(is_bad_sequence_error("error: BADSEQ"));
+
+        // Production Soroban RPC error shape with embedded errorResultXdr (txBAD_SEQ)
+        assert!(is_bad_sequence_error(
+            "transaction rejected: ERROR (error_result_xdr: AAAAAAAAAGT////7AAAAAA==)"
+        ));
+
+        // Raw base64 XDR string
+        assert!(is_bad_sequence_error("AAAAAAAAAGT////7AAAAAA=="));
+
+        // Different error code (e.g. txFAILED)
+        assert!(!is_bad_sequence_error(
+            "transaction rejected: ERROR (error_result_xdr: AAAAAAAAAGT/////AAAAAAAAAAA=)"
+        ));
+
+        // Bare error status without bad sequence XDR
+        assert!(!is_bad_sequence_error("transaction rejected: ERROR"));
+        assert!(!is_bad_sequence_error("connection refused"));
     }
 }
