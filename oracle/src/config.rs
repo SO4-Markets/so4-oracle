@@ -472,26 +472,32 @@ fn validate_hex_key(
     Ok(value)
 }
 
+/// Validate a Stellar strkey for shape only: 56-char base32 with the expected version prefix.
+fn validate_strkey_shape(value: &str, prefix: char) -> Result<(), String> {
+    if value.len() != 56 {
+        return Err(format!(
+            "expected 56 characters, got {}",
+            value.len()
+        ));
+    }
+    if !value.starts_with(prefix) {
+        return Err(format!("must start with '{prefix}'"));
+    }
+    if let Some(bad) = value.chars().find(|c| !matches!(c, 'A'..='Z' | '2'..='7')) {
+        return Err(format!(
+            "invalid base32 character '{bad}' (expected A-Z, 2-7)"
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a Stellar strkey (account `G…` / secret seed `S…`) for shape only:
 /// 56-char base32 with the expected version prefix. This catches typos and
 /// swapped vars at boot; it does not verify the CRC16 or that a secret derives
 /// the configured account (those are wired with the keeper in #3).
 fn validate_strkey(var: &'static str, value: String, prefix: char) -> Result<String, EnvError> {
-    let invalid = |reason: String| EnvError::InvalidVar { var, reason };
-    if value.len() != 56 {
-        return Err(invalid(format!(
-            "expected 56 characters, got {}",
-            value.len()
-        )));
-    }
-    if !value.starts_with(prefix) {
-        return Err(invalid(format!("must start with '{prefix}'")));
-    }
-    if let Some(bad) = value.chars().find(|c| !matches!(c, 'A'..='Z' | '2'..='7')) {
-        return Err(invalid(format!(
-            "invalid base32 character '{bad}' (expected A-Z, 2-7)"
-        )));
-    }
+    validate_strkey_shape(&value, prefix)
+        .map_err(|reason| EnvError::InvalidVar { var, reason })?;
     Ok(value)
 }
 
@@ -515,6 +521,12 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
             return Err(ConfigError::InvalidToken {
                 symbol: token.symbol.clone(),
                 reason: "stellar_address must not be empty".to_string(),
+            });
+        }
+        if let Err(reason) = validate_strkey_shape(&token.stellar_address, 'C') {
+            return Err(ConfigError::InvalidToken {
+                symbol: token.symbol.clone(),
+                reason: format!("invalid stellar_address: {reason}"),
             });
         }
         if token.sources.is_empty() {
@@ -637,9 +649,14 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
+    const VALID_CONTRACT_ADDR: &str =
+        "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES";
+    const VALID_CONTRACT_ADDR_2: &str =
+        "CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO";
+
     const VALID_JSON: &str = r#"[
-        {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance","coinbase"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC"},
-        {"symbol":"ETH","stellar_address":"CETHADDR","sources":["binance"],"binance_symbol":"ETHUSDT","min_sources":1}
+        {"symbol":"BTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["binance","coinbase"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC"},
+        {"symbol":"ETH","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["binance"],"binance_symbol":"ETHUSDT","min_sources":1}
     ]"#;
 
     #[test]
@@ -751,7 +768,7 @@ mod tests {
 
     #[test]
     fn reject_token_with_empty_symbol() {
-        let json = r#"[{"symbol":"","stellar_address":"CADDR","sources":["binance"],"binance_symbol":"BTCUSDT"}]"#;
+        let json = r#"[{"symbol":"","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["binance"],"binance_symbol":"BTCUSDT"}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
@@ -766,9 +783,45 @@ mod tests {
         ));
     }
 
+    /// #970 — reject stellar_address with non-'C' prefix (e.g. account 'G…' key).
+    #[test]
+    fn reject_token_with_invalid_stellar_address_prefix() {
+        let json = r#"[{"symbol":"BTC","stellar_address":"GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI","sources":["binance"],"binance_symbol":"BTCUSDT"}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidToken { ref symbol, ref reason, .. }
+                if symbol == "BTC" && reason.contains("must start with 'C'")
+        ));
+    }
+
+    /// #970 — reject stellar_address with wrong length (not 56 characters).
+    #[test]
+    fn reject_token_with_invalid_stellar_address_length() {
+        let json = r#"[{"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance"],"binance_symbol":"BTCUSDT"}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidToken { ref symbol, ref reason, .. }
+                if symbol == "BTC" && reason.contains("expected 56 characters")
+        ));
+    }
+
+    /// #970 — reject stellar_address with invalid Base32 characters (e.g. '8', '9', '0', '1').
+    #[test]
+    fn reject_token_with_invalid_stellar_address_chars() {
+        let json = r#"[{"symbol":"BTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKE8","sources":["binance"],"binance_symbol":"BTCUSDT"}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidToken { ref symbol, ref reason, .. }
+                if symbol == "BTC" && reason.contains("invalid base32 character")
+        ));
+    }
+
     #[test]
     fn reject_token_with_empty_sources() {
-        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":[]}]"#;
+        let json = r#"[{"symbol":"BTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":[]}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(
             err,
@@ -779,8 +832,8 @@ mod tests {
     #[test]
     fn per_token_source_list_preserved() {
         let json = r#"[
-            {"symbol":"BTC","stellar_address":"CBADDR","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1},
-            {"symbol":"ETH","stellar_address":"CEADDR","sources":["coinbase"],"coinbase_symbol":"ETH","min_sources":1}
+            {"symbol":"BTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1},
+            {"symbol":"ETH","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["coinbase"],"coinbase_symbol":"ETH","min_sources":1}
         ]"#;
         let cfg = parse_price_feed_config(json).unwrap();
         assert_eq!(cfg.tokens[0].sources, vec!["binance"]);
@@ -799,14 +852,14 @@ mod tests {
     /// #324 — entry with empty symbol → InvalidToken.
     #[test]
     fn parse_token_configs_empty_symbol_returns_invalid_token() {
-        let json = r#"[{"symbol":"","stellar_address":"CADDR","sources":["binance"]}]"#;
+        let json = r#"[{"symbol":"","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["binance"]}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
 
     #[test]
     fn reject_missing_coinbase_symbol() {
-        let json = r#"[{"symbol":"TWBTC","stellar_address":"CADDR","sources":["coinbase"]}]"#;
+        let json = r#"[{"symbol":"TWBTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["coinbase"]}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
@@ -821,49 +874,49 @@ mod tests {
 
     #[test]
     fn reject_missing_binance_symbol() {
-        let json = r#"[{"symbol":"TWBTC","stellar_address":"CADDR","sources":["binance"]}]"#;
+        let json = r#"[{"symbol":"TWBTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["binance"]}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
 
     #[test]
     fn reject_missing_pyth_feed_id() {
-        let json = r#"[{"symbol":"TWBTC","stellar_address":"CADDR","sources":["pyth"]}]"#;
+        let json = r#"[{"symbol":"TWBTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["pyth"]}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
 
     #[test]
     fn reject_empty_pyth_feed_id() {
-        let json = r#"[{"symbol":"TWBTC","stellar_address":"CADDR","sources":["pyth"],"pyth_feed_id":""}]"#;
+        let json = r#"[{"symbol":"TWBTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["pyth"],"pyth_feed_id":""}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
 
     #[test]
     fn reject_missing_fixed_price() {
-        let json = r#"[{"symbol":"TUSDC","stellar_address":"CADDR","sources":["fixed"]}]"#;
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["fixed"]}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
 
     #[test]
     fn reject_empty_fixed_price() {
-        let json = r#"[{"symbol":"TUSDC","stellar_address":"CADDR","sources":["fixed"],"fixed_price":""}]"#;
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["fixed"],"fixed_price":""}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
 
     #[test]
     fn per_source_rejects_unsupported_source() {
-        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":["kraken"]}]"#;
+        let json = r#"[{"symbol":"BTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["kraken"]}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { ref symbol, .. } if symbol == "BTC"));
     }
 
     #[test]
     fn per_source_rejects_empty_source_name() {
-        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":[""]}]"#;
+        let json = r#"[{"symbol":"BTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":[""]}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { ref symbol, .. } if symbol == "BTC"));
     }
@@ -871,7 +924,7 @@ mod tests {
     #[test]
     fn reject_min_sources_exceeds_sources_length() {
         let json = r#"[
-            {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":2}
+            {"symbol":"BTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":2}
         ]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(
@@ -884,7 +937,7 @@ mod tests {
     #[test]
     fn accept_min_sources_equal_to_sources_length() {
         let json = r#"[
-            {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1}
+            {"symbol":"BTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1}
         ]"#;
         let cfg = parse_price_feed_config(json).unwrap();
         assert_eq!(cfg.tokens.len(), 1);
@@ -894,7 +947,7 @@ mod tests {
     #[test]
     fn accept_min_sources_less_than_sources_length() {
         let json = r#"[
-            {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance","coinbase"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC","min_sources":1}
+            {"symbol":"BTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["binance","coinbase"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC","min_sources":1}
         ]"#;
         let cfg = parse_price_feed_config(json).unwrap();
         assert_eq!(cfg.tokens.len(), 1);
@@ -914,7 +967,7 @@ mod tests {
 
     #[test]
     fn load_price_feed_config_uses_env_when_set() {
-        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1}]"#;
+        let json = r#"[{"symbol":"BTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1}]"#;
         let cfg = load_price_feed_config(Some(json)).unwrap();
         assert_eq!(cfg.tokens.len(), 1);
         assert_eq!(cfg.tokens[0].symbol, "BTC");
