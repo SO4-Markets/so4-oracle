@@ -88,6 +88,7 @@ impl From<RpcError> for SubmitError {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SendTransactionResult {
     pub status: String,
+    #[serde(default)]
     pub hash: String,
     #[serde(rename = "errorResultXdr", default)]
     pub error_result_xdr: Option<String>,
@@ -152,13 +153,20 @@ async fn send_transaction_xdr(rpc_url: &str, signed_xdr: &str) -> Result<String,
 
     let result = parse_send_response(&body)?;
 
-    if result.status != "PENDING" {
-        return Err(SubmitError::Rejected {
+    // #965: Match on sendTransaction status explicitly:
+    // - PENDING: accepted by the node, proceed to poll.
+    // - DUPLICATE: already submitted and being processed under this hash, proceed to poll.
+    // - TRY_AGAIN_LATER: node submission queue is full, route as transient retryable RPC error.
+    // - ERROR / other: hard rejection.
+    match result.status.as_str() {
+        "PENDING" | "DUPLICATE" => Ok(result.hash),
+        "TRY_AGAIN_LATER" => Err(SubmitError::Rpc(RpcError::NetworkError(
+            "node submission queue is full (TRY_AGAIN_LATER)".to_string(),
+        ))),
+        _ => Err(SubmitError::Rejected {
             status: result.status,
-        });
+        }),
     }
-
-    Ok(result.hash)
 }
 
 /// Poll `getTransaction` until confirmed or until `MAX_POLL_ATTEMPTS` are exhausted.
@@ -300,6 +308,29 @@ mod tests {
         let r = parse_send_response(body).unwrap();
         assert_eq!(r.status, "PENDING");
         assert_eq!(r.hash, "abc123def456");
+    }
+
+    /// Verifies that a DUPLICATE sendTransaction response is parsed correctly (#965).
+    #[test]
+    fn parse_send_response_duplicate() {
+        let body = r#"{
+            "jsonrpc":"2.0","id":1,
+            "result":{"status":"DUPLICATE","hash":"dup_hash_789"}
+        }"#;
+        let r = parse_send_response(body).unwrap();
+        assert_eq!(r.status, "DUPLICATE");
+        assert_eq!(r.hash, "dup_hash_789");
+    }
+
+    /// Verifies that a TRY_AGAIN_LATER sendTransaction response is parsed correctly (#965).
+    #[test]
+    fn parse_send_response_try_again_later() {
+        let body = r#"{
+            "jsonrpc":"2.0","id":1,
+            "result":{"status":"TRY_AGAIN_LATER","hash":""}
+        }"#;
+        let r = parse_send_response(body).unwrap();
+        assert_eq!(r.status, "TRY_AGAIN_LATER");
     }
 
     /// Verifies that an ERROR status with errorResultXdr in a sendTransaction
@@ -854,6 +885,86 @@ mod tests {
             let result = parse_send_response(&response_body.to_string()).unwrap();
             assert_eq!(result.status, expected_status);
             assert_eq!(result.hash, "test_hash");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_submit_and_poll_success_path_with_duplicate_send() {
+        let mock_server = MockServer::start().await;
+
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let request_count = AtomicUsize::new(0);
+
+        let send_response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "status": "DUPLICATE",
+                "hash": "dup_tx_hash_456"
+            }
+        });
+
+        let get_response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "status": "SUCCESS",
+                "ledger": 67890
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(move |_: &wiremock::Request| {
+                let count = request_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    ResponseTemplate::new(200).set_body_json(send_response.clone())
+                } else {
+                    ResponseTemplate::new(200).set_body_json(get_response.clone())
+                }
+            })
+            .mount(&mock_server)
+            .await;
+
+        let signed_xdr = "AAAAAA==";
+        let rpc_url = mock_server.uri();
+
+        let result = submit_and_poll(&rpc_url, signed_xdr).await;
+
+        assert!(result.is_ok(), "Expected Ok on DUPLICATE, got: {:?}", result);
+        assert_eq!(result.unwrap(), 67890);
+    }
+
+    #[tokio::test]
+    async fn test_submit_and_poll_handles_try_again_later_as_transient_error() {
+        let mock_server = MockServer::start().await;
+
+        let send_response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "status": "TRY_AGAIN_LATER",
+                "hash": ""
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(send_response))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let signed_xdr = "AAAAAA==";
+        let rpc_url = mock_server.uri();
+
+        let result = submit_and_poll(&rpc_url, signed_xdr).await;
+
+        match result {
+            Err(SubmitError::Rpc(RpcError::NetworkError(msg))) => {
+                assert!(msg.contains("TRY_AGAIN_LATER"));
+            }
+            other => panic!("Expected transient NetworkError for TRY_AGAIN_LATER, got: {:?}", other),
         }
     }
 }
