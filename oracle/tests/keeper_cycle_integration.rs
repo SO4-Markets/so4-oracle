@@ -1015,3 +1015,250 @@ async fn keeper_cycle_does_not_blacklist_order_on_a_single_non_budget_failure() 
         "the consecutive-failure counter advances by one"
     );
 }
+
+#[tokio::test]
+async fn keeper_cycle_skips_set_prices_when_movement_below_submit_threshold_bps() {
+    let mock_server = MockServer::start().await;
+    let rpc_url = mock_server.uri();
+
+    let send_tx_count = Arc::new(AtomicUsize::new(0));
+    let send_tx_count_mock = Arc::clone(&send_tx_count);
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(move |req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            let method = body["method"].as_str().unwrap_or("");
+
+            match method {
+                "simulateTransaction" => {
+                    let op = body["params"]["transaction"]["operations"][0].clone();
+                    let contract = op["contract_id"].as_str().unwrap_or("");
+                    let method_name = op["method"].as_str().unwrap_or("");
+
+                    if contract == "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC" {
+                        if method_name == "get_order_count" {
+                            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1,
+                                "result": 1
+                            }))
+                        } else if method_name == "get_order_keys" {
+                            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1,
+                                "result": {
+                                    "vec": [{"bytes": "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233"}]
+                                }
+                            }))
+                        } else {
+                            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1,
+                                "result": 0
+                            }))
+                        }
+                    } else {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1,
+                            "result": 0
+                        }))
+                    }
+                }
+                "getAccount" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": {
+                        "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                        "sequence": "100",
+                        "subentries": 0, "inflationDestination": "", "homeDomain": "",
+                        "thresholds": {"low":1,"med":1,"high":1},
+                        "signers": [], "data": {}, "balances": []
+                    }
+                })),
+                "sendTransaction" => {
+                    send_tx_count_mock.fetch_add(1, Ordering::SeqCst);
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": {
+                            "status": "PENDING",
+                            "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        }
+                    }))
+                }
+                "getTransaction" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": {
+                        "status": "SUCCESS",
+                        "ledger": 50001,
+                        "diagnosticEventsXdr": []
+                    }
+                })),
+                _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -1, "message": "unknown method"}
+                })),
+            }
+        })
+        .mount(&mock_server)
+        .await;
+
+    let mut token = test_token();
+    token.submit_threshold_bps = 50; // 50 bps threshold
+    token.stale_after_seconds = 300;
+
+    let config = test_config_with_tokens(&rpc_url, "http://127.0.0.1:9", vec![token]);
+    let state = Arc::new(AppState::new(config));
+
+    // Cycle 1: initial price -> must submit set_prices on-chain
+    {
+        let mut cache = state.price_cache.write().await;
+        cache
+            .prices
+            .insert(TUSDC_KEY.to_string(), fresh_cached_price());
+    }
+
+    let result1 = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state)).await;
+    assert!(result1.is_ok());
+    let summary1 = result1.unwrap();
+    assert_eq!(summary1.orders_executed, 1);
+    // Cycle 1 sent 2 transactions: 1 for set_prices + 1 for execute_order
+    assert_eq!(send_tx_count.load(Ordering::SeqCst), 2);
+
+    // Cycle 2: identical price (0 bps movement, heartbeat active) -> set_prices must be skipped!
+    let result2 = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state)).await;
+    assert!(result2.is_ok());
+    let summary2 = result2.unwrap();
+    assert_eq!(summary2.orders_executed, 1);
+    // send_tx_count should only have incremented by 1 (only execute_order was sent, set_prices was skipped!)
+    assert_eq!(send_tx_count.load(Ordering::SeqCst), 3);
+
+    // Cycle 3: price moved by 100 bps (> 50 bps threshold) -> set_prices must be submitted again!
+    {
+        let mut cache = state.price_cache.write().await;
+        let mut new_price = fresh_cached_price();
+        // Increase median by 1% (100 bps)
+        new_price.median = new_price.median + (new_price.median / 100);
+        cache.prices.insert(TUSDC_KEY.to_string(), new_price);
+    }
+
+    let result3 = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state)).await;
+    assert!(result3.is_ok());
+    let summary3 = result3.unwrap();
+    assert_eq!(summary3.orders_executed, 1);
+    // Cycle 3 sent 2 transactions again: 1 for set_prices + 1 for execute_order (total = 5)
+    assert_eq!(send_tx_count.load(Ordering::SeqCst), 5);
+}
+
+#[tokio::test]
+async fn keeper_cycle_submits_set_prices_when_heartbeat_expires_despite_zero_movement() {
+    let mock_server = MockServer::start().await;
+    let rpc_url = mock_server.uri();
+
+    let send_tx_count = Arc::new(AtomicUsize::new(0));
+    let send_tx_count_mock = Arc::clone(&send_tx_count);
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(move |req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            let method = body["method"].as_str().unwrap_or("");
+
+            match method {
+                "simulateTransaction" => {
+                    let op = body["params"]["transaction"]["operations"][0].clone();
+                    let contract = op["contract_id"].as_str().unwrap_or("");
+                    let method_name = op["method"].as_str().unwrap_or("");
+
+                    if contract == "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC" {
+                        if method_name == "get_order_count" {
+                            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1,
+                                "result": 1
+                            }))
+                        } else if method_name == "get_order_keys" {
+                            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1,
+                                "result": {
+                                    "vec": [{"bytes": "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233"}]
+                                }
+                            }))
+                        } else {
+                            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1,
+                                "result": 0
+                            }))
+                        }
+                    } else {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1,
+                            "result": 0
+                        }))
+                    }
+                }
+                "getAccount" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": {
+                        "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                        "sequence": "100",
+                        "subentries": 0, "inflationDestination": "", "homeDomain": "",
+                        "thresholds": {"low":1,"med":1,"high":1},
+                        "signers": [], "data": {}, "balances": []
+                    }
+                })),
+                "sendTransaction" => {
+                    send_tx_count_mock.fetch_add(1, Ordering::SeqCst);
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": {
+                            "status": "PENDING",
+                            "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        }
+                    }))
+                }
+                "getTransaction" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": {
+                        "status": "SUCCESS",
+                        "ledger": 50001,
+                        "diagnosticEventsXdr": []
+                    }
+                })),
+                _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -1, "message": "unknown method"}
+                })),
+            }
+        })
+        .mount(&mock_server)
+        .await;
+
+    let mut token = test_token();
+    token.submit_threshold_bps = 50; // 50 bps threshold
+    token.stale_after_seconds = 300;
+
+    let config = test_config_with_tokens(&rpc_url, "http://127.0.0.1:9", vec![token]);
+    let state = Arc::new(AppState::new(config));
+
+    // Cycle 1: initial submission
+    {
+        let mut cache = state.price_cache.write().await;
+        cache
+            .prices
+            .insert(TUSDC_KEY.to_string(), fresh_cached_price());
+    }
+
+    let result1 = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state)).await;
+    assert!(result1.is_ok());
+    assert_eq!(send_tx_count.load(Ordering::SeqCst), 2);
+
+    // Simulate heartbeat expiration by aging last_submitted timestamp beyond stale_after_seconds (300s)
+    {
+        let mut cache = state.price_cache.write().await;
+        if let Some(last) = cache.last_submitted.get_mut(TUSDC_KEY) {
+            last.timestamp = last.timestamp.saturating_sub(400);
+        }
+    }
+
+    // Cycle 2: price has NOT moved, but heartbeat has expired -> set_prices must be submitted!
+    let result2 = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state)).await;
+    assert!(result2.is_ok());
+    let summary2 = result2.unwrap();
+    assert_eq!(summary2.orders_executed, 1);
+    // Cycle 2 should send 2 transactions again: 1 for set_prices + 1 for execute_order (total = 4)
+    assert_eq!(send_tx_count.load(Ordering::SeqCst), 4);
+}

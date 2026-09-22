@@ -9,8 +9,8 @@ use tracing::{error, info, warn};
 use crate::chain::scval;
 use crate::chain::tx_builder;
 use crate::state::{
-    AppState, CachedPrice, FailedSubmission, KeeperExecution, IN_FLIGHT_EXPIRY,
-    MAX_CONSECUTIVE_EXECUTION_FAILURES, MAX_CONSECUTIVE_FREEZE_FAILURES,
+    AppState, CachedPrice, FailedSubmission, KeeperExecution, LastSubmittedPrice,
+    IN_FLIGHT_EXPIRY, MAX_CONSECUTIVE_EXECUTION_FAILURES, MAX_CONSECUTIVE_FREEZE_FAILURES,
 };
 
 const ACCOUNT_SEQUENCE_RETRY_ATTEMPTS: u32 = 3;
@@ -229,10 +229,57 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         "found_pending_work"
     );
 
-    // Submit prices on-chain - only fresh prices are included
-    let tx_hash = set_prices_on_chain(&state, &fresh_prices).await?;
-    info!(hash = %tx_hash, "set_prices_confirmed");
-    tokio::time::sleep(Duration::from_millis(5000)).await;
+    // Submit prices on-chain - filter down to tokens exceeding submit_threshold_bps or heartbeat
+    let prices_to_submit = {
+        let cache = state.price_cache.read().await;
+        let tokens = &state.config.price_feed.tokens;
+
+        fresh_prices
+            .iter()
+            .filter_map(|(key, price)| {
+                let token = tokens.iter().find(|t| t.lookup_key() == *key)?;
+                let last_submitted = cache.last_submitted.get(key);
+                if should_submit_price(token, price, last_submitted, now) {
+                    Some((key.clone(), price.clone()))
+                } else {
+                    tracing::debug!(
+                        symbol = %token.symbol,
+                        threshold_bps = token.submit_threshold_bps,
+                        "skipping price submission: movement below submit_threshold_bps and heartbeat active"
+                    );
+                    None
+                }
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+
+    if !prices_to_submit.is_empty() {
+        let tx_hash = set_prices_on_chain(&state, &prices_to_submit).await?;
+        info!(
+            hash = %tx_hash,
+            submitted = prices_to_submit.len(),
+            total_fresh = fresh_prices.len(),
+            "set_prices_confirmed"
+        );
+        {
+            let mut cache = state.price_cache.write().await;
+            for (key, price) in &prices_to_submit {
+                cache.last_submitted.insert(
+                    key.clone(),
+                    LastSubmittedPrice {
+                        median: price.median,
+                        timestamp: price.timestamp,
+                    },
+                );
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(5000)).await;
+    } else {
+        info!(
+            fresh_tokens = fresh_prices.len(),
+            "all fresh prices within submit_threshold_bps and heartbeat active; skipping on-chain set_prices"
+        );
+    }
 
     let mut summary = CycleSummary {
         orders_executed: 0,
@@ -743,10 +790,38 @@ async fn get_pending_keys(
     Ok(keys)
 }
 
+/// Determine whether a fresh cached price should be submitted on-chain for a token,
+/// evaluating its movement against [`shared_config::TokenConfig::submit_threshold_bps`] and heartbeat freshness.
+///
+/// Returns `true` if:
+/// 1. The token has never been submitted on-chain during this process lifetime (`last_submitted` is None); OR
+/// 2. The relative price movement from the last submitted median is at least `submit_threshold_bps`; OR
+/// 3. The elapsed time since last submission meets or exceeds `stale_after_seconds` (heartbeat refresh).
+pub fn should_submit_price(
+    token: &shared_config::TokenConfig,
+    fresh_price: &CachedPrice,
+    last_submitted: Option<&LastSubmittedPrice>,
+    now: u64,
+) -> bool {
+    let Some(last) = last_submitted else {
+        // Never submitted before; must submit initial on-chain price.
+        return true;
+    };
+
+    let movement_bps = crate::prices::deviation_bps(fresh_price.median, last.median);
+    let heartbeat_elapsed = now.saturating_sub(last.timestamp) >= token.stale_after_seconds;
+
+    movement_bps >= token.submit_threshold_bps as f64 || heartbeat_elapsed
+}
+
 async fn set_prices_on_chain(
     state: &Arc<AppState>,
     prices: &BTreeMap<String, CachedPrice>,
 ) -> Result<String, String> {
+    if prices.is_empty() {
+        return Ok("no_prices_to_submit".to_string());
+    }
+
     let prices_vec: Vec<&CachedPrice> = prices.values().collect();
     let prices_scval = scval::encode_prices_vec(&prices_vec)?;
 
@@ -1205,5 +1280,144 @@ mod tests {
             .collect();
         assert_eq!(stale_filtered.len(), 1);
         assert_eq!(stale_filtered[0].1.symbol, "STALE");
+    }
+
+    fn test_token_config(submit_threshold_bps: u32, stale_after_seconds: u64) -> shared_config::TokenConfig {
+        shared_config::TokenConfig {
+            symbol: "TUSDC".to_string(),
+            display_symbol: Some("USDC".to_string()),
+            stellar_address: "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES".to_string(),
+            sources: vec!["fixed".to_string()],
+            fixed_price: Some("1000000000000000000000000000000".to_string()),
+            binance_symbol: None,
+            coinbase_symbol: None,
+            pyth_feed_id: None,
+            min_sources: 1,
+            max_deviation_bps: 100,
+            stale_after_seconds,
+            submit_threshold_bps,
+            min: 0.0,
+            max: 0.0,
+            sources_used: vec![],
+        }
+    }
+
+    #[test]
+    fn test_should_submit_price_initial_submission() {
+        let token = test_token_config(10, 60);
+        let price = CachedPrice {
+            token_address: token.stellar_address.clone(),
+            symbol: "TUSDC".to_string(),
+            display_symbol: "USDC".to_string(),
+            keeper_index: 0,
+            min: 1_000_000,
+            max: 1_000_000,
+            median: 1_000_000,
+            timestamp: 1000,
+            ledger_seq: 100,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+        assert!(should_submit_price(&token, &price, None, 1000));
+    }
+
+    #[test]
+    fn test_should_submit_price_movement_below_threshold_skips() {
+        let token = test_token_config(50, 60); // 50 bps threshold, 60s heartbeat
+        let last = LastSubmittedPrice {
+            median: 100_000,
+            timestamp: 1000,
+        };
+
+        // 10 bps movement (100_100 vs 100_000), elapsed 10s (< 60s heartbeat)
+        let price = CachedPrice {
+            token_address: token.stellar_address.clone(),
+            symbol: "TUSDC".to_string(),
+            display_symbol: "USDC".to_string(),
+            keeper_index: 0,
+            min: 100_100,
+            max: 100_100,
+            median: 100_100,
+            timestamp: 1010,
+            ledger_seq: 101,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+        assert!(!should_submit_price(&token, &price, Some(&last), 1010));
+    }
+
+    #[test]
+    fn test_should_submit_price_movement_at_or_above_threshold_submits() {
+        let token = test_token_config(50, 60); // 50 bps threshold
+        let last = LastSubmittedPrice {
+            median: 100_000,
+            timestamp: 1000,
+        };
+
+        // 50 bps movement (100_500 vs 100_000), elapsed 10s (< 60s)
+        let price = CachedPrice {
+            token_address: token.stellar_address.clone(),
+            symbol: "TUSDC".to_string(),
+            display_symbol: "USDC".to_string(),
+            keeper_index: 0,
+            min: 100_500,
+            max: 100_500,
+            median: 100_500,
+            timestamp: 1010,
+            ledger_seq: 101,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+        assert!(should_submit_price(&token, &price, Some(&last), 1010));
+    }
+
+    #[test]
+    fn test_should_submit_price_heartbeat_expired_submits_even_with_zero_movement() {
+        let token = test_token_config(50, 60);
+        let last = LastSubmittedPrice {
+            median: 100_000,
+            timestamp: 1000,
+        };
+
+        // Identical price (0 bps movement), but now = 1060 (elapsed 60s == stale_after_seconds)
+        let price = CachedPrice {
+            token_address: token.stellar_address.clone(),
+            symbol: "TUSDC".to_string(),
+            display_symbol: "USDC".to_string(),
+            keeper_index: 0,
+            min: 100_000,
+            max: 100_000,
+            median: 100_000,
+            timestamp: 1060,
+            ledger_seq: 101,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+        assert!(should_submit_price(&token, &price, Some(&last), 1060));
+        assert!(should_submit_price(&token, &price, Some(&last), 1070));
+    }
+
+    #[test]
+    fn test_should_submit_price_zero_threshold_always_submits() {
+        let token = test_token_config(0, 60); // 0 bps threshold
+        let last = LastSubmittedPrice {
+            median: 100_000,
+            timestamp: 1000,
+        };
+
+        let price = CachedPrice {
+            token_address: token.stellar_address.clone(),
+            symbol: "TUSDC".to_string(),
+            display_symbol: "USDC".to_string(),
+            keeper_index: 0,
+            min: 100_000,
+            max: 100_000,
+            median: 100_000,
+            timestamp: 1010,
+            ledger_seq: 101,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+        assert!(should_submit_price(&token, &price, Some(&last), 1010));
     }
 }

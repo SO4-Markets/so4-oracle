@@ -31,11 +31,20 @@ pub struct CachedPrice {
     pub signature: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LastSubmittedPrice {
+    #[serde(serialize_with = "ser_i128_str")]
+    pub median: i128,
+    pub timestamp: u64,
+}
+
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct PriceCache {
     pub prices: BTreeMap<String, CachedPrice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_updated: Option<SystemTime>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub last_submitted: HashMap<String, LastSubmittedPrice>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
