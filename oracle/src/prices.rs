@@ -68,6 +68,34 @@ pub fn aggregate_prices(
         ));
     }
 
+    // #1038: With exactly 2 sources, MAD-based outlier detection is mathematically
+    // a no-op (dev == mad identically for both prices, so dev > 6*mad is never true).
+    // An outlier cannot be statistically isolated without a 3rd reference, so we enforce
+    // an explicit divergence guard against max_deviation_bps. If the 2 sources diverge beyond
+    // max_deviation_bps, neither can be safely trusted over the other, and the update is rejected.
+    if filtered_prices.len() == 2 {
+        let median = (filtered_prices[0] + filtered_prices[1]) / 2;
+        let dev = deviation_bps(filtered_prices[0], median);
+        if dev > max_deviation_bps as f64 {
+            let rejected_sources = vec![
+                RejectedSource {
+                    source: filtered_sources[0].clone(),
+                    price: filtered_prices[0],
+                    deviation_bps: dev,
+                },
+                RejectedSource {
+                    source: filtered_sources[1].clone(),
+                    price: filtered_prices[1],
+                    deviation_bps: dev,
+                },
+            ];
+            return Err(format!(
+                "insufficient sources after filtering: 2 price sources diverged by {:.2} bps, exceeding max_deviation_bps ({}) (rejected: {:?})",
+                dev, max_deviation_bps, rejected_sources
+            ));
+        }
+    }
+
     let props = compute_confidence_interval_with_spread(&filtered_prices, max_deviation_bps)
         .ok_or_else(|| "cannot compute confidence interval".to_string())?;
     let median = compute_median_allow_single(&filtered_prices).unwrap_or(props.min);
@@ -157,6 +185,15 @@ pub struct OutlierFilterResult {
 /// 6x the median absolute deviation (MAD). If MAD is zero (a degenerate/flat
 /// cluster where at least half the inputs have identical deviation), fall back
 /// to rejecting prices more than 3 standard deviations from the median.
+///
+/// Note on small sample sizes (#1038):
+/// For inputs with fewer than 3 sources (N <= 2), MAD-based outlier filtering
+/// is mathematically a no-op: with N=2, median deviation exactly equals MAD, so
+/// `dev > 6.0 * mad` is never true for any positive MAD, and stddev fallback is
+/// unreachable. Statistical outlier rejection is underdetermined for N=2 (neither
+/// source can be identified as the outlier without a third reference point).
+/// Callers such as [`aggregate_prices`] enforce an external divergence threshold
+/// (e.g., `max_deviation_bps`) when evaluating 2-source inputs.
 pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResult {
     if prices.is_empty() {
         return OutlierFilterResult {
@@ -769,5 +806,48 @@ mod tests {
         assert_eq!(result.filtered_prices.len(), 1);
         assert_eq!(result.filtered_prices[0], 42);
         assert_eq!(result.rejected.len(), 0);
+    }
+
+    #[test]
+    fn test_two_sources_within_max_deviation_passes() {
+        let prices = vec![10_000i128, 10_050];
+        let sources = vec!["src1".to_string(), "src2".to_string()];
+        // median = 10025, dev = 25 / 10025 * 10000 = ~24.94 bps <= 50 bps
+        let res = aggregate_prices(&prices, &sources, 2, 50).expect("should succeed");
+        assert_eq!(res.median, 10_025);
+        assert_eq!(res.sources_used.len(), 2);
+        assert!(res.rejected_sources.is_empty());
+    }
+
+    #[test]
+    fn test_two_sources_exceeding_max_deviation_rejected() {
+        let prices = vec![10_000i128, 11_000];
+        let sources = vec!["src1".to_string(), "src2".to_string()];
+        // median = 10500, dev = 500 / 10500 * 10000 = ~476.19 bps > 100 bps
+        let err = aggregate_prices(&prices, &sources, 2, 100)
+            .expect_err("should reject divergent sources");
+        assert!(err.contains("diverged by"));
+        assert!(err.contains("exceeding max_deviation_bps (100)"));
+    }
+
+    #[test]
+    fn test_two_sources_extreme_divergence_rejected() {
+        let prices = vec![100i128, 10_000]; // 100x divergence
+        let sources = vec!["honest".to_string(), "corrupted".to_string()];
+        let err = aggregate_prices(&prices, &sources, 2, 500)
+            .expect_err("extreme 2-source divergence must be rejected");
+        assert!(err.contains("diverged by"));
+        assert!(err.contains("exceeding max_deviation_bps (500)"));
+    }
+
+    #[test]
+    fn test_filter_outliers_two_sources_mathematical_noop_documented() {
+        // #1038: Demonstrates that raw filter_outliers with N=2 cannot reject either source,
+        // which is why aggregate_prices enforces the 2-source max_deviation_bps guard.
+        let prices = vec![100i128, 10_000];
+        let sources = vec!["s1".to_string(), "s2".to_string()];
+        let res = filter_outliers(&prices, &sources);
+        assert_eq!(res.filtered_prices.len(), 2);
+        assert!(res.rejected.is_empty());
     }
 }
