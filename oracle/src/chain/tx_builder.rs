@@ -150,7 +150,7 @@ pub fn sign_transaction(
     ))
 }
 
-fn compute_network_id(passphrase: &str) -> [u8; 32] {
+pub fn compute_network_id(passphrase: &str) -> [u8; 32] {
     sha256_hash(passphrase.as_bytes())
 }
 
@@ -185,6 +185,7 @@ mod tests {
     #[test]
     fn test_sign_transaction_produces_base64() {
         use base64::Engine;
+        use crate::network_config::TESTNET_PASSPHRASE;
 
         let tx = build_invoke_tx(
             "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
@@ -200,7 +201,7 @@ mod tests {
         let xdr = sign_transaction(
             &tx,
             "1111111111111111111111111111111111111111111111111111111111111111",
-            "Test SDF Network ; September 2015",
+            TESTNET_PASSPHRASE,
         )
         .unwrap();
 
@@ -209,6 +210,83 @@ mod tests {
             .decode(&xdr)
             .unwrap();
         assert!(!decoded.is_empty());
+    }
+
+    #[test]
+    fn test_compute_network_id_matches_network_config_passphrases() {
+        use crate::network_config::{FUTURENET_PASSPHRASE, MAINNET_PASSPHRASE, TESTNET_PASSPHRASE};
+
+        // Well-known public network ID hashes documented by Stellar Development Foundation:
+        // Testnet: SHA-256("Test SDF Network ; September 2015")
+        // Mainnet: SHA-256("Public Global Stellar Network ; September 2015")
+        // Futurenet: SHA-256("Test SDF Futurenet ; October 2022")
+        let expected_testnet =
+            hex::decode("cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472")
+                .expect("valid hex");
+        let expected_mainnet =
+            hex::decode("7ac33997544e3175d266bd022439b22cdb16508c01163f26e5cb2a3e1045a979")
+                .expect("valid hex");
+        let expected_futurenet =
+            hex::decode("0a164dacc6824021b86ab4ecbe39afea12c91c7572256570f8a79a767e171f48")
+                .expect("valid hex");
+
+        assert_eq!(
+            compute_network_id(TESTNET_PASSPHRASE).to_vec(),
+            expected_testnet,
+            "compute_network_id failed for TESTNET_PASSPHRASE"
+        );
+        assert_eq!(
+            compute_network_id(MAINNET_PASSPHRASE).to_vec(),
+            expected_mainnet,
+            "compute_network_id failed for MAINNET_PASSPHRASE"
+        );
+        assert_eq!(
+            compute_network_id(FUTURENET_PASSPHRASE).to_vec(),
+            expected_futurenet,
+            "compute_network_id failed for FUTURENET_PASSPHRASE"
+        );
+
+        // Also assert equivalence against canonical literal passphrases
+        assert_eq!(
+            compute_network_id(TESTNET_PASSPHRASE),
+            compute_network_id("Test SDF Network ; September 2015")
+        );
+        assert_eq!(
+            compute_network_id(MAINNET_PASSPHRASE),
+            compute_network_id("Public Global Stellar Network ; September 2015")
+        );
+    }
+
+    #[test]
+    fn test_sign_transaction_with_network_config_passphrases() {
+        use crate::network_config::{MAINNET_PASSPHRASE, TESTNET_PASSPHRASE};
+
+        let tx = build_invoke_tx(
+            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY",
+            "set_prices",
+            vec![ScVal::Void],
+            100,
+            1,
+            None,
+        )
+        .unwrap();
+
+        let xdr_testnet = sign_transaction(
+            &tx,
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            TESTNET_PASSPHRASE,
+        )
+        .unwrap();
+        assert!(!xdr_testnet.is_empty());
+
+        let xdr_mainnet = sign_transaction(
+            &tx,
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            MAINNET_PASSPHRASE,
+        )
+        .unwrap();
+        assert!(!xdr_mainnet.is_empty());
     }
 
     #[test]
