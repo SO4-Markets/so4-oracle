@@ -133,10 +133,14 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
         }
     }
 
-    // Check cached external RPC and keeper balance readiness result (3s TTL)
+    // Check cached external RPC and keeper balance readiness result (3s TTL).
+    // Hold a single write lock across the entire check-then-populate sequence
+    // so concurrent requests during a cache miss are coalesced into one
+    // outbound check rather than each independently triggering
+    // perform_external_ready_checks (#1021).
     let metrics = state.metrics.to_response();
     {
-        let cache = state.ready_cache.read().await;
+        let mut cache = state.ready_cache.write().await;
         if let Some(last) = cache.last_checked {
             if last.elapsed() < std::time::Duration::from_secs(3) {
                 if let Some((status, msg)) = cache.last_error.clone() {
@@ -163,25 +167,22 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
                 }));
             }
         }
-    }
 
-    // #1042 — cap the total worst-case duration of external checks so the
-    // endpoint always returns 503 promptly instead of hanging past the
-    // platform's health-check timeout (Fly: 20s, Railway: 30s).
-    let check_res = match tokio::time::timeout(
-        Duration::from_secs(READY_CHECK_TIMEOUT_SECS),
-        perform_external_ready_checks(&state),
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(_elapsed) => Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "ready_check_timeout",
-        )),
-    };
-    {
-        let mut cache = state.ready_cache.write().await;
+        // #1042 — cap the total worst-case duration of external checks so the
+        // endpoint always returns 503 promptly instead of hanging past the
+        // platform's health-check timeout (Fly: 20s, Railway: 30s).
+        let check_res = match tokio::time::timeout(
+            Duration::from_secs(READY_CHECK_TIMEOUT_SECS),
+            perform_external_ready_checks(&state),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ready_check_timeout",
+            )),
+        };
         cache.last_checked = Some(std::time::Instant::now());
         match check_res {
             Ok(()) => {
