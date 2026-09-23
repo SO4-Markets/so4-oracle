@@ -42,7 +42,7 @@ READER=CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC
 DATA_STORE=CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J
 ROLE_STORE=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q
 NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
-RPC_URL=https://soroban-testnet.stellar.org
+STELLAR_RPC_URL=https://soroban-testnet.stellar.org
 ```
 
 ## Required Environment Variables.
@@ -136,6 +136,13 @@ docker build -t so4-oracle .
 # Run with environment variables
 docker run -p 8080:8080 \
   -e STELLAR_RPC_URL=https://soroban-testnet.stellar.org \
+  -e ORACLE_CONTRACT_ID=CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY \
+  -e ROLE_STORE=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q \
+  -e DATA_STORE=CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J \
+  -e ORDER_HANDLER=CC35OFZVWUTAZPV3B6UKSDVAVORZEWUUMOMTHO33H4YR4C5FKPEFODKY \
+  -e DEPOSIT_HANDLER=CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C \
+  -e WITHDRAWAL_HANDLER=CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE \
+  -e READER=CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC \
   -e KEEPER_PRIVATE_KEY=<key> \
   -e KEEPER_SECRET_KEY=<secret> \
   -e KEEPER_ACCOUNT_ID=<account> \
@@ -145,6 +152,16 @@ docker run -p 8080:8080 \
 ### Systemd
 
 ```bash
+# Build the release binary
+cargo build --release --bin oracle
+
+# Create the deployment directory
+sudo mkdir -p /opt/oracle
+
+# Copy the binary
+sudo cp target/release/oracle /opt/oracle/oracle
+sudo chown oracle:oracle /opt/oracle/oracle
+
 # Copy the service file
 sudo cp oracle.service /etc/systemd/system/
 
@@ -152,6 +169,7 @@ sudo cp oracle.service /etc/systemd/system/
 sudo cp .env /opt/oracle/.env
 
 # Enable and start
+sudo systemctl daemon-reload
 sudo systemctl enable oracle
 sudo systemctl start oracle
 ```
