@@ -224,4 +224,28 @@ mod tests {
         );
         assert!(err.is_err());
     }
+
+    /// Regression test for #1025: assert that `compute_network_id` produces the
+    /// well-known network ID hash for the real Stellar testnet passphrase. This
+    /// catches silent corruption of `TESTNET_PASSPHRASE` in `network_config.rs`.
+    #[test]
+    fn compute_network_id_matches_known_testnet_hash() {
+        let expected = sha256_hash(b"Test SDF Network ; September 2015");
+        let actual = compute_network_id(crate::network_config::TESTNET_PASSPHRASE);
+        assert_eq!(
+            actual, expected,
+            "TESTNET_PASSPHRASE in network_config.rs does not match the well-known testnet passphrase"
+        );
+    }
+
+    /// Regression test for #1025: same check for mainnet.
+    #[test]
+    fn compute_network_id_matches_known_mainnet_hash() {
+        let expected = sha256_hash(b"Public Global Stellar Network ; November 2015");
+        let actual = compute_network_id(crate::network_config::MAINNET_PASSPHRASE);
+        assert_eq!(
+            actual, expected,
+            "MAINNET_PASSPHRASE in network_config.rs does not match the well-known mainnet passphrase"
+        );
+    }
 }
