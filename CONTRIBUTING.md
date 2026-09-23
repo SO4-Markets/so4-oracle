@@ -152,6 +152,24 @@ If you are using an autonomous coding agent (or if you are an agent), you must r
 
 ---
 
+## Merge Strategy and Branch Lifecycle Policy
+
+To maintain a clean, linear, and auditable history on `main`, `so4-oracle` enforces **Squash and Merge** exclusively for all pull requests:
+
+- **Squash-Only Merges**: Every PR must be squashed into a single atomic commit matching the Conventional Commit format (`type(scope): description (#PR)`). Disabling merge commits and rebase merges prevents multi-commit WIP noise and preserves a uniform history shape across external contributions.
+- **Automatic Branch Deletion**: Merged feature and fix branches are retired and deleted immediately upon merge via repository settings and automated workflow (`.github/workflows/delete-merged-branches.yml`), eliminating stale branch clutter and preventing accidental re-pushes to retired branch names.
+- **Enforced Repository Configuration**:
+  Maintainers configure these rules in GitHub Repository Settings (or via GitHub CLI):
+  ```bash
+  gh api -X PATCH repos/SO4-Markets/so4-oracle \
+    --field allow_squash_merge=true \
+    --field allow_merge_commit=false \
+    --field allow_rebase_merge=false \
+    --field delete_branch_on_merge=true
+  ```
+
+---
+
 ## Code Style
 
 - `cargo fmt` is enforced in CI. Run it before pushing.
