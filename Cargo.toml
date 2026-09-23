@@ -11,9 +11,11 @@ mismatched_lifetime_syntaxes = "allow"
 
 # Aligned with railway.json healthcheck: setting healthcheckPath to /ready
 # ensures the probe reflects real liveness (/ready inspects state.cycle_status).
-# Setting panic = "abort" ensures any unexpected panic crashes the process,
-# allowing the ON_FAILURE restart policy to detect and restart it.
+# Using panic = "unwind" ensures that panics inside inbound HTTP request handlers
+# are caught by tower_http's CatchPanicLayer (preventing remote DoS, #1044) and
+# background task panics can be observed and gracefully drained in main.rs (#962).
 [profile.release]
 overflow-checks = true
-panic = "abort"
+panic = "unwind"
+
 

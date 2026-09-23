@@ -10,12 +10,35 @@ use axum::routing::{delete, get};
 use axum::{Json, Router};
 use serde::Serialize;
 use std::time::Duration;
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
 use crate::state::AppState;
+
+/// Handles any panic originating inside an inbound HTTP request handler (#1044).
+///
+/// Prevents a panicking handler from aborting the entire process, returning the
+/// standard API error 500 JSON envelope `{"error": "internal_server_error"}` instead.
+pub fn handle_panic(err: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    let details = if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = err.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        "unknown panic payload".to_string()
+    };
+    tracing::error!(panic = %details, "HTTP request handler panicked; caught by CatchPanicLayer");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorBody {
+            error: "internal_server_error".to_string(),
+        }),
+    )
+        .into_response()
+}
 
 pub mod admin;
 pub mod prices;
@@ -224,6 +247,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // `make_span_with` reads it; otherwise every span's `request_id` is
         // "" (#790). `PropagateRequestIdLayer` only needs to run after the
         // handler, so it stays innermost.
+        // `CatchPanicLayer` sits closest to the handler to catch any handler panic
+        // and convert it into a standard 500 JSON response before it can crash the process (#1044).
+        .layer(CatchPanicLayer::custom(handle_panic))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(trace_layer)
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -300,4 +326,59 @@ mod tests {
             "admin token found in metrics"
         );
     }
+
+    #[tokio::test]
+    async fn test_handle_panic_returns_500_json_error() {
+        use axum::http::StatusCode;
+
+        let panic_payload = Box::new("unexpected panic message");
+        let response = super::handle_panic(panic_payload);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(content_type.contains("application/json"));
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"], "internal_server_error");
+    }
+
+    #[tokio::test]
+    async fn test_catch_panic_layer_catches_handler_panic() {
+        use axum::http::StatusCode;
+        use axum::routing::get;
+        use axum::Router;
+        use tower_http::catch_panic::CatchPanicLayer;
+
+        let test_router = Router::new()
+            .route(
+                "/panic",
+                get(|| async -> &'static str {
+                    panic!("simulated handler panic");
+                }),
+            )
+            .layer(CatchPanicLayer::custom(super::handle_panic));
+
+        let req = Request::builder()
+            .uri("/panic")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = test_router.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"], "internal_server_error");
+    }
 }
+
