@@ -13,6 +13,11 @@ use crate::state::{AppState, CachedPrice, FailedSubmission};
 
 const READY_BALANCE_RETRY_ATTEMPTS: u32 = 3;
 const READY_BALANCE_RETRY_BASE_DELAY_MS: u64 = 100;
+/// Hard cap on the entire `/ready` external-check path (RPC reachability +
+/// keeper balance with retries). Must stay below both Fly's and Railway's
+/// health-check timeouts so the service returns 503 promptly instead of
+/// hanging until the platform probe kills it (#1042).
+const READY_CHECK_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Deserialize)]
 pub struct FailedSubmissionsQuery {
@@ -160,7 +165,21 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
         }
     }
 
-    let check_res = perform_external_ready_checks(&state).await;
+    // #1042 — cap the total worst-case duration of external checks so the
+    // endpoint always returns 503 promptly instead of hanging past the
+    // platform's health-check timeout (Fly: 20s, Railway: 30s).
+    let check_res = match tokio::time::timeout(
+        Duration::from_secs(READY_CHECK_TIMEOUT_SECS),
+        perform_external_ready_checks(&state),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ready_check_timeout",
+        )),
+    };
     {
         let mut cache = state.ready_cache.write().await;
         cache.last_checked = Some(std::time::Instant::now());
