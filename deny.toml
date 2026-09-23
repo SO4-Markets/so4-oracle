@@ -25,8 +25,118 @@ expression = "MIT AND ISC AND OpenSSL"
 license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
+
+# Explicit exemptions for transitive multi-version dependency splits (#1040).
+# Allows existing upstream crate splits while strictly denying any new multiple-version bloat in CI.
+[[bans.skip]]
+name = "stellar-strkey"
+reason = "Transitive dependency split across stellar-xdr and stellar-rpc-client (#1007, #970)"
+
+[[bans.skip]]
+name = "getrandom"
+reason = "Transitive dependency split across rand and reqwest/ring (#1028)"
+
+[[bans.skip]]
+name = "tower-http"
+reason = "Transitive dependency split between axum 0.8 and shared dependencies (#1009)"
+
+[[bans.skip]]
+name = "thiserror"
+reason = "Transitive dependency split across 1.x and 2.x (#1040)"
+
+[[bans.skip]]
+name = "thiserror-impl"
+reason = "Transitive dependency split across 1.x and 2.x (#1040)"
+
+[[bans.skip]]
+name = "indexmap"
+reason = "Transitive dependency split across 1.x and 2.x (#1040)"
+
+[[bans.skip]]
+name = "schemars"
+reason = "Transitive dependency split across stellar-xdr and jsonrpsee (#1040)"
+
+[[bans.skip]]
+name = "rustls-platform-verifier"
+reason = "Transitive dependency split pulled via jsonrpsee (#1028)"
+
+[[bans.skip]]
+name = "webpki-root-certs"
+reason = "Transitive dependency split pulled via TLS trust chains (#1028)"
+
+[[bans.skip]]
+name = "heapless"
+reason = "Transitive dependency split cascading from stellar-strkey (#1051)"
+
+[[bans.skip]]
+name = "rand"
+reason = "Transitive dependency split between rand 0.8 and 0.9 (#1040)"
+
+[[bans.skip]]
+name = "rand_core"
+reason = "Transitive dependency split between rand_core 0.6 and 0.9 (#1040)"
+
+[[bans.skip]]
+name = "rand_chacha"
+reason = "Transitive dependency split between rand_chacha 0.3 and 0.9 (#1040)"
+
+[[bans.skip]]
+name = "hashbrown"
+reason = "Transitive dependency split across indexmap versions (#1040)"
+
+[[bans.skip]]
+name = "crate-git-revision"
+reason = "Transitive build-time dependency split (#1040)"
+
+[[bans.skip]]
+name = "jni"
+reason = "Transitive platform-binding dependency split (#1040)"
+
+[[bans.skip]]
+name = "jni-sys"
+reason = "Transitive platform-binding dependency split (#1040)"
+
+[[bans.skip]]
+name = "r-efi"
+reason = "Transitive UEFI platform dependency split (#1040)"
+
+[[bans.skip]]
+name = "windows-sys"
+reason = "Transitive Windows API dependency split (#1040)"
+
+[[bans.skip]]
+name = "windows-targets"
+reason = "Transitive Windows targets dependency split (#1040)"
+
+[[bans.skip]]
+name = "windows_aarch64_gnullvm"
+reason = "Transitive Windows targets dependency split (#1040)"
+
+[[bans.skip]]
+name = "windows_aarch64_msvc"
+reason = "Transitive Windows targets dependency split (#1040)"
+
+[[bans.skip]]
+name = "windows_i686_gnu"
+reason = "Transitive Windows targets dependency split (#1040)"
+
+[[bans.skip]]
+name = "windows_i686_msvc"
+reason = "Transitive Windows targets dependency split (#1040)"
+
+[[bans.skip]]
+name = "windows_x86_64_gnu"
+reason = "Transitive Windows targets dependency split (#1040)"
+
+[[bans.skip]]
+name = "windows_x86_64_gnullvm"
+reason = "Transitive Windows targets dependency split (#1040)"
+
+[[bans.skip]]
+name = "windows_x86_64_msvc"
+reason = "Transitive Windows targets dependency split (#1040)"
 
 [sources]
 unknown-registry = "warn"
