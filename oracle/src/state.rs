@@ -166,13 +166,13 @@ pub struct AppState {
     /// Once a key reaches MAX_CONSECUTIVE_FREEZE_FAILURES it is added to
     /// `frozen_order_blacklist` and never retried again (#498).
     pub freeze_failure_counts: Arc<Mutex<HashMap<String, u32>>>,
-    /// Order keys that have been permanently abandoned after too many
+    /// Order, deposit, or withdrawal keys that have been permanently abandoned after too many
     /// consecutive freeze failures (#498) or execute failures of any other
-    /// kind (#803).
+    /// kind (#803, #892).
     pub frozen_order_blacklist: Arc<Mutex<HashMap<String, u32>>>,
-    /// Per-order-key count of consecutive `execute_order` failures of any
-    /// kind. Reset on the first success. Once a key reaches
-    /// MAX_CONSECUTIVE_EXECUTION_FAILURES it is blacklisted (#803).
+    /// Per-key count of consecutive execute failures of any
+    /// kind across orders, deposits, and withdrawals. Reset on the first success. Once a key reaches
+    /// MAX_CONSECUTIVE_EXECUTION_FAILURES it is blacklisted (#803, #892).
     pub execution_failure_counts: Arc<Mutex<HashMap<String, u32>>>,
     /// Tracks whether the keeper balance is currently below the minimum.
     /// Scoped to AppState instead of a bare process-global to avoid races

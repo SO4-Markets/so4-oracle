@@ -491,6 +491,19 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     }
 
     for deposit_key in &deposit_keys {
+        // Skip permanently blacklisted deposits — retrying burns fee attempts (#498, #892).
+        {
+            let blacklist = state.frozen_order_blacklist.lock().await;
+            if blacklist.contains_key(deposit_key.as_str()) {
+                error!(
+                    key = %deposit_key,
+                    "deposit_key permanently blacklisted after repeated execution failures; \
+                     manual intervention required to clear"
+                );
+                summary.errors += 1;
+                continue;
+            }
+        }
         {
             let mut in_flight = state.in_flight_keys.lock().await;
             if let Some(inserted_at) = in_flight.get(deposit_key) {
@@ -521,6 +534,12 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             Ok(tx_hash) => {
                 state.in_flight_keys.lock().await.remove(deposit_key);
                 summary.deposits_executed += 1;
+                // Clear any accumulated failure counts on success (#892).
+                state
+                    .execution_failure_counts
+                    .lock()
+                    .await
+                    .remove(deposit_key.as_str());
                 record_execution(
                     &state,
                     "execute_deposit",
@@ -555,6 +574,42 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 state.in_flight_keys.lock().await.remove(deposit_key);
                 summary.errors += 1;
                 warn!(key = %deposit_key, %error, "deposit_execution_failed");
+
+                // Track consecutive execution failures and abandon permanently broken deposits (#803, #892).
+                let consecutive_exec_failures = {
+                    let mut counts = state.execution_failure_counts.lock().await;
+                    let count = counts.entry(deposit_key.clone()).or_insert(0);
+                    *count += 1;
+                    *count
+                };
+                if consecutive_exec_failures >= MAX_CONSECUTIVE_EXECUTION_FAILURES {
+                    let already_blacklisted = state
+                        .frozen_order_blacklist
+                        .lock()
+                        .await
+                        .contains_key(deposit_key.as_str());
+                    if !already_blacklisted {
+                        state
+                            .frozen_order_blacklist
+                            .lock()
+                            .await
+                            .insert(deposit_key.clone(), consecutive_exec_failures);
+                        state
+                            .execution_failure_counts
+                            .lock()
+                            .await
+                            .remove(deposit_key.as_str());
+                        error!(
+                            key = %deposit_key,
+                            consecutive_failures = consecutive_exec_failures,
+                            max = MAX_CONSECUTIVE_EXECUTION_FAILURES,
+                            "ALERT: deposit_key blacklisted after {} consecutive execute_deposit \
+                             failures — manual intervention required to clear",
+                            MAX_CONSECUTIVE_EXECUTION_FAILURES
+                        );
+                    }
+                }
+
                 record_error(
                     &state,
                     &format!("execute_deposit:{}", deposit_key),
@@ -576,6 +631,19 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     }
 
     for withdrawal_key in &withdrawal_keys {
+        // Skip permanently blacklisted withdrawals — retrying burns fee attempts (#498, #892).
+        {
+            let blacklist = state.frozen_order_blacklist.lock().await;
+            if blacklist.contains_key(withdrawal_key.as_str()) {
+                error!(
+                    key = %withdrawal_key,
+                    "withdrawal_key permanently blacklisted after repeated execution failures; \
+                     manual intervention required to clear"
+                );
+                summary.errors += 1;
+                continue;
+            }
+        }
         {
             let mut in_flight = state.in_flight_keys.lock().await;
             if let Some(inserted_at) = in_flight.get(withdrawal_key) {
@@ -606,6 +674,12 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             Ok(tx_hash) => {
                 state.in_flight_keys.lock().await.remove(withdrawal_key);
                 summary.withdrawals_executed += 1;
+                // Clear any accumulated failure counts on success (#892).
+                state
+                    .execution_failure_counts
+                    .lock()
+                    .await
+                    .remove(withdrawal_key.as_str());
                 record_execution(
                     &state,
                     "execute_withdrawal",
@@ -640,6 +714,42 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 state.in_flight_keys.lock().await.remove(withdrawal_key);
                 summary.errors += 1;
                 warn!(key = %withdrawal_key, %error, "withdrawal_execution_failed");
+
+                // Track consecutive execution failures and abandon permanently broken withdrawals (#803, #892).
+                let consecutive_exec_failures = {
+                    let mut counts = state.execution_failure_counts.lock().await;
+                    let count = counts.entry(withdrawal_key.clone()).or_insert(0);
+                    *count += 1;
+                    *count
+                };
+                if consecutive_exec_failures >= MAX_CONSECUTIVE_EXECUTION_FAILURES {
+                    let already_blacklisted = state
+                        .frozen_order_blacklist
+                        .lock()
+                        .await
+                        .contains_key(withdrawal_key.as_str());
+                    if !already_blacklisted {
+                        state
+                            .frozen_order_blacklist
+                            .lock()
+                            .await
+                            .insert(withdrawal_key.clone(), consecutive_exec_failures);
+                        state
+                            .execution_failure_counts
+                            .lock()
+                            .await
+                            .remove(withdrawal_key.as_str());
+                        error!(
+                            key = %withdrawal_key,
+                            consecutive_failures = consecutive_exec_failures,
+                            max = MAX_CONSECUTIVE_EXECUTION_FAILURES,
+                            "ALERT: withdrawal_key blacklisted after {} consecutive execute_withdrawal \
+                             failures — manual intervention required to clear",
+                            MAX_CONSECUTIVE_EXECUTION_FAILURES
+                        );
+                    }
+                }
+
                 record_error(
                     &state,
                     &format!("execute_withdrawal:{}", withdrawal_key),

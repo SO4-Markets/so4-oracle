@@ -1015,3 +1015,527 @@ async fn keeper_cycle_does_not_blacklist_order_on_a_single_non_budget_failure() 
         "the consecutive-failure counter advances by one"
     );
 }
+
+// ── #892: deposits and withdrawals freeze/blacklist protection ───────────────
+
+fn mount_deposit_exec_always_fails(
+    mock_server_uri_submissions: Arc<AtomicUsize>,
+) -> impl Fn(&Request) -> ResponseTemplate + Send + Sync {
+    move |req: &Request| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        match body["method"].as_str().unwrap_or("") {
+            "simulateTransaction" => {
+                let op = body["params"]["transaction"]["operations"][0].clone();
+                let contract = op["contract_id"].as_str().unwrap_or("");
+                let method_name = op["method"].as_str().unwrap_or("");
+                if contract == "CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C" {
+                    if method_name == "get_deposit_count" {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1, "result": 1
+                        }))
+                    } else if method_name == "get_deposit_keys" {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1,
+                            "result": { "vec": [{"bytes": REPEAT_FAIL_KEY}] }
+                        }))
+                    } else {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1, "result": 0
+                        }))
+                    }
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1, "result": 0
+                    }))
+                }
+            }
+            "getAccount" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {
+                    "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                    "sequence": "100",
+                    "subentries": 0, "inflationDestination": "", "homeDomain": "",
+                    "thresholds": {"low":1,"med":1,"high":1},
+                    "signers": [], "data": {}, "balances": []
+                }
+            })),
+            "sendTransaction" => {
+                let nth = mock_server_uri_submissions.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": { "status": "PENDING", "hash": submission_hash(nth) }
+                }))
+            }
+            "getTransaction" => {
+                let body_obj: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let tx_hash = body_obj["params"]["hash"].as_str().unwrap_or("");
+                if submission_index(tx_hash) % 2 == 1 {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": {
+                            "status": "FAILED",
+                            "ledger": 50001,
+                            "diagnosticEventsXdr": ["HostError: Error(Contract, #9) deposit failed"]
+                        }
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": { "status": "SUCCESS", "ledger": 50002, "diagnosticEventsXdr": [] }
+                    }))
+                }
+            }
+            _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": {"code": -1, "message": "unknown method"}
+            })),
+        }
+    }
+}
+
+fn mount_withdrawal_exec_always_fails(
+    mock_server_uri_submissions: Arc<AtomicUsize>,
+) -> impl Fn(&Request) -> ResponseTemplate + Send + Sync {
+    move |req: &Request| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        match body["method"].as_str().unwrap_or("") {
+            "simulateTransaction" => {
+                let op = body["params"]["transaction"]["operations"][0].clone();
+                let contract = op["contract_id"].as_str().unwrap_or("");
+                let method_name = op["method"].as_str().unwrap_or("");
+                if contract == "CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE" {
+                    if method_name == "get_withdrawal_count" {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1, "result": 1
+                        }))
+                    } else if method_name == "get_withdrawal_keys" {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1,
+                            "result": { "vec": [{"bytes": REPEAT_FAIL_KEY}] }
+                        }))
+                    } else {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1, "result": 0
+                        }))
+                    }
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1, "result": 0
+                    }))
+                }
+            }
+            "getAccount" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {
+                    "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                    "sequence": "100",
+                    "subentries": 0, "inflationDestination": "", "homeDomain": "",
+                    "thresholds": {"low":1,"med":1,"high":1},
+                    "signers": [], "data": {}, "balances": []
+                }
+            })),
+            "sendTransaction" => {
+                let nth = mock_server_uri_submissions.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": { "status": "PENDING", "hash": submission_hash(nth) }
+                }))
+            }
+            "getTransaction" => {
+                let body_obj: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let tx_hash = body_obj["params"]["hash"].as_str().unwrap_or("");
+                if submission_index(tx_hash) % 2 == 1 {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": {
+                            "status": "FAILED",
+                            "ledger": 50001,
+                            "diagnosticEventsXdr": ["HostError: Error(Contract, #11) withdrawal failed"]
+                        }
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": { "status": "SUCCESS", "ledger": 50002, "diagnosticEventsXdr": [] }
+                    }))
+                }
+            }
+            _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": {"code": -1, "message": "unknown method"}
+            })),
+        }
+    }
+}
+
+fn mount_deposit_exec_succeeds(
+    mock_server_uri_submissions: Arc<AtomicUsize>,
+) -> impl Fn(&Request) -> ResponseTemplate + Send + Sync {
+    move |req: &Request| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        match body["method"].as_str().unwrap_or("") {
+            "simulateTransaction" => {
+                let op = body["params"]["transaction"]["operations"][0].clone();
+                let contract = op["contract_id"].as_str().unwrap_or("");
+                let method_name = op["method"].as_str().unwrap_or("");
+                if contract == "CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C" {
+                    if method_name == "get_deposit_count" {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1, "result": 1
+                        }))
+                    } else if method_name == "get_deposit_keys" {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1,
+                            "result": { "vec": [{"bytes": REPEAT_FAIL_KEY}] }
+                        }))
+                    } else {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1, "result": 0
+                        }))
+                    }
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1, "result": 0
+                    }))
+                }
+            }
+            "getAccount" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {
+                    "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                    "sequence": "100",
+                    "subentries": 0, "inflationDestination": "", "homeDomain": "",
+                    "thresholds": {"low":1,"med":1,"high":1},
+                    "signers": [], "data": {}, "balances": []
+                }
+            })),
+            "sendTransaction" => {
+                let nth = mock_server_uri_submissions.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": { "status": "PENDING", "hash": submission_hash(nth) }
+                }))
+            }
+            "getTransaction" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": { "status": "SUCCESS", "ledger": 50001, "diagnosticEventsXdr": [] }
+            })),
+            _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": {"code": -1, "message": "unknown method"}
+            })),
+        }
+    }
+}
+
+fn mount_withdrawal_exec_succeeds(
+    mock_server_uri_submissions: Arc<AtomicUsize>,
+) -> impl Fn(&Request) -> ResponseTemplate + Send + Sync {
+    move |req: &Request| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        match body["method"].as_str().unwrap_or("") {
+            "simulateTransaction" => {
+                let op = body["params"]["transaction"]["operations"][0].clone();
+                let contract = op["contract_id"].as_str().unwrap_or("");
+                let method_name = op["method"].as_str().unwrap_or("");
+                if contract == "CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE" {
+                    if method_name == "get_withdrawal_count" {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1, "result": 1
+                        }))
+                    } else if method_name == "get_withdrawal_keys" {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1,
+                            "result": { "vec": [{"bytes": REPEAT_FAIL_KEY}] }
+                        }))
+                    } else {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "jsonrpc": "2.0", "id": 1, "result": 0
+                        }))
+                    }
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1, "result": 0
+                    }))
+                }
+            }
+            "getAccount" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {
+                    "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                    "sequence": "100",
+                    "subentries": 0, "inflationDestination": "", "homeDomain": "",
+                    "thresholds": {"low":1,"med":1,"high":1},
+                    "signers": [], "data": {}, "balances": []
+                }
+            })),
+            "sendTransaction" => {
+                let nth = mock_server_uri_submissions.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": { "status": "PENDING", "hash": submission_hash(nth) }
+                }))
+            }
+            "getTransaction" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": { "status": "SUCCESS", "ledger": 50001, "diagnosticEventsXdr": [] }
+            })),
+            _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": {"code": -1, "message": "unknown method"}
+            })),
+        }
+    }
+}
+
+#[tokio::test]
+async fn keeper_cycle_blacklists_deposit_after_repeated_execution_failures() {
+    let mock_server = MockServer::start().await;
+    let submissions = Arc::new(AtomicUsize::new(0));
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(mount_deposit_exec_always_fails(Arc::clone(&submissions)))
+        .mount(&mock_server)
+        .await;
+
+    let config =
+        test_config_with_tokens(&mock_server.uri(), "http://127.0.0.1:9", vec![test_token()]);
+    let state = Arc::new(AppState::new(config));
+    state
+        .price_cache
+        .write()
+        .await
+        .prices
+        .insert(TUSDC_KEY.to_string(), fresh_cached_price());
+
+    state.execution_failure_counts.lock().await.insert(
+        REPEAT_FAIL_KEY.to_string(),
+        oracle::state::MAX_CONSECUTIVE_EXECUTION_FAILURES - 1,
+    );
+
+    let summary = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state))
+        .await
+        .expect("cycle must not abort on a failing deposit");
+    assert_eq!(summary.errors, 1);
+    assert_eq!(summary.deposits_executed, 0);
+
+    assert!(
+        state
+            .frozen_order_blacklist
+            .lock()
+            .await
+            .contains_key(REPEAT_FAIL_KEY),
+        "a persistently failing deposit must be blacklisted"
+    );
+    assert!(
+        !state
+            .execution_failure_counts
+            .lock()
+            .await
+            .contains_key(REPEAT_FAIL_KEY),
+        "the failure tally is cleared once the deposit key is abandoned"
+    );
+}
+
+#[tokio::test]
+async fn keeper_cycle_blacklists_withdrawal_after_repeated_execution_failures() {
+    let mock_server = MockServer::start().await;
+    let submissions = Arc::new(AtomicUsize::new(0));
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(mount_withdrawal_exec_always_fails(Arc::clone(&submissions)))
+        .mount(&mock_server)
+        .await;
+
+    let config =
+        test_config_with_tokens(&mock_server.uri(), "http://127.0.0.1:9", vec![test_token()]);
+    let state = Arc::new(AppState::new(config));
+    state
+        .price_cache
+        .write()
+        .await
+        .prices
+        .insert(TUSDC_KEY.to_string(), fresh_cached_price());
+
+    state.execution_failure_counts.lock().await.insert(
+        REPEAT_FAIL_KEY.to_string(),
+        oracle::state::MAX_CONSECUTIVE_EXECUTION_FAILURES - 1,
+    );
+
+    let summary = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state))
+        .await
+        .expect("cycle must not abort on a failing withdrawal");
+    assert_eq!(summary.errors, 1);
+    assert_eq!(summary.withdrawals_executed, 0);
+
+    assert!(
+        state
+            .frozen_order_blacklist
+            .lock()
+            .await
+            .contains_key(REPEAT_FAIL_KEY),
+        "a persistently failing withdrawal must be blacklisted"
+    );
+    assert!(
+        !state
+            .execution_failure_counts
+            .lock()
+            .await
+            .contains_key(REPEAT_FAIL_KEY),
+        "the failure tally is cleared once the withdrawal key is abandoned"
+    );
+}
+
+#[tokio::test]
+async fn keeper_cycle_skips_blacklisted_deposit_key() {
+    let mock_server = MockServer::start().await;
+    let submissions = Arc::new(AtomicUsize::new(0));
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(mount_deposit_exec_succeeds(Arc::clone(&submissions)))
+        .mount(&mock_server)
+        .await;
+
+    let config =
+        test_config_with_tokens(&mock_server.uri(), "http://127.0.0.1:9", vec![test_token()]);
+    let state = Arc::new(AppState::new(config));
+    state
+        .price_cache
+        .write()
+        .await
+        .prices
+        .insert(TUSDC_KEY.to_string(), fresh_cached_price());
+
+    state
+        .frozen_order_blacklist
+        .lock()
+        .await
+        .insert(REPEAT_FAIL_KEY.to_string(), 5);
+
+    let summary = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state))
+        .await
+        .expect("cycle must complete without panic");
+    assert_eq!(summary.errors, 1, "blacklisted deposit logs an error");
+    assert_eq!(summary.deposits_executed, 0, "blacklisted deposit is not executed");
+    // Submissions should only be set_prices (1 submission), execute_deposit should never be submitted
+    assert_eq!(submissions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn keeper_cycle_skips_blacklisted_withdrawal_key() {
+    let mock_server = MockServer::start().await;
+    let submissions = Arc::new(AtomicUsize::new(0));
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(mount_withdrawal_exec_succeeds(Arc::clone(&submissions)))
+        .mount(&mock_server)
+        .await;
+
+    let config =
+        test_config_with_tokens(&mock_server.uri(), "http://127.0.0.1:9", vec![test_token()]);
+    let state = Arc::new(AppState::new(config));
+    state
+        .price_cache
+        .write()
+        .await
+        .prices
+        .insert(TUSDC_KEY.to_string(), fresh_cached_price());
+
+    state
+        .frozen_order_blacklist
+        .lock()
+        .await
+        .insert(REPEAT_FAIL_KEY.to_string(), 5);
+
+    let summary = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state))
+        .await
+        .expect("cycle must complete without panic");
+    assert_eq!(summary.errors, 1, "blacklisted withdrawal logs an error");
+    assert_eq!(summary.withdrawals_executed, 0, "blacklisted withdrawal is not executed");
+    assert_eq!(submissions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn keeper_cycle_clears_deposit_execution_failures_on_success() {
+    let mock_server = MockServer::start().await;
+    let submissions = Arc::new(AtomicUsize::new(0));
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(mount_deposit_exec_succeeds(Arc::clone(&submissions)))
+        .mount(&mock_server)
+        .await;
+
+    let config =
+        test_config_with_tokens(&mock_server.uri(), "http://127.0.0.1:9", vec![test_token()]);
+    let state = Arc::new(AppState::new(config));
+    state
+        .price_cache
+        .write()
+        .await
+        .prices
+        .insert(TUSDC_KEY.to_string(), fresh_cached_price());
+
+    state
+        .execution_failure_counts
+        .lock()
+        .await
+        .insert(REPEAT_FAIL_KEY.to_string(), 2);
+
+    let summary = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state))
+        .await
+        .expect("cycle should succeed");
+    assert_eq!(summary.deposits_executed, 1);
+    assert_eq!(summary.errors, 0);
+
+    assert!(
+        !state
+            .execution_failure_counts
+            .lock()
+            .await
+            .contains_key(REPEAT_FAIL_KEY),
+        "execution failure tally must be cleared upon successful deposit execution"
+    );
+}
+
+#[tokio::test]
+async fn keeper_cycle_clears_withdrawal_execution_failures_on_success() {
+    let mock_server = MockServer::start().await;
+    let submissions = Arc::new(AtomicUsize::new(0));
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(mount_withdrawal_exec_succeeds(Arc::clone(&submissions)))
+        .mount(&mock_server)
+        .await;
+
+    let config =
+        test_config_with_tokens(&mock_server.uri(), "http://127.0.0.1:9", vec![test_token()]);
+    let state = Arc::new(AppState::new(config));
+    state
+        .price_cache
+        .write()
+        .await
+        .prices
+        .insert(TUSDC_KEY.to_string(), fresh_cached_price());
+
+    state
+        .execution_failure_counts
+        .lock()
+        .await
+        .insert(REPEAT_FAIL_KEY.to_string(), 2);
+
+    let summary = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state))
+        .await
+        .expect("cycle should succeed");
+    assert_eq!(summary.withdrawals_executed, 1);
+    assert_eq!(summary.errors, 0);
+
+    assert!(
+        !state
+            .execution_failure_counts
+            .lock()
+            .await
+            .contains_key(REPEAT_FAIL_KEY),
+        "execution failure tally must be cleared upon successful withdrawal execution"
+    );
+}
+

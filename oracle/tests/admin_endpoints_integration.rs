@@ -159,6 +159,8 @@ async fn clear_blacklisted_key_removes_key_and_resets_failure_count() {
         blacklist.insert("deadbeef".to_string(), 3);
         let mut counts = state.freeze_failure_counts.lock().await;
         counts.insert("deadbeef".to_string(), 3);
+        let mut exec_counts = state.execution_failure_counts.lock().await;
+        exec_counts.insert("deadbeef".to_string(), 3);
     }
 
     let app = build_router(Arc::clone(&state));
@@ -191,6 +193,11 @@ async fn clear_blacklisted_key_removes_key_and_resets_failure_count() {
         .contains_key("deadbeef"));
     assert!(!state
         .freeze_failure_counts
+        .lock()
+        .await
+        .contains_key("deadbeef"));
+    assert!(!state
+        .execution_failure_counts
         .lock()
         .await
         .contains_key("deadbeef"));
