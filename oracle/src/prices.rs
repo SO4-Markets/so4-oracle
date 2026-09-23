@@ -44,7 +44,8 @@ pub fn aggregate_prices(
         ));
     }
 
-    let filter_result = filter_outliers(prices, sources);
+    let filter_result =
+        filter_outliers_with_max_deviation(prices, sources, Some(max_deviation_bps));
     let filtered_prices = filter_result.filtered_prices;
     let filtered_sources = filter_result.filtered_sources;
 
@@ -153,11 +154,17 @@ pub struct OutlierFilterResult {
 
 /// Filter out prices that deviate too far from the median.
 ///
-/// Primary rule: reject prices whose absolute deviation from the median exceeds
-/// 6x the median absolute deviation (MAD). If MAD is zero (a degenerate/flat
-/// cluster where at least half the inputs have identical deviation), fall back
-/// to rejecting prices more than 3 standard deviations from the median.
-pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResult {
+/// Primary rules:
+/// 1. Reject prices exceeding the per-token `max_deviation_bps` limit from the median (#888).
+/// 2. Reject statistical outliers whose absolute deviation from the median exceeds
+///    6x the median absolute deviation (MAD). If MAD is zero (a degenerate/flat
+///    cluster where at least half the inputs have identical deviation), fall back
+///    to rejecting prices more than 3 standard deviations from the median.
+pub fn filter_outliers_with_max_deviation(
+    prices: &[i128],
+    sources: &[String],
+    max_deviation_bps: Option<u32>,
+) -> OutlierFilterResult {
     if prices.is_empty() {
         return OutlierFilterResult {
             filtered_prices: vec![],
@@ -204,13 +211,18 @@ pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResu
 
     for (i, &p) in prices.iter().enumerate() {
         let dev = (p as f64 - median as f64).abs();
-        let is_outlier = if mad > 0 {
+        let is_statistical_outlier = if mad > 0 {
             dev > 6.0 * mad as f64
         } else {
             stddev > 0.0 && dev > 3.0 * stddev
         };
 
-        if is_outlier {
+        let exceeds_max_dev = match max_deviation_bps {
+            Some(max_bps) => deviation_bps(p, median) > max_bps as f64,
+            None => false,
+        };
+
+        if is_statistical_outlier || exceeds_max_dev {
             rejected.push((sources[i].clone(), p, dev));
         } else {
             filtered_prices.push(p);
@@ -223,6 +235,12 @@ pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResu
         filtered_sources,
         rejected,
     }
+}
+
+/// Backward-compatible wrapper around `filter_outliers_with_max_deviation` without
+/// a per-token basis-point threshold (only statistical MAD/stddev rejection).
+pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResult {
+    filter_outliers_with_max_deviation(prices, sources, None)
 }
 
 /// Compute the median of a slice of prices safely.
@@ -717,14 +735,15 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
 
-        let result1 = aggregate_prices(&prices, &sources, 2, 500).unwrap();
+        // Use 7_000 bps (70%) tolerance to accommodate the wide synthetic spread [100..500] around median 300
+        let result1 = aggregate_prices(&prices, &sources, 2, 7_000).unwrap();
 
         let mut prices_shuffled = prices.clone();
         let mut sources_shuffled = sources.clone();
         prices_shuffled.reverse();
         sources_shuffled.reverse();
 
-        let result2 = aggregate_prices(&prices_shuffled, &sources_shuffled, 2, 500).unwrap();
+        let result2 = aggregate_prices(&prices_shuffled, &sources_shuffled, 2, 7_000).unwrap();
 
         assert_eq!(
             result1.min, result2.min,
@@ -769,5 +788,71 @@ mod tests {
         assert_eq!(result.filtered_prices.len(), 1);
         assert_eq!(result.filtered_prices[0], 42);
         assert_eq!(result.rejected.len(), 0);
+    }
+
+    #[test]
+    fn max_deviation_bps_gates_three_or_more_sources() {
+        let sources = vec![
+            "binance".to_string(),
+            "coinbase".to_string(),
+            "pyth".to_string(),
+        ];
+        // Prices: [100_000, 101_000, 104_000]. Median is 101_000.
+        // Deviations from median: 100_000 -> 1_000; 101_000 -> 0; 104_000 -> 3_000.
+        // MAD is 1_000. 6.0 * MAD = 6_000.
+        // Under purely statistical 6x-MAD, 104_000 would NOT be rejected (3_000 <= 6_000).
+        // However, 104_000 has deviation_bps = (3_000 / 101_000) * 10_000 ≈ 297 bps.
+        // With max_deviation_bps = 200 (2.0%), 104_000 exceeds the threshold and must be rejected (#888).
+        let result = aggregate_prices(&[100_000, 101_000, 104_000], &sources, 2, 200).unwrap();
+        assert_eq!(result.sources_used, vec!["binance", "coinbase"]);
+        assert_eq!(result.rejected_sources.len(), 1);
+        assert_eq!(result.rejected_sources[0].source, "pyth");
+        assert_eq!(result.rejected_sources[0].price, 104_000);
+
+        // Conversely, when max_deviation_bps is raised to 500 (5.0%), 104_000 is within tolerance.
+        let result_lenient =
+            aggregate_prices(&[100_000, 101_000, 104_000], &sources, 2, 500).unwrap();
+        assert_eq!(result_lenient.sources_used, vec!["binance", "coinbase", "pyth"]);
+        assert_eq!(result_lenient.rejected_sources.len(), 0);
+    }
+
+    #[test]
+    fn max_deviation_bps_gates_four_and_five_sources() {
+        let sources4: Vec<String> = (1..=4).map(|i| format!("src{i}")).collect();
+        // 4 sources: [1000, 1005, 1015, 1035], median = 1010.
+        // Deviations: 10, 5, 5, 25. MAD = 7. 6 * MAD = 42.
+        // 1035 deviation in bps: (25 / 1010) * 10_000 ≈ 247.5 bps.
+        // With max_deviation_bps = 150 (1.5%), 1035 is rejected!
+        let res4 = aggregate_prices(&[1000, 1005, 1015, 1035], &sources4, 3, 150).unwrap();
+        assert_eq!(res4.sources_used.len(), 3);
+        assert_eq!(res4.rejected_sources.len(), 1);
+        assert_eq!(res4.rejected_sources[0].source, "src4");
+
+        let sources5: Vec<String> = (1..=5).map(|i| format!("src{i}")).collect();
+        // 5 sources: [1000, 1005, 1010, 1015, 1040], median = 1010.
+        // 1040 deviation in bps: (30 / 1010) * 10_000 ≈ 297 bps.
+        // With max_deviation_bps = 200, 1040 is rejected!
+        let res5 = aggregate_prices(&[1000, 1005, 1010, 1015, 1040], &sources5, 4, 200).unwrap();
+        assert_eq!(res5.sources_used.len(), 4);
+        assert_eq!(res5.rejected_sources.len(), 1);
+        assert_eq!(res5.rejected_sources[0].source, "src5");
+    }
+
+    #[test]
+    fn filter_outliers_without_max_deviation_retains_legacy_behavior() {
+        let sources = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        // Within 6x MAD, so legacy filter_outliers without max_deviation retains all 3
+        let res = filter_outliers(&[100_000, 101_000, 104_000], &sources);
+        assert_eq!(res.filtered_prices.len(), 3);
+        assert_eq!(res.rejected.len(), 0);
+
+        // filter_outliers_with_max_deviation with Some(200) rejects the 297 bps outlier
+        let res_filtered = filter_outliers_with_max_deviation(
+            &[100_000, 101_000, 104_000],
+            &sources,
+            Some(200),
+        );
+        assert_eq!(res_filtered.filtered_prices.len(), 2);
+        assert_eq!(res_filtered.rejected.len(), 1);
     }
 }
