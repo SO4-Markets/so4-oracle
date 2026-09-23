@@ -111,6 +111,22 @@ cargo build --release --bin oracle
 
 ## Deployment
 
+**This service must run as exactly one instance — do not scale it horizontally.**
+Double-submission prevention and the freeze-failure/blacklist counters
+(`AppState::in_flight_keys`, `freeze_failure_counts`, `frozen_order_blacklist`,
+`execution_failure_counts` in `oracle/src/state.rs`) live entirely in
+in-process memory, not in a shared store. A second replica would start with
+an empty `in_flight_keys` map, independently poll the same pending
+orders/deposits/withdrawals, and race the first replica to submit competing
+transactions for the same keys — the exact scenario the in-flight tracking
+exists to prevent, reopened at the process level. `fly.toml`'s
+`min_machines_running = 1` only guarantees at least one machine stays up
+(so Fly's autostop doesn't suspend it to zero); it does not cap the count,
+so running `fly scale count 2` (or setting a replica count on Railway)
+would silently introduce this race with no error or warning. See
+`AGENTS.md`'s "Repository-Specific Traps" for the same note in the
+contributor-facing doc.
+
 ### Docker
 
 ```bash

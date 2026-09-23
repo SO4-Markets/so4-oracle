@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use axum::extract::MatchedPath;
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, CACHE_CONTROL};
 use axum::http::request::Parts;
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
 use axum::{Json, Router};
@@ -12,6 +12,7 @@ use serde::Serialize;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
@@ -228,6 +229,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(trace_layer)
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(axum::middleware::from_fn_with_state(state, track_metrics))
+        // No response from this service is meant to be cached — /prices is
+        // the one endpoint explicitly CORS-enabled for direct browser
+        // access, updates roughly once a second, and backs a trading
+        // frontend, so a response with no cache directives at all is
+        // otherwise subject to whatever default heuristics a browser,
+        // proxy, or CDN in front of this service chooses to apply (#1026).
+        // Applied to every route, not just /prices, since nothing here is
+        // cacheable.
+        .layer(SetResponseHeaderLayer::overriding(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -248,9 +261,33 @@ mod tests {
     use super::constant_time_eq;
     use crate::{AppState, Config};
     use axum::body::Body;
+    use axum::http::header::CACHE_CONTROL;
     use axum::http::Request;
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    // #1026 — every response, not just /prices, must carry an explicit
+    // no-store directive so no browser/proxy/CDN in front of this service
+    // applies default caching heuristics to a price that updates ~1/sec.
+    #[tokio::test]
+    async fn every_response_sets_cache_control_no_store() {
+        let config = Arc::new(Config::default_for_tests());
+        let state = Arc::new(AppState::new(config));
+        let app = super::build_router(state);
+
+        for uri in ["/health", "/ready", "/prices"] {
+            let request = Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.headers().get(CACHE_CONTROL).map(|v| v.to_str().unwrap()),
+                Some("no-store"),
+                "missing/incorrect Cache-Control on {uri}"
+            );
+        }
+    }
 
     #[test]
     fn constant_time_comparison_matches_equal_values_only() {

@@ -40,6 +40,12 @@ primary_region = 'iad'
   force_https = true
   auto_stop_machines = true
   auto_start_machines = true
+  # This only guarantees at least one machine stays up (so autostop doesn't
+  # suspend it to zero) — it does NOT cap the count. Do not run
+  # `fly scale count N` for N > 1: keeper state (in_flight_keys,
+  # freeze/execution failure counters) is in-process only and races across
+  # replicas with no coordination. See README.md "Deployment" and
+  # AGENTS.md "Repository-Specific Traps".
   min_machines_running = 1
 
   [http_service.concurrency]

@@ -12,6 +12,12 @@ use tracing::info;
 use super::{AdminAuth, ApiError};
 use crate::state::{AppState, CachedPrice, FailedSubmission};
 
+// Matches prices.rs's READY_BALANCE_RETRY_* constants (#1024) — the same
+// underlying Horizon call should be retried the same way regardless of
+// which endpoint triggers it.
+const KEEPER_BALANCE_RETRY_ATTEMPTS: u32 = 3;
+const KEEPER_BALANCE_RETRY_BASE_DELAY_MS: u64 = 100;
+
 #[derive(Debug, Serialize)]
 pub struct OracleStatusResponse {
     pub last_cycle_time: Option<u64>,
@@ -174,7 +180,15 @@ pub async fn keeper_balance(
         min_balance_xlm: state.config.min_keeper_balance_xlm,
     };
 
-    match crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min).await {
+    let result = crate::retry::retry_with_backoff(
+        || crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min),
+        KEEPER_BALANCE_RETRY_ATTEMPTS,
+        KEEPER_BALANCE_RETRY_BASE_DELAY_MS,
+        30_000,
+    )
+    .await;
+
+    match result {
         Ok(stroops) => {
             let response = crate::keeper::build_balance_response(&keeper_cfg, stroops);
             Ok(Json(BalanceResponse {
@@ -208,4 +222,51 @@ fn system_time_secs(value: SystemTime) -> Option<u64> {
         .duration_since(UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Config;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // #1024 — GET /keeper/balance now retries a transient Horizon failure
+    // the same way /ready's equivalent check does, instead of surfacing it
+    // as a failure on the first blip.
+    #[tokio::test]
+    async fn keeper_balance_retries_transient_horizon_failure_then_succeeds() {
+        let server = MockServer::start().await;
+
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let request_count = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = request_count.clone();
+
+        Mock::given(method("GET"))
+            .respond_with(move |_: &wiremock::Request| {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(503)
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "id": "GKEEPER",
+                        "balances": [{"asset_type": "native", "balance": "20.0000000"}]
+                    }))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let mut config = Config::default_for_tests();
+        config.horizon_url = server.uri();
+        config.keeper_account_id = "GKEEPER".to_string();
+        config.min_keeper_balance_xlm = 10.0;
+        let state = std::sync::Arc::new(AppState::new(std::sync::Arc::new(config)));
+
+        let result = keeper_balance(AdminAuth, State(state)).await;
+
+        let Json(body) = result.expect("expected Ok after retry");
+        assert!(body.is_funded);
+        assert_eq!(body.balance_stroops, 200_000_000);
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+    }
 }
