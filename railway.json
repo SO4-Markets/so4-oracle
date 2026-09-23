@@ -29,6 +29,8 @@
     "PRICE_LOOP_MS": "1000",
     "KEEPER_LOOP_MS": "1500",
     "MIN_KEEPER_BALANCE_XLM": "10",
-    "KEEPER_INDEX": "0"
+    "KEEPER_INDEX": "0",
+    "SET_PRICES_TX_FEE": "1000000",
+    "KEEPER_TX_FEE": "2000000"
   }
 }
