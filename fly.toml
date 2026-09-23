@@ -5,7 +5,6 @@ primary_region = 'iad'
   dockerfile = 'Dockerfile'
 
 [env]
-  PORT = '8080'
   BIND_ADDR = '0.0.0.0:8080'
   # REQUIRED: override this for your target network before deploying.
   # The network passphrase is derived automatically from STELLAR_NETWORK
