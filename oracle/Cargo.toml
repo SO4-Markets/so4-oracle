@@ -41,6 +41,7 @@ base64 = "0.22"
 sha2 = "0.10"
 digest = "0.10"
 rand = "0.8"
+futures = "0.3"
 
 
 [dev-dependencies]
