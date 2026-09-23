@@ -1,5 +1,10 @@
+use base64::Engine;
 use crate::retry::Retryable;
 use serde::Deserialize;
+use stellar_xdr::{
+    ContractEvent, ContractEventBody, ContractEventType, ContractEventV0, DiagnosticEvent,
+    ExtensionPoint, Limits, ReadXdr, ScError, ScErrorCode, ScSymbol, ScVal, ScVec, WriteXdr,
+};
 
 use crate::stellar_rpc::{rpc_post, JsonRpcRequest, JsonRpcResponse, RpcError};
 
@@ -81,6 +86,178 @@ impl From<RpcError> for SubmitError {
     fn from(err: RpcError) -> Self {
         SubmitError::Rpc(err)
     }
+}
+
+impl SubmitError {
+    /// Returns true if this error indicates that the transaction failed due to
+    /// budget overrun (e.g. CPU or memory limits exceeded) by inspecting
+    /// diagnostic events (#960).
+    pub fn is_budget_exceeded(&self) -> bool {
+        match self {
+            SubmitError::TransactionFailed { events } => {
+                events.iter().any(|e| is_diagnostic_event_budget_exceeded(e))
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Returns true if the given diagnostic event string represents a Soroban budget exceeded error,
+/// either through a base64 XDR-decoded `DiagnosticEvent` or legacy text (#960).
+pub fn is_diagnostic_event_budget_exceeded(event_str: &str) -> bool {
+    let trimmed = event_str.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // 1. Plain-text / ASCII fallback (for tests or human-readable RPC descriptions)
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("budget, exceededlimit")
+        || (lower.contains("budget")
+            && (lower.contains("exceededlimit")
+                || lower.contains("exceeded_limit")
+                || lower.contains("exceeded")))
+    {
+        return true;
+    }
+
+    // 2. Decode Base64 if valid
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
+    else {
+        return false;
+    };
+
+    // 3. Decode as stellar_xdr::DiagnosticEvent
+    if let Ok(diag) = DiagnosticEvent::from_xdr(&bytes, Limits::none()) {
+        let debug_repr = format!("{diag:?}");
+        let debug_lower = debug_repr.to_ascii_lowercase();
+        if debug_lower.contains("budget")
+            && (debug_lower.contains("exceededlimit")
+                || debug_lower.contains("exceeded_limit")
+                || debug_lower.contains("exceeded"))
+        {
+            return true;
+        }
+
+        match &diag.event.body {
+            ContractEventBody::V0(v0) => {
+                for topic in v0.topics.iter() {
+                    match topic {
+                        ScVal::Error(ScError::Budget(code)) => {
+                            if *code == ScErrorCode::ExceededLimit {
+                                return true;
+                            }
+                            return true;
+                        }
+                        ScVal::Symbol(sym) => {
+                            let s = sym.0.to_string().to_ascii_lowercase();
+                            if s.contains("budget") {
+                                return true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let ScVal::Error(ScError::Budget(_)) = v0.data {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 4. Fallback decode as standalone ScVal
+    if let Ok(scval) = ScVal::from_xdr(&bytes, Limits::none()) {
+        if let ScVal::Error(ScError::Budget(_)) = scval {
+            return true;
+        }
+        let debug_repr = format!("{scval:?}");
+        let debug_lower = debug_repr.to_ascii_lowercase();
+        if debug_lower.contains("budget")
+            && (debug_lower.contains("exceededlimit")
+                || debug_lower.contains("exceeded_limit")
+                || debug_lower.contains("exceeded"))
+        {
+            return true;
+        }
+    }
+
+    // 5. Fallback for base64 encoded text
+    if let Ok(text) = std::str::from_utf8(&bytes) {
+        let text_lower = text.to_ascii_lowercase();
+        if text_lower.contains("budget")
+            && (text_lower.contains("exceededlimit")
+                || text_lower.contains("exceeded_limit")
+                || text_lower.contains("exceeded"))
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Helper to construct a realistic base64-encoded XDR `DiagnosticEvent` representing
+/// a Soroban budget exceeded error (`HostError: Error(Budget, ExceededLimit)`).
+pub fn make_budget_exceeded_diagnostic_xdr() -> String {
+    let topics = vec![
+        ScVal::Symbol(
+            "Error"
+                .to_string()
+                .try_into()
+                .expect("symbol Error fits"),
+        ),
+        ScVal::Error(ScError::Budget(ScErrorCode::ExceededLimit)),
+    ];
+    let sc_vec: ScVec = topics.try_into().expect("valid topics ScVec");
+    let diag = DiagnosticEvent {
+        in_successful_contract_call: false,
+        event: ContractEvent {
+            ext: ExtensionPoint::V0,
+            contract_id: None,
+            type_: ContractEventType::Diagnostic,
+            body: ContractEventBody::V0(ContractEventV0 {
+                topics: sc_vec,
+                data: ScVal::Void,
+            }),
+        },
+    };
+    let bytes = diag
+        .to_xdr(Limits::none())
+        .expect("serialization of DiagnosticEvent must succeed");
+    base64::engine::general_purpose::STANDARD.encode(&bytes)
+}
+
+/// Helper to construct a realistic base64-encoded XDR `DiagnosticEvent` representing
+/// a contract error (non-budget).
+pub fn make_contract_error_diagnostic_xdr(error_code: u32) -> String {
+    let topics = vec![
+        ScVal::Symbol(
+            "Error"
+                .to_string()
+                .try_into()
+                .expect("symbol Error fits"),
+        ),
+        ScVal::Error(ScError::Contract(error_code)),
+    ];
+    let sc_vec: ScVec = topics.try_into().expect("valid topics ScVec");
+    let diag = DiagnosticEvent {
+        in_successful_contract_call: false,
+        event: ContractEvent {
+            ext: ExtensionPoint::V0,
+            contract_id: None,
+            type_: ContractEventType::Diagnostic,
+            body: ContractEventBody::V0(ContractEventV0 {
+                topics: sc_vec,
+                data: ScVal::Void,
+            }),
+        },
+    };
+    let bytes = diag
+        .to_xdr(Limits::none())
+        .expect("serialization of DiagnosticEvent must succeed");
+    base64::engine::general_purpose::STANDARD.encode(&bytes)
 }
 
 // ── sendTransaction response ─────────────────────────────────────────────────
@@ -855,5 +1032,61 @@ mod tests {
             assert_eq!(result.status, expected_status);
             assert_eq!(result.hash, "test_hash");
         }
+    }
+
+    #[test]
+    fn test_is_diagnostic_event_budget_exceeded_with_real_xdr() {
+        let xdr = make_budget_exceeded_diagnostic_xdr();
+        assert!(is_diagnostic_event_budget_exceeded(&xdr));
+    }
+
+    #[test]
+    fn test_is_diagnostic_event_budget_exceeded_with_contract_error_xdr() {
+        let xdr = make_contract_error_diagnostic_xdr(7);
+        assert!(!is_diagnostic_event_budget_exceeded(&xdr));
+    }
+
+    #[test]
+    fn test_is_diagnostic_event_budget_exceeded_legacy_and_edge_cases() {
+        // Human-readable string mock
+        assert!(is_diagnostic_event_budget_exceeded(
+            "HostError: Error(Budget, ExceededLimit)"
+        ));
+        assert!(is_diagnostic_event_budget_exceeded("Budget, ExceededLimit"));
+        assert!(is_diagnostic_event_budget_exceeded("HostError: Error(Budget, ExceededLimit) extra info"));
+
+        // Non-budget error string
+        assert!(!is_diagnostic_event_budget_exceeded(
+            "HostError: Error(Contract, #7) order rejected"
+        ));
+        assert!(!is_diagnostic_event_budget_exceeded("connection reset by peer"));
+        assert!(!is_diagnostic_event_budget_exceeded(""));
+        assert!(!is_diagnostic_event_budget_exceeded("   "));
+        assert!(!is_diagnostic_event_budget_exceeded("invalid-base64-!@#$%"));
+    }
+
+    #[test]
+    fn test_submit_error_is_budget_exceeded() {
+        let budget_xdr = make_budget_exceeded_diagnostic_xdr();
+        let err_budget = SubmitError::TransactionFailed {
+            events: vec![budget_xdr],
+        };
+        assert!(err_budget.is_budget_exceeded());
+
+        let contract_xdr = make_contract_error_diagnostic_xdr(1);
+        let err_contract = SubmitError::TransactionFailed {
+            events: vec![contract_xdr],
+        };
+        assert!(!err_contract.is_budget_exceeded());
+
+        let err_legacy = SubmitError::TransactionFailed {
+            events: vec!["HostError: Error(Budget, ExceededLimit)".to_string()],
+        };
+        assert!(err_legacy.is_budget_exceeded());
+
+        let err_rejected = SubmitError::Rejected {
+            status: "ERROR".to_string(),
+        };
+        assert!(!err_rejected.is_budget_exceeded());
     }
 }

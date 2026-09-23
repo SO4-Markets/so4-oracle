@@ -335,7 +335,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 warn!(key = %order_key, %error, "order_execution_failed");
 
                 let mut freeze_error_msg = None;
-                if error.contains("Budget, ExceededLimit") {
+                if is_budget_exceeded_error(&error) {
                     match execute_handler(
                         &state,
                         &state.config.order_handler_contract_id,
@@ -778,6 +778,29 @@ async fn set_prices_on_chain(
     Ok(format!("confirmed on ledger {ledger}"))
 }
 
+/// Returns true if `error` indicates a Soroban host budget overrun, either through
+/// decoded base64 DiagnosticEvent XDR or legacy string matching (#960).
+pub fn is_budget_exceeded_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("budget, exceededlimit")
+        || (lower.contains("budget")
+            && (lower.contains("exceededlimit")
+                || lower.contains("exceeded_limit")
+                || lower.contains("exceeded")))
+    {
+        return true;
+    }
+
+    for part in error.split(&['"', '\'', '[', ']', ',', ' ', '(', ')'][..]) {
+        let trimmed = part.trim();
+        if trimmed.len() >= 8 && crate::submit::is_diagnostic_event_budget_exceeded(trimmed) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// True if `error` indicates the submitted transaction was rejected for
 /// carrying a stale/incorrect account sequence number (e.g. RPC status
 /// `BAD_SEQUENCE`, or classic Horizon's `tx_bad_seq`), as opposed to any
@@ -1205,5 +1228,36 @@ mod tests {
             .collect();
         assert_eq!(stale_filtered.len(), 1);
         assert_eq!(stale_filtered[0].1.symbol, "STALE");
+    }
+
+    #[test]
+    fn test_is_budget_exceeded_error_real_xdr_and_shape() {
+        let budget_xdr = crate::submit::make_budget_exceeded_diagnostic_xdr();
+        // Realistic error message produced by execute_handler on failed on-chain submission:
+        let error_msg = format!(
+            "execute_order submit failed: transaction failed on-chain; diagnostic events: [\"{budget_xdr}\"]"
+        );
+        assert!(is_budget_exceeded_error(&error_msg));
+
+        // Direct raw XDR string
+        assert!(is_budget_exceeded_error(&budget_xdr));
+
+        // Legacy text format
+        assert!(is_budget_exceeded_error(
+            "execute_order submit failed: HostError: Error(Budget, ExceededLimit)"
+        ));
+        assert!(is_budget_exceeded_error("Budget, ExceededLimit"));
+
+        // Unrelated contract error with real contract error XDR
+        let contract_xdr = crate::submit::make_contract_error_diagnostic_xdr(7);
+        let non_budget_msg = format!(
+            "execute_order submit failed: transaction failed on-chain; diagnostic events: [\"{contract_xdr}\"]"
+        );
+        assert!(!is_budget_exceeded_error(&non_budget_msg));
+        assert!(!is_budget_exceeded_error(&contract_xdr));
+
+        // Generic errors
+        assert!(!is_budget_exceeded_error("transaction rejected: BAD_SEQUENCE"));
+        assert!(!is_budget_exceeded_error("network timeout"));
     }
 }

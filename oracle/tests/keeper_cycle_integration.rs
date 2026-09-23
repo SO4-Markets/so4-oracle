@@ -503,7 +503,7 @@ async fn keeper_cycle_freezes_order_when_budget_exceeded_and_freeze_succeeds() {
                             "result": {
                                 "status": "FAILED",
                                 "ledger": 50001,
-                                "diagnosticEventsXdr": ["HostError: Error(Budget, ExceededLimit)"]
+                                "diagnosticEventsXdr": [oracle::submit::make_budget_exceeded_diagnostic_xdr()]
                             }
                         }))
                     } else {
