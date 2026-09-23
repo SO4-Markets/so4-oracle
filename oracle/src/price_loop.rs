@@ -127,16 +127,36 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
     let mut tokens_stale = 0usize;
     let now = crate::current_timestamp_secs();
 
-    let ledger_seq = match crate::retry::retry_with_backoff(
-        || async {
-            crate::stellar_rpc::get_latest_ledger_sequence(&state.config.stellar_rpc_url).await
-        },
-        LEDGER_SEQUENCE_RETRY_ATTEMPTS,
-        LEDGER_SEQUENCE_RETRY_BASE_DELAY_MS,
-        30_000,
-    )
-    .await
-    {
+    // Hermes accepts multiple `ids[]` values. Build the feed-ID list eagerly
+    // (it only depends on config, no I/O) so we can kick off the Pyth batch
+    // fetch at the same time as the ledger-sequence RPC call (#1033).
+    let pyth_feed_ids: Vec<&str> = state
+        .config
+        .price_feed
+        .tokens
+        .iter()
+        .filter(|token| token.sources.iter().any(|source| source == "pyth"))
+        .filter_map(|token| token.pyth_feed_id.as_deref())
+        .collect();
+
+    // These two calls are independent — run them concurrently to avoid paying
+    // the sum of both round-trip latencies every cycle.
+    let (ledger_result, pyth_result) = tokio::join!(
+        crate::retry::retry_with_backoff(
+            || async {
+                crate::stellar_rpc::get_latest_ledger_sequence(&state.config.stellar_rpc_url).await
+            },
+            LEDGER_SEQUENCE_RETRY_ATTEMPTS,
+            LEDGER_SEQUENCE_RETRY_BASE_DELAY_MS,
+            30_000,
+        ),
+        crate::pyth::fetch_pyth_prices(
+            &pyth_feed_ids,
+            state.config.pyth_api_key.as_ref().map(|key| key.as_str()),
+        )
+    );
+
+    let ledger_seq = match ledger_result {
         Ok(ledger_seq) => ledger_seq,
         Err(error) => {
             tracing::error!(
@@ -149,24 +169,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
         }
     };
 
-    // Hermes accepts multiple `ids[]` values. Fetch all Pyth feeds once per
-    // cycle, rather than spending one rate-limited request per token.
-    let pyth_feed_ids: Vec<&str> = state
-        .config
-        .price_feed
-        .tokens
-        .iter()
-        .filter(|token| token.sources.iter().any(|source| source == "pyth"))
-        .filter_map(|token| token.pyth_feed_id.as_deref())
-        .collect();
-
-    // Track whether the batch request succeeded or failed
-    let (pyth_prices, batch_failed) = match crate::pyth::fetch_pyth_prices(
-        &pyth_feed_ids,
-        state.config.pyth_api_key.as_ref().map(|key| key.as_str()),
-    )
-    .await
-    {
+    let (pyth_prices, batch_failed) = match pyth_result {
         Ok(prices) => (prices, false),
         Err(error) => {
             tracing::warn!(error = %error, "batched Pyth request failed");
