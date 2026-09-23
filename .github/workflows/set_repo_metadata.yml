@@ -1,0 +1,19 @@
+name: Set Repository Metadata
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  set-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set repository description, homepage, and topics
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }} -X PATCH \
+            -f description='Production Axum service for the SO4.market Soroban oracle and keeper.' \
+            -f homepage='https://so4.markets' \
+            -f topics='["stellar","soroban","oracle","defi","rust"]'
