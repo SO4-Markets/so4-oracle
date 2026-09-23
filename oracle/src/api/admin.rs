@@ -66,7 +66,15 @@ pub async fn oracle_status(
         .values()
         .cloned()
         .collect();
-    let recent_errors = state.failures.lock().await.iter().rev().cloned().collect();
+    let recent_errors: Vec<_> = state
+        .failures
+        .lock()
+        .await
+        .iter()
+        .rev()
+        .take(20)
+        .cloned()
+        .collect();
 
     Json(OracleStatusResponse {
         last_cycle_time,

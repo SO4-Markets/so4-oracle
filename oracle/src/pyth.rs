@@ -170,6 +170,19 @@ pub fn validate_pyth_price(
         return Err(PythPriceError::InvalidPublishTime(publish_time));
     }
     let publish_time = publish_time as u64;
+
+    // Reject future-dated publish times — a price claiming to originate from
+    // the future (malformed Hermes response, misbehaving publisher, or clock
+    // skew) must not silently pass the staleness check via saturating_sub's
+    // clamping to 0, which would treat it as maximally fresh.
+    let MAX_FUTURE_SKEW_SECONDS: u64 = 30;
+    if publish_time > now_seconds {
+        let skew = publish_time - now_seconds;
+        if skew > MAX_FUTURE_SKEW_SECONDS {
+            return Err(PythPriceError::InvalidPublishTime(publish_time as i64));
+        }
+    }
+
     let age_seconds = now_seconds.saturating_sub(publish_time);
     if age_seconds > stale_after_seconds {
         return Err(PythPriceError::StalePrice {
@@ -858,6 +871,56 @@ mod tests {
         assert!(
             matches!(err, PythPriceError::ConfidenceTooWide { max_bps: 50, .. }),
             "expected ConfidenceTooWide with max_bps=50, got {:?}",
+            err
+        );
+    }
+
+    // #1032 — future-dated publish_time must be rejected, not treated as fresh
+
+    #[test]
+    fn validate_pyth_price_rejects_future_publish_time_beyond_skew_tolerance() {
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: None,
+            expo: -8,
+            // publish_time 60 seconds in the future, beyond the 30s tolerance
+            publish_time: Some(1_060),
+        };
+        let err = validate_pyth_price(&data, 1_000, 60, 100).unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::InvalidPublishTime(1_060)),
+            "expected InvalidPublishTime for future publish_time, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_pyth_price_accepts_future_publish_time_within_skew_tolerance() {
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: None,
+            expo: -8,
+            // publish_time 10 seconds in the future, within the 30s tolerance
+            publish_time: Some(1_010),
+        };
+        // Should be accepted (minor clock skew is tolerated)
+        let result = validate_pyth_price(&data, 1_000, 60, 100);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_pyth_price_rejects_far_future_publish_time() {
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: None,
+            expo: -8,
+            // publish_time 1 hour in the future — definitely malicious/malformed
+            publish_time: Some(4_600),
+        };
+        let err = validate_pyth_price(&data, 1_000, 60, 100).unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::InvalidPublishTime(4_600)),
+            "expected InvalidPublishTime for far-future publish_time, got {:?}",
             err
         );
     }

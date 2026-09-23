@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use axum::extract::MatchedPath;
+use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Method, StatusCode};
@@ -140,6 +141,27 @@ async fn track_metrics(
     response
 }
 
+/// Middleware that converts axum's bare 405 Method Not Allowed responses into
+/// the same `{"error": "..."}` JSON envelope this API returns for every other
+/// error path (#1029).
+async fn map_method_not_allowed(
+    request: axum::http::Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let response = next.run(request).await;
+    if response.status() == StatusCode::METHOD_NOT_ALLOWED {
+        (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(ErrorBody {
+                error: "method_not_allowed".to_string(),
+            }),
+        )
+            .into_response()
+    } else {
+        response
+    }
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
         .allow_methods([Method::GET])
@@ -251,6 +273,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         ))
+        .layer(axum::middleware::from_fn(map_method_not_allowed))
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -304,6 +327,30 @@ mod tests {
         assert!(constant_time_eq(b"secret", b"secret"));
         assert!(!constant_time_eq(b"secret", b"Secret"));
         assert!(!constant_time_eq(b"secret", b"secret2"));
+    }
+
+    // #1029 — a wrong HTTP method on a known route must return the API's JSON
+    // error envelope, not axum's bare 405.
+    #[tokio::test]
+    async fn method_not_allowed_returns_json_envelope() {
+        let config = Arc::new(Config::default_for_tests());
+        let state = Arc::new(AppState::new(config));
+        let app = super::build_router(state);
+
+        // POST to /prices (which only accepts GET) should return 405 with JSON body
+        let request = Request::builder()
+            .method("POST")
+            .uri("/prices")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "method_not_allowed");
     }
 
     #[tokio::test]
