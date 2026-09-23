@@ -138,6 +138,9 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
     }
 
     let mut symbols_seen = std::collections::HashSet::new();
+    let mut pyth_feed_ids_seen = std::collections::HashSet::new();
+    let mut binance_symbols_seen = std::collections::HashSet::new();
+    let mut coinbase_symbols_seen = std::collections::HashSet::new();
     for token in &tokens {
         if token.symbol.is_empty() {
             return Err(ConfigError::InvalidToken {
@@ -154,6 +157,33 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
         }
         // stellar_address and sources are optional for the API server path,
         // but required for the oracle path — the oracle validates separately.
+
+        // Reject duplicate cross-token source identifiers to catch copy-paste
+        // errors where two tokens silently read the same price feed (#995).
+        if let Some(ref feed_id) = token.pyth_feed_id {
+            if !feed_id.is_empty() && !pyth_feed_ids_seen.insert(feed_id.clone()) {
+                return Err(ConfigError::InvalidToken {
+                    symbol: token.symbol.clone(),
+                    reason: format!("duplicate pyth_feed_id '{feed_id}' across tokens"),
+                });
+            }
+        }
+        if let Some(ref sym) = token.binance_symbol {
+            if !sym.is_empty() && !binance_symbols_seen.insert(sym.clone()) {
+                return Err(ConfigError::InvalidToken {
+                    symbol: token.symbol.clone(),
+                    reason: format!("duplicate binance_symbol '{sym}' across tokens"),
+                });
+            }
+        }
+        if let Some(ref sym) = token.coinbase_symbol {
+            if !sym.is_empty() && !coinbase_symbols_seen.insert(sym.clone()) {
+                return Err(ConfigError::InvalidToken {
+                    symbol: token.symbol.clone(),
+                    reason: format!("duplicate coinbase_symbol '{sym}' across tokens"),
+                });
+            }
+        }
 
         // Reject duplicate source entries so one config source cannot be
         // double-counted in price aggregation (#755).
@@ -375,5 +405,66 @@ mod tests {
         let json = r#"[{"symbol":"BTC","sources":["binance"],"min_sources":0}]"#;
         let err = parse_token_configs(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }), "{err:?}");
+    }
+
+    // #995 — cross-token duplicate pyth_feed_id must be rejected.
+    #[test]
+    fn reject_duplicate_pyth_feed_id() {
+        let json = r#"[
+            {"symbol":"BTC","stellar_address":"CBTC","sources":["pyth"],"pyth_feed_id":"abc123"},
+            {"symbol":"ETH","stellar_address":"CETH","sources":["pyth"],"pyth_feed_id":"abc123"}
+        ]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        match err {
+            ConfigError::InvalidToken { symbol, reason } => {
+                assert_eq!(symbol, "ETH");
+                assert!(reason.contains("duplicate pyth_feed_id"));
+            }
+            _ => panic!("expected ConfigError::InvalidToken for duplicate pyth_feed_id"),
+        }
+    }
+
+    // #995 — cross-token duplicate binance_symbol must be rejected.
+    #[test]
+    fn reject_duplicate_binance_symbol() {
+        let json = r#"[
+            {"symbol":"BTC","stellar_address":"CBTC","sources":["binance"],"binance_symbol":"BTCUSDT"},
+            {"symbol":"WBTC","stellar_address":"CWBTC","sources":["binance"],"binance_symbol":"BTCUSDT"}
+        ]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        match err {
+            ConfigError::InvalidToken { symbol, reason } => {
+                assert_eq!(symbol, "WBTC");
+                assert!(reason.contains("duplicate binance_symbol"));
+            }
+            _ => panic!("expected ConfigError::InvalidToken for duplicate binance_symbol"),
+        }
+    }
+
+    // #995 — cross-token duplicate coinbase_symbol must be rejected.
+    #[test]
+    fn reject_duplicate_coinbase_symbol() {
+        let json = r#"[
+            {"symbol":"BTC","stellar_address":"CBTC","sources":["coinbase"],"coinbase_symbol":"BTC"},
+            {"symbol":"TBTC","stellar_address":"CTBTC","sources":["coinbase"],"coinbase_symbol":"BTC"}
+        ]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        match err {
+            ConfigError::InvalidToken { symbol, reason } => {
+                assert_eq!(symbol, "TBTC");
+                assert!(reason.contains("duplicate coinbase_symbol"));
+            }
+            _ => panic!("expected ConfigError::InvalidToken for duplicate coinbase_symbol"),
+        }
+    }
+
+    // #995 — different source identifiers across different source types are OK.
+    #[test]
+    fn allow_different_source_identifiers() {
+        let json = r#"[
+            {"symbol":"BTC","stellar_address":"CBTC","sources":["binance","pyth"],"binance_symbol":"BTCUSDT","pyth_feed_id":"feed1"},
+            {"symbol":"ETH","stellar_address":"CETH","sources":["coinbase"],"coinbase_symbol":"ETH"}
+        ]"#;
+        assert!(parse_token_configs(json).is_ok());
     }
 }
