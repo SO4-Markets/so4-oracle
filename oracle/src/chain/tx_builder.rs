@@ -2,13 +2,33 @@ use ed25519_dalek::Signer;
 use sha2::{Digest, Sha256};
 use stellar_xdr::{
     DecoratedSignature, InvokeContractArgs, InvokeHostFunctionOp, Limits, Memo, Operation,
-    OperationBody, Preconditions, ScSymbol, ScVal, SequenceNumber, Signature, SignatureHint,
+    OperationBody, Preconditions, ReadXdr, ScSymbol, ScVal, SequenceNumber, Signature, SignatureHint,
     SorobanTransactionData, Transaction, TransactionEnvelope, TransactionExt,
     TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
     TransactionV1Envelope, VecM, WriteXdr,
 };
 
 use crate::chain::scval::{account_strkey_to_muxed, strkey_to_sc_address};
+
+/// Decode a base64-encoded `SorobanTransactionData` XDR string returned by
+/// Soroban RPC `simulateTransaction` (#910).
+pub fn decode_soroban_transaction_data(base64_str: &str) -> Result<SorobanTransactionData, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_str.trim())
+        .map_err(|e| format!("invalid base64 in transactionData: {e}"))?;
+    SorobanTransactionData::from_xdr(&bytes, Limits::none())
+        .map_err(|e| format!("failed to decode SorobanTransactionData XDR: {e}"))
+}
+
+/// Encode a `SorobanTransactionData` into base64-encoded XDR (#910).
+pub fn encode_soroban_transaction_data(data: &SorobanTransactionData) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = data
+        .to_xdr(Limits::none())
+        .map_err(|e| format!("failed to serialize SorobanTransactionData: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
 
 pub fn build_invoke_tx(
     source_account: &str,
@@ -224,4 +244,49 @@ mod tests {
         );
         assert!(err.is_err());
     }
+
+    #[test]
+    fn test_soroban_transaction_data_roundtrip() {
+        let orig = SorobanTransactionData::default();
+        let encoded = encode_soroban_transaction_data(&orig).expect("encoding should succeed");
+        let decoded = decode_soroban_transaction_data(&encoded).expect("decoding should succeed");
+        assert_eq!(orig, decoded);
+    }
+
+    #[test]
+    fn test_build_invoke_tx_with_soroban_data_produces_v1() {
+        let data = SorobanTransactionData::default();
+        let tx = build_invoke_tx(
+            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY",
+            "set_prices",
+            vec![ScVal::Void],
+            100,
+            1,
+            Some(data.clone()),
+        )
+        .expect("build_invoke_tx should succeed with SorobanTransactionData");
+
+        match tx.ext {
+            TransactionExt::V1(ref ext_data) => assert_eq!(ext_data, &data),
+            TransactionExt::V0 => panic!("expected TransactionExt::V1, got V0"),
+        }
+    }
+
+    #[test]
+    fn test_decode_soroban_transaction_data_invalid_base64() {
+        let res = decode_soroban_transaction_data("!!!not-base64!!!");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("invalid base64"));
+    }
+
+    #[test]
+    fn test_decode_soroban_transaction_data_invalid_xdr() {
+        use base64::Engine;
+        let bad_b64 = base64::engine::general_purpose::STANDARD.encode(b"invalid xdr data");
+        let res = decode_soroban_transaction_data(&bad_b64);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("failed to decode SorobanTransactionData XDR"));
+    }
 }
+

@@ -754,6 +754,8 @@ async fn set_prices_on_chain(
         .await
         .map_err(|e| e.to_string())?;
 
+    let soroban_data = simulate_invoke_for_prices(state, &prices_vec).await;
+
     let tx = tx_builder::build_invoke_tx(
         &state.config.keeper_account_id,
         &state.config.oracle_contract_id,
@@ -761,7 +763,7 @@ async fn set_prices_on_chain(
         vec![prices_scval],
         state.config.set_prices_tx_fee,
         sequence,
-        None,
+        soroban_data,
     )?;
 
     let signed_xdr = tx_builder::sign_transaction(
@@ -824,6 +826,8 @@ async fn execute_handler(
         }
     };
 
+    let soroban_data = simulate_invoke_for_handler(state, contract_id, method, key).await;
+
     let tx = tx_builder::build_invoke_tx(
         &state.config.keeper_account_id,
         contract_id,
@@ -836,7 +840,7 @@ async fn execute_handler(
         ],
         state.config.keeper_tx_fee,
         sequence,
-        None,
+        soroban_data,
     )?;
 
     let signed_xdr = tx_builder::sign_transaction(
@@ -990,6 +994,146 @@ async fn simulate_contract_call_once(
         .ok_or_else(|| "Missing result in simulation response".to_string())?;
 
     Ok(result.to_string())
+}
+
+/// Simulates a `set_prices` contract invocation on Soroban RPC to obtain
+/// the required `SorobanTransactionData` (resource footprint and storage keys) (#910).
+/// Falls back gracefully to `None` if simulation fails or returns no transactionData.
+async fn simulate_invoke_for_prices(
+    state: &Arc<AppState>,
+    prices: &[&CachedPrice],
+) -> Option<stellar_xdr::SorobanTransactionData> {
+    let prices_scval = match scval::encode_prices_vec(prices) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "failed to encode prices for simulation; proceeding with None");
+            return None;
+        }
+    };
+    use stellar_xdr::WriteXdr;
+    let b64 = match prices_scval.to_xdr(stellar_xdr::Limits::none()) {
+        Ok(bytes) => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to serialize prices ScVal for simulation; proceeding with None");
+            return None;
+        }
+    };
+
+    simulate_invoke_operation(
+        state,
+        &state.config.oracle_contract_id,
+        "set_prices",
+        &[serde_json::Value::String(b64)],
+    )
+    .await
+}
+
+/// Simulates a handler (order/deposit/withdrawal execution or freeze) invocation
+/// on Soroban RPC to obtain the required `SorobanTransactionData` (#910).
+/// Falls back gracefully to `None` if simulation fails or returns no transactionData.
+async fn simulate_invoke_for_handler(
+    state: &Arc<AppState>,
+    contract_id: &str,
+    method: &str,
+    key: &str,
+) -> Option<stellar_xdr::SorobanTransactionData> {
+    simulate_invoke_operation(
+        state,
+        contract_id,
+        method,
+        &[
+            serde_json::Value::String(state.config.keeper_account_id.clone()),
+            serde_json::Value::String(key.to_string()),
+        ],
+    )
+    .await
+}
+
+/// Helper that invokes `simulateTransaction` on Stellar/Soroban RPC with the keeper's
+/// operation details, parsing any returned `transactionData` into `SorobanTransactionData`.
+async fn simulate_invoke_operation(
+    state: &Arc<AppState>,
+    contract_id: &str,
+    method: &str,
+    args: &[serde_json::Value],
+) -> Option<stellar_xdr::SorobanTransactionData> {
+    let rpc_url = &state.config.stellar_rpc_url;
+    let passphrase = &state.config.network_passphrase;
+
+    let payload = match serde_json::to_string(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "simulateTransaction",
+        "params": {
+            "transaction": {
+                "source_account": state.config.keeper_account_id,
+                "fee": "100",
+                "network_passphrase": passphrase,
+                "operations": [{
+                    "type": "invoke",
+                    "contract_id": contract_id,
+                    "method": method,
+                    "args": args
+                }]
+            }
+        }
+    })) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = %e, method, "failed to serialize simulateTransaction payload");
+            return None;
+        }
+    };
+
+    let post_result = crate::retry::retry_with_backoff(
+        || async { crate::stellar_rpc::rpc_post(rpc_url, payload.clone()).await },
+        SIMULATE_RETRY_ATTEMPTS,
+        SIMULATE_RETRY_BASE_DELAY_MS,
+        30_000,
+    )
+    .await;
+
+    let body = match post_result {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, method, contract_id, "simulateTransaction RPC failed; proceeding with None");
+            return None;
+        }
+    };
+
+    let response_json: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(j) => j,
+        Err(e) => {
+            warn!(error = %e, method, "failed to parse simulation RPC response; proceeding with None");
+            return None;
+        }
+    };
+
+    if let Some(err) = response_json.get("error") {
+        warn!(error = %err, method, contract_id, "simulation returned error; proceeding with None");
+        return None;
+    }
+
+    let result = match response_json.get("result") {
+        Some(r) => r,
+        None => return None,
+    };
+
+    let data_str = match result.get("transactionData").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return None,
+    };
+
+    match tx_builder::decode_soroban_transaction_data(data_str) {
+        Ok(data) => Some(data),
+        Err(e) => {
+            warn!(error = %e, method, "failed to decode SorobanTransactionData from simulation; proceeding with None");
+            None
+        }
+    }
 }
 
 fn parse_u32_from_result(result: &str) -> Result<u32, String> {
