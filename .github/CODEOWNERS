@@ -1,9 +1,9 @@
-﻿# Global fallback owner for all paths in the repository
-* @Rickyy1017
+# Global fallback owner for all paths in the repository
+* @ogundelevictory
 
 # Specific infrastructure files assigned directly to the core maintainer
-/.github/      @Rickyy1017
-/Dockerfile    @Rickyy1017
-/fly.toml      @Rickyy1017
-/railway.json  @Rickyy1017
-/deny.toml     @Rickyy1017
+/.github/      @ogundelevictory
+/Dockerfile    @ogundelevictory
+/fly.toml      @ogundelevictory
+/railway.json  @ogundelevictory
+/deny.toml     @ogundelevictory
