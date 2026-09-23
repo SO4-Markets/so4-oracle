@@ -96,7 +96,10 @@ pub struct Config {
     pub keeper_secret_key: SecretString,
     /// Keeper Stellar account ID (G-prefixed strkey). Env: `KEEPER_ACCOUNT_ID`.
     pub keeper_account_id: String,
-    /// Index of this keeper instance (for multi-keeper sharding). Env: `KEEPER_INDEX`, default `0`.
+    /// Index of this keeper instance, used only to label which keeper signed a
+    /// given price submission. Has no work-partitioning behavior — every
+    /// instance processes the full pending-work set regardless of index.
+    /// Env: `KEEPER_INDEX`, default `0`.
     pub keeper_index: u32,
     /// Optional bearer token for admin API endpoints. Env: `ADMIN_API_TOKEN`.
     pub admin_api_token: Option<SecretString>,

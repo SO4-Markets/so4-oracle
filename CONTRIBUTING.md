@@ -29,17 +29,33 @@ cargo test --workspace
 
 **Environment variables**
 
-Key variables (see `oracle/src/config.rs` for the full list):
+The full list is defined in `oracle/src/config.rs` (`Config::from_lookup`). The table below shows all variables; required ones are marked with a star.
 
-| Variable | Description |
-|---|---|
-| `PRICE_FEED_CONFIG` | JSON array of `TokenConfig` entries (see `config/tokens.json` for the schema) |
-| `STELLAR_RPC_URL` | Soroban RPC endpoint |
-| `HORIZON_URL` | Stellar Horizon endpoint |
-| `STELLAR_NETWORK` | `testnet` or `mainnet` — the network passphrase is derived from this automatically, it is not itself a configurable variable |
-| `KEEPER_SECRET_KEY` | Stellar secret key for the keeper account |
-| `ORACLE_CONTRACT_ID` | Deployed oracle contract address |
-| `ADMIN_API_TOKEN` | Bearer token for admin routes (`/oracle/status`, `/metrics`, etc.) |
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `STELLAR_NETWORK` | | `testnet` | `testnet` or `mainnet` — the network passphrase is derived automatically |
+| `STELLAR_RPC_URL` | * (mainnet) | public testnet RPC | Soroban RPC endpoint |
+| `HORIZON_URL` | | testnet/mainnet Horizon URL | Stellar Horizon endpoint |
+| `BIND_ADDR` | | `0.0.0.0:8080` | Address and port the HTTP server binds to |
+| `PRICE_FEED_CONFIG` | | embedded `config/tokens.json` | JSON array of `TokenConfig` entries (see `config/tokens.json` for schema) |
+| `ORACLE_CONTRACT_ID` (or `ORACLE`) | * | | Deployed oracle contract address |
+| `ROLE_STORE` | * | | On-chain role-store contract address |
+| `DATA_STORE` | * | | On-chain data-store contract address |
+| `ORDER_HANDLER` | * | | On-chain order-handler contract address |
+| `DEPOSIT_HANDLER` | * | | On-chain deposit-handler contract address |
+| `WITHDRAWAL_HANDLER` | * | | On-chain withdrawal-handler contract address |
+| `READER` | * | | On-chain reader contract address |
+| `KEEPER_PRIVATE_KEY` | * | | Keeper ed25519 private key (hex-encoded 32 bytes) |
+| `KEEPER_SECRET_KEY` | * | | Keeper Stellar strkey secret seed (S-prefixed) |
+| `KEEPER_ACCOUNT_ID` | * | | Keeper Stellar account ID (G-prefixed strkey) |
+| `KEEPER_INDEX` | | `0` | Labels which keeper signed a given price (carries no work-partitioning behavior — see README.md for single-instance constraint) |
+| `ADMIN_API_TOKEN` | | | Bearer token for admin routes (`/oracle/status`, `/metrics`, etc.) |
+| `PYTH_API_KEY` | | | API key for the production Hermes (Pyth) endpoint |
+| `MIN_KEEPER_BALANCE_XLM` | | `1.0` | Minimum keeper XLM balance before halting |
+| `SET_PRICES_TX_FEE` | | `1000000` | Inclusion fee (stroops) for `set_prices` transactions |
+| `KEEPER_TX_FEE` | | `2000000` | Inclusion fee (stroops) for keeper handler transactions |
+| `PRICE_LOOP_MS` | | `1000` | Interval between price-feed refresh cycles (ms) |
+| `KEEPER_LOOP_MS` | | `1500` | Interval between keeper execution cycles (ms) |
 
 **Run locally**
 
