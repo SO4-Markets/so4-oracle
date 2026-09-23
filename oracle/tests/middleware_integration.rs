@@ -143,6 +143,79 @@ async fn test_promtool_validation() {
     }
 }
 
+/// #1010 — GET /metrics must return the Prometheus exposition text format
+/// Content-Type header so strict scrapers (promtool, real Prometheus) parse
+/// the response correctly.
+#[tokio::test]
+async fn metrics_endpoint_content_type_matches_prometheus_exposition_format() {
+    let mock_server = MockServer::start().await;
+    let config = test_config(&mock_server.uri(), "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let req = Request::builder()
+        .uri("/metrics")
+        .header("Authorization", "Bearer test-admin-token")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+
+    let content_type = res
+        .headers()
+        .get("content-type")
+        .expect("response should have content-type header")
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        content_type, "text/plain; version=0.0.4; charset=utf-8",
+        "GET /metrics must return the Prometheus exposition text format Content-Type"
+    );
+}
+
+/// #1012 — CORS is deliberately scoped to the public /prices route only;
+/// admin and health routes must not be cross-origin reachable. This pair of
+/// tests locks in that security boundary.
+#[tokio::test]
+async fn cors_headers_present_on_public_prices_route() {
+    let mock_server = MockServer::start().await;
+    let config = test_config(&mock_server.uri(), "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let req = Request::builder()
+        .uri("/prices")
+        .header("Origin", "https://example.com")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+
+    assert!(
+        res.headers().contains_key("access-control-allow-origin"),
+        "GET /prices must include Access-Control-Allow-Origin header"
+    );
+}
+
+#[tokio::test]
+async fn cors_headers_absent_on_admin_route() {
+    let mock_server = MockServer::start().await;
+    let config = test_config(&mock_server.uri(), "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let req = Request::builder()
+        .uri("/oracle/status")
+        .header("Origin", "https://example.com")
+        .header("Authorization", "Bearer test-admin-token")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+
+    assert!(
+        !res.headers().contains_key("access-control-allow-origin"),
+        "GET /oracle/status must NOT include Access-Control-Allow-Origin header"
+    );
+}
+
 /// #790 — `trace_layer` runs *after* `SetRequestIdLayer` now, so a request's
 /// span carries the real request id instead of an empty string. Drives a
 /// request with an explicit `x-request-id` through the real router with a
