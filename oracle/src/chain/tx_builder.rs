@@ -2,13 +2,39 @@ use ed25519_dalek::Signer;
 use sha2::{Digest, Sha256};
 use stellar_xdr::{
     DecoratedSignature, InvokeContractArgs, InvokeHostFunctionOp, Limits, Memo, Operation,
-    OperationBody, Preconditions, ScSymbol, ScVal, SequenceNumber, Signature, SignatureHint,
+    OperationBody, Preconditions, ReadXdr, ScSymbol, ScVal, SequenceNumber, Signature, SignatureHint,
     SorobanTransactionData, Transaction, TransactionEnvelope, TransactionExt,
     TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
     TransactionV1Envelope, VecM, WriteXdr,
 };
 
 use crate::chain::scval::{account_strkey_to_muxed, strkey_to_sc_address};
+
+/// Standard base inclusion fee per operation on Stellar (100 stroops).
+pub const BASE_INCLUSION_FEE: u64 = 100;
+
+/// Derive the transaction fee from the simulated resource fee (`minResourceFee`)
+/// plus base inclusion fee. Falls back to `fallback_fee` if `simulated_resource_fee` is `None` (#911).
+pub fn derive_transaction_fee(simulated_resource_fee: Option<u64>, fallback_fee: u32) -> u32 {
+    match simulated_resource_fee {
+        Some(res_fee) => {
+            let total = res_fee.saturating_add(BASE_INCLUSION_FEE);
+            u32::try_from(total).unwrap_or(u32::MAX)
+        }
+        None => fallback_fee,
+    }
+}
+
+/// Decode a base64-encoded `SorobanTransactionData` XDR string returned by
+/// Soroban RPC `simulateTransaction`.
+pub fn decode_soroban_transaction_data(base64_str: &str) -> Result<SorobanTransactionData, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_str.trim())
+        .map_err(|e| format!("invalid base64 in transactionData: {e}"))?;
+    SorobanTransactionData::from_xdr(&bytes, Limits::none())
+        .map_err(|e| format!("failed to decode SorobanTransactionData XDR: {e}"))
+}
 
 pub fn build_invoke_tx(
     source_account: &str,
@@ -224,4 +250,25 @@ mod tests {
         );
         assert!(err.is_err());
     }
+
+    #[test]
+    fn test_derive_transaction_fee_with_simulated_fee() {
+        // Simulation gives 1500 stroops minResourceFee -> 1500 + 100 = 1600 stroops
+        let fee = derive_transaction_fee(Some(1500), 1_000_000);
+        assert_eq!(fee, 1600);
+    }
+
+    #[test]
+    fn test_derive_transaction_fee_fallback_when_none() {
+        // Simulation failed / returned None -> falls back to configured fee
+        let fee = derive_transaction_fee(None, 1_000_000);
+        assert_eq!(fee, 1_000_000);
+    }
+
+    #[test]
+    fn test_derive_transaction_fee_saturating_overflow() {
+        let fee = derive_transaction_fee(Some(u64::MAX), 1_000_000);
+        assert_eq!(fee, u32::MAX);
+    }
 }
+

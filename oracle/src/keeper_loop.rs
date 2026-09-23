@@ -754,14 +754,21 @@ async fn set_prices_on_chain(
         .await
         .map_err(|e| e.to_string())?;
 
+    let sim_result = simulate_invoke_for_prices(state, &prices_vec).await;
+    let fee = tx_builder::derive_transaction_fee(
+        sim_result.as_ref().and_then(|r| r.min_resource_fee),
+        state.config.set_prices_tx_fee,
+    );
+    let soroban_data = sim_result.and_then(|r| r.soroban_data);
+
     let tx = tx_builder::build_invoke_tx(
         &state.config.keeper_account_id,
         &state.config.oracle_contract_id,
         "set_prices",
         vec![prices_scval],
-        state.config.set_prices_tx_fee,
+        fee,
         sequence,
-        None,
+        soroban_data,
     )?;
 
     let signed_xdr = tx_builder::sign_transaction(
@@ -824,6 +831,13 @@ async fn execute_handler(
         }
     };
 
+    let sim_result = simulate_invoke_for_handler(state, contract_id, method, key).await;
+    let fee = tx_builder::derive_transaction_fee(
+        sim_result.as_ref().and_then(|r| r.min_resource_fee),
+        state.config.keeper_tx_fee,
+    );
+    let soroban_data = sim_result.and_then(|r| r.soroban_data);
+
     let tx = tx_builder::build_invoke_tx(
         &state.config.keeper_account_id,
         contract_id,
@@ -834,9 +848,9 @@ async fn execute_handler(
             )?),
             key_scval,
         ],
-        state.config.keeper_tx_fee,
+        fee,
         sequence,
-        None,
+        soroban_data,
     )?;
 
     let signed_xdr = tx_builder::sign_transaction(
@@ -990,6 +1004,165 @@ async fn simulate_contract_call_once(
         .ok_or_else(|| "Missing result in simulation response".to_string())?;
 
     Ok(result.to_string())
+}
+
+/// Parsed simulation outcome containing dynamic resource fee and footprint metadata (#911).
+#[derive(Debug, Clone, Default)]
+pub struct SimulationOutcome {
+    pub min_resource_fee: Option<u64>,
+    pub soroban_data: Option<stellar_xdr::SorobanTransactionData>,
+}
+
+fn parse_min_resource_fee(result: &serde_json::Value) -> Option<u64> {
+    result.get("minResourceFee").and_then(|val| {
+        if let Some(n) = val.as_u64() {
+            Some(n)
+        } else if let Some(s) = val.as_str() {
+            s.parse::<u64>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+/// Simulates a `set_prices` contract invocation on Soroban RPC to obtain
+/// the required `minResourceFee` and `SorobanTransactionData` (#911).
+/// Falls back gracefully to `None` if simulation fails.
+async fn simulate_invoke_for_prices(
+    state: &Arc<AppState>,
+    prices: &[&CachedPrice],
+) -> Option<SimulationOutcome> {
+    let prices_scval = match scval::encode_prices_vec(prices) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "failed to encode prices for simulation; proceeding with fallback fee");
+            return None;
+        }
+    };
+    use stellar_xdr::WriteXdr;
+    let b64 = match prices_scval.to_xdr(stellar_xdr::Limits::none()) {
+        Ok(bytes) => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to serialize prices ScVal for simulation; proceeding with fallback fee");
+            return None;
+        }
+    };
+
+    simulate_invoke_operation(
+        state,
+        &state.config.oracle_contract_id,
+        "set_prices",
+        &[serde_json::Value::String(b64)],
+    )
+    .await
+}
+
+/// Simulates a handler invocation on Soroban RPC to obtain
+/// the required `minResourceFee` and `SorobanTransactionData` (#911).
+/// Falls back gracefully to `None` if simulation fails.
+async fn simulate_invoke_for_handler(
+    state: &Arc<AppState>,
+    contract_id: &str,
+    method: &str,
+    key: &str,
+) -> Option<SimulationOutcome> {
+    simulate_invoke_operation(
+        state,
+        contract_id,
+        method,
+        &[
+            serde_json::Value::String(state.config.keeper_account_id.clone()),
+            serde_json::Value::String(key.to_string()),
+        ],
+    )
+    .await
+}
+
+/// Helper that invokes `simulateTransaction` on Stellar/Soroban RPC with the keeper's
+/// operation details, extracting dynamic `minResourceFee` and `SorobanTransactionData`.
+async fn simulate_invoke_operation(
+    state: &Arc<AppState>,
+    contract_id: &str,
+    method: &str,
+    args: &[serde_json::Value],
+) -> Option<SimulationOutcome> {
+    let rpc_url = &state.config.stellar_rpc_url;
+    let passphrase = &state.config.network_passphrase;
+
+    let payload = match serde_json::to_string(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "simulateTransaction",
+        "params": {
+            "transaction": {
+                "source_account": state.config.keeper_account_id,
+                "fee": "100",
+                "network_passphrase": passphrase,
+                "operations": [{
+                    "type": "invoke",
+                    "contract_id": contract_id,
+                    "method": method,
+                    "args": args
+                }]
+            }
+        }
+    })) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = %e, method, "failed to serialize simulateTransaction payload");
+            return None;
+        }
+    };
+
+    let post_result = crate::retry::retry_with_backoff(
+        || async { crate::stellar_rpc::rpc_post(rpc_url, payload.clone()).await },
+        SIMULATE_RETRY_ATTEMPTS,
+        SIMULATE_RETRY_BASE_DELAY_MS,
+        30_000,
+    )
+    .await;
+
+    let body = match post_result {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, method, contract_id, "simulateTransaction RPC failed; proceeding with fallback fee");
+            return None;
+        }
+    };
+
+    let response_json: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(j) => j,
+        Err(e) => {
+            warn!(error = %e, method, "failed to parse simulation RPC response; proceeding with fallback fee");
+            return None;
+        }
+    };
+
+    if let Some(err) = response_json.get("error") {
+        warn!(error = %err, method, contract_id, "simulation returned error; proceeding with fallback fee");
+        return None;
+    }
+
+    let result = match response_json.get("result") {
+        Some(r) => r,
+        None => return None,
+    };
+
+    let mut outcome = SimulationOutcome::default();
+    if let Some(min_fee) = parse_min_resource_fee(result) {
+        outcome.min_resource_fee = Some(min_fee);
+    }
+
+    if let Some(data_str) = result.get("transactionData").and_then(|v| v.as_str()) {
+        if let Ok(data) = tx_builder::decode_soroban_transaction_data(data_str) {
+            outcome.soroban_data = Some(data);
+        }
+    }
+
+    Some(outcome)
 }
 
 fn parse_u32_from_result(result: &str) -> Result<u32, String> {
