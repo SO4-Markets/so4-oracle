@@ -44,7 +44,7 @@ pub fn aggregate_prices(
         ));
     }
 
-    let filter_result = filter_outliers(prices, sources);
+    let filter_result = filter_outliers_with_max_deviation(prices, sources, Some(max_deviation_bps));
     let filtered_prices = filter_result.filtered_prices;
     let filtered_sources = filter_result.filtered_sources;
 
@@ -156,8 +156,17 @@ pub struct OutlierFilterResult {
 /// Primary rule: reject prices whose absolute deviation from the median exceeds
 /// 6x the median absolute deviation (MAD). If MAD is zero (a degenerate/flat
 /// cluster where at least half the inputs have identical deviation), fall back
-/// to rejecting prices more than 3 standard deviations from the median.
-pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResult {
+/// to rejecting prices more than 2.0 standard deviations from the median, since
+/// for N=3 the maximum possible z-score is 3/sqrt(2) ≈ 2.12 and 3.0*stddev is
+/// mathematically unreachable, leaving colluding majority feeds unchecked (#915).
+///
+/// When `max_deviation_bps` is provided, prices whose basis-point deviation
+/// from the median exceeds `max_deviation_bps` are also rejected.
+pub fn filter_outliers_with_max_deviation(
+    prices: &[i128],
+    sources: &[String],
+    max_deviation_bps: Option<u32>,
+) -> OutlierFilterResult {
     if prices.is_empty() {
         return OutlierFilterResult {
             filtered_prices: vec![],
@@ -204,13 +213,18 @@ pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResu
 
     for (i, &p) in prices.iter().enumerate() {
         let dev = (p as f64 - median as f64).abs();
-        let is_outlier = if mad > 0 {
+        let is_statistical_outlier = if mad > 0 {
             dev > 6.0 * mad as f64
         } else {
-            stddev > 0.0 && dev > 3.0 * stddev
+            stddev > 0.0 && dev > 2.0 * stddev
         };
 
-        if is_outlier {
+        let exceeds_max_dev = match max_deviation_bps {
+            Some(max_bps) => deviation_bps(p, median) > max_bps as f64,
+            None => false,
+        };
+
+        if is_statistical_outlier || exceeds_max_dev {
             rejected.push((sources[i].clone(), p, dev));
         } else {
             filtered_prices.push(p);
@@ -223,6 +237,12 @@ pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResu
         filtered_sources,
         rejected,
     }
+}
+
+/// Backward-compatible wrapper around `filter_outliers_with_max_deviation` without
+/// a per-token basis-point threshold (only statistical MAD/stddev rejection).
+pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResult {
+    filter_outliers_with_max_deviation(prices, sources, None)
 }
 
 /// Compute the median of a slice of prices safely.
@@ -770,4 +790,63 @@ mod tests {
         assert_eq!(result.filtered_prices[0], 42);
         assert_eq!(result.rejected.len(), 0);
     }
+
+    // ── #915: Majority-source collusion resistance regression tests ─────────
+
+    #[test]
+    fn test_majority_collusion_two_of_three_flags_dissenting_source_as_outlier() {
+        let sources = vec![
+            "binance".to_string(),
+            "coinbase".to_string(),
+            "pyth".to_string(),
+        ];
+        // 2 sources report manipulated 100, 1 honest source reports 110 (10% deviation)
+        let result = aggregate_prices(&[100, 100, 110], &sources, 2, 100).unwrap();
+        assert_eq!(result.sources_used, vec!["binance", "coinbase"]);
+        assert_eq!(result.rejected_sources.len(), 1);
+        assert_eq!(result.rejected_sources[0].source, "pyth");
+        assert_eq!(result.rejected_sources[0].price, 110);
+    }
+
+    #[test]
+    fn test_majority_collusion_with_min_sources_three_fails() {
+        let sources = vec![
+            "binance".to_string(),
+            "coinbase".to_string(),
+            "pyth".to_string(),
+        ];
+        // When min_sources=3, rejecting the outlier prevents 2 colluding sources from satisfying quorum
+        let err = aggregate_prices(&[100, 100, 110], &sources, 3, 100).unwrap_err();
+        assert!(err.contains("insufficient sources after filtering"));
+        assert!(err.contains("got 2 of 3, need 3"));
+    }
+
+    #[test]
+    fn test_majority_collusion_extreme_manipulation_magnitude_rejected() {
+        let sources = vec![
+            "binance".to_string(),
+            "coinbase".to_string(),
+            "pyth".to_string(),
+        ];
+        // 2 sources collude on 100, 1 source reports 100_000
+        let result = aggregate_prices(&[100, 100, 100_000], &sources, 2, 200).unwrap();
+        assert_eq!(result.sources_used, vec!["binance", "coinbase"]);
+        assert_eq!(result.rejected_sources.len(), 1);
+        assert_eq!(result.rejected_sources[0].source, "pyth");
+        assert_eq!(result.rejected_sources[0].price, 100_000);
+    }
+
+    #[test]
+    fn test_three_sources_all_consistent_keeps_all() {
+        let sources = vec![
+            "binance".to_string(),
+            "coinbase".to_string(),
+            "pyth".to_string(),
+        ];
+        // All 3 sources agree exactly
+        let result = aggregate_prices(&[100, 100, 100], &sources, 2, 100).unwrap();
+        assert_eq!(result.sources_used.len(), 3);
+        assert_eq!(result.rejected_sources.len(), 0);
+    }
 }
+
