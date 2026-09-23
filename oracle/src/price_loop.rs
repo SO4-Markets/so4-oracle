@@ -27,7 +27,15 @@ pub enum PriceSourceError {
 
 impl CachedPrice {
     pub fn is_stale(&self, stale_after_seconds: u64, now: u64) -> bool {
-        now.saturating_sub(self.timestamp) >= stale_after_seconds
+        // #1041 — when the wall clock moves backward relative to the cached
+        // timestamp (NTP step, VM live-migration, container clock correction),
+        // `saturating_sub` silently clamps the age to 0, reporting the price
+        // as maximally fresh. Treat `timestamp > now` as its own suspicious
+        // condition: the price is stale because the age is indeterminate.
+        match now.checked_sub(self.timestamp) {
+            Some(age) => age >= stale_after_seconds,
+            None => true,
+        }
     }
 }
 
@@ -731,13 +739,15 @@ mod tests {
 
         // Edge cases
         assert!(!price.is_stale(60, 1000));
-        assert!(!price.is_stale(60, 0));
+        // #1041 — clock moved backward: timestamp > now means indeterminate age,
+        // treated as stale rather than silently reported as fresh.
+        assert!(price.is_stale(60, 0));
         assert!(price.is_stale(0, 1001));
         assert!(price.is_stale(0, 1000));
     }
 
     #[test]
-    fn test_cached_price_is_stale_saturating_sub() {
+    fn test_cached_price_is_stale_clock_backward() {
         let price = CachedPrice {
             token_address: "test".to_string(),
             symbol: "TEST".to_string(),
@@ -752,8 +762,9 @@ mod tests {
             signature: "sig".to_string(),
         };
 
-        // Should not overflow due to saturating_sub
-        assert!(!price.is_stale(60, 1000));
+        // #1041 — timestamp far ahead of now: treated as stale, not fresh.
+        // Previously, saturating_sub silently clamped age to 0.
+        assert!(price.is_stale(60, 1000));
     }
 
     #[test]

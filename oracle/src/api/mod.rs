@@ -10,6 +10,7 @@ use axum::routing::{delete, get};
 use axum::{Json, Router};
 use serde::Serialize;
 use std::time::Duration;
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -218,6 +219,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(prices::failed_submissions),
         )
         .with_state(state.clone())
+        // #1044 — CatchPanicLayer must be the OUTERMOST layer so it wraps
+        // every handler. With `panic = "abort"` in the release profile a
+        // panicking handler would otherwise abort the entire process; this
+        // layer converts panics into 500 responses instead, isolating faults
+        // to the offending request.
+        .layer(CatchPanicLayer::new())
         // Layer ordering: `.layer()` calls chained directly on a `Router` make
         // the LAST-added layer the OUTERMOST — it sees the request first. So
         // `SetRequestIdLayer` must be added *after* `trace_layer` for the ID
@@ -276,13 +283,13 @@ mod tests {
         let app = super::build_router(state);
 
         for uri in ["/health", "/ready", "/prices"] {
-            let request = Request::builder()
-                .uri(uri)
-                .body(Body::empty())
-                .unwrap();
+            let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(
-                response.headers().get(CACHE_CONTROL).map(|v| v.to_str().unwrap()),
+                response
+                    .headers()
+                    .get(CACHE_CONTROL)
+                    .map(|v| v.to_str().unwrap()),
                 Some("no-store"),
                 "missing/incorrect Cache-Control on {uri}"
             );
