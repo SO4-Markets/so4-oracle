@@ -22,6 +22,22 @@ const SIMULATE_RETRY_ATTEMPTS: u32 = 3;
 const SIMULATE_RETRY_BASE_DELAY_MS: u64 = 100;
 /// Hard cap on a single keeper cycle — closes #490.
 const KEEPER_CYCLE_TIMEOUT_SECS: u64 = 50;
+/// Maximum character length of raw RPC error JSON embedded in log fields (#1005).
+/// Matches the truncation discipline already applied to diagnostic events in
+/// `submit.rs::truncate_events_for_log` — raw error bodies from a misbehaving
+/// RPC endpoint can be arbitrarily large and must not flow unbounded into
+/// structured logs.
+const MAX_RPC_ERROR_LOG_LEN: usize = 256;
+
+/// Truncate a raw RPC error value to a bounded string for safe logging.
+fn truncate_rpc_error(error: &serde_json::Value) -> String {
+    let s = error.to_string();
+    if s.len() > MAX_RPC_ERROR_LOG_LEN {
+        format!("{}…", &s[..MAX_RPC_ERROR_LOG_LEN])
+    } else {
+        s
+    }
+}
 
 #[derive(Debug)]
 enum SequenceFetchError {
@@ -940,7 +956,8 @@ async fn get_account_sequence_once(state: &Arc<AppState>) -> Result<u64, Sequenc
 
     if let Some(error) = response_json.get("error") {
         return Err(SequenceFetchError::Network(format!(
-            "getAccount error: {error}"
+            "getAccount error: {}",
+            truncate_rpc_error(error)
         )));
     }
 
@@ -1050,7 +1067,7 @@ async fn simulate_contract_call_once(
         serde_json::from_str(&body).map_err(|e| format!("Failed to parse RPC response: {e}"))?;
 
     if let Some(error) = response_json.get("error") {
-        return Err(format!("Simulation error: {error}"));
+        return Err(format!("Simulation error: {}", truncate_rpc_error(error)));
     }
 
     let result = response_json
