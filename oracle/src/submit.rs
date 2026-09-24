@@ -60,7 +60,10 @@ fn truncate_events_for_log(events: &[String]) -> Vec<String> {
 pub enum SubmitError {
     Rpc(RpcError),
     JsonError(String),
-    Rejected { status: String },
+    Rejected {
+        status: String,
+        error_result_xdr: Option<String>,
+    },
     TransactionFailed { events: Vec<String> },
     PollTimeout { hash: String },
 }
@@ -70,7 +73,13 @@ impl std::fmt::Display for SubmitError {
         match self {
             SubmitError::Rpc(e) => write!(f, "RPC error: {e}"),
             SubmitError::JsonError(msg) => write!(f, "JSON parse error: {msg}"),
-            SubmitError::Rejected { status } => write!(f, "transaction rejected: {status}"),
+            SubmitError::Rejected { status, error_result_xdr } => {
+                write!(f, "transaction rejected: {status}")?;
+                if let Some(xdr) = error_result_xdr {
+                    write!(f, " (errorResultXdr: {xdr})")?;
+                }
+                Ok(())
+            }
             SubmitError::TransactionFailed { events } => {
                 write!(
                     f,
@@ -172,6 +181,7 @@ async fn send_transaction_xdr(rpc_url: &str, signed_xdr: &str) -> Result<String,
     if result.status != "PENDING" {
         return Err(SubmitError::Rejected {
             status: result.status,
+            error_result_xdr: result.error_result_xdr,
         });
     }
 
@@ -427,6 +437,7 @@ mod tests {
     fn submit_error_display_rejected() {
         let err = SubmitError::Rejected {
             status: "ERROR".to_string(),
+            error_result_xdr: None,
         };
         assert_eq!(err.to_string(), "transaction rejected: ERROR");
     }
@@ -682,6 +693,7 @@ mod tests {
             match result {
                 Err(SubmitError::Rejected {
                     status: returned_status,
+                    ..
                 }) => {
                     assert_eq!(returned_status, status);
                 }

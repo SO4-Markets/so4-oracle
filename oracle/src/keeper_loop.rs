@@ -12,6 +12,7 @@ use crate::state::{
     AppState, CachedPrice, FailedSubmission, KeeperExecution, IN_FLIGHT_EXPIRY,
     MAX_CONSECUTIVE_EXECUTION_FAILURES, MAX_CONSECUTIVE_FREEZE_FAILURES,
 };
+use crate::submit::SubmitError;
 
 const ACCOUNT_SEQUENCE_RETRY_ATTEMPTS: u32 = 3;
 const ACCOUNT_SEQUENCE_RETRY_BASE_DELAY_MS: u64 = 100;
@@ -788,6 +789,36 @@ fn is_bad_sequence_error(error: &str) -> bool {
     lower.contains("bad_sequence") || lower.contains("bad_seq") || lower.contains("badseq")
 }
 
+/// Decode a base64 `errorResultXdr` and check whether the decoded
+/// `TransactionResult` carries a `tx_bad_seq` result code (#998).
+///
+/// Returns `true` only when the XDR decodes cleanly *and* the result code
+/// is `tx_bad_seq`. Malformed or non-bad-seq XDR returns `false` (caller
+/// falls through to other detection paths).
+fn is_bad_sequence_xdr(error_result_xdr: &str) -> bool {
+    use base64::Engine;
+    use stellar_xdr::{Decode, TransactionResult, TransactionResultResult};
+
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(error_result_xdr) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    let tx_result = match TransactionResult::from_xdr_base64(error_result_xdr) {
+        Ok(r) => r,
+        // Manual fallback: try decoding from raw bytes
+        Err(_) => match TransactionResult::decode(&mut &bytes[..]) {
+            Ok(r) => r,
+            Err(_) => return false,
+        },
+    };
+
+    matches!(
+        tx_result.result,
+        TransactionResultResult::TxBadSeq(_)
+    )
+}
+
 /// Execute a handler contract call, using and maintaining a per-cycle cached
 /// account sequence number instead of fetching it via RPC on every call.
 ///
@@ -855,7 +886,15 @@ async fn execute_handler(
         }
         Err(error) => {
             let msg = error.to_string();
-            if is_bad_sequence_error(&msg) {
+            let is_bad_seq = is_bad_sequence_error(&msg)
+                || matches!(
+                    &error,
+                    SubmitError::Rejected {
+                        error_result_xdr: Some(xdr),
+                        ..
+                    } if is_bad_sequence_xdr(xdr)
+                );
+            if is_bad_seq {
                 // The cached sequence is stale relative to the network;
                 // drop it so the next call re-fetches instead of retrying
                 // with the same wrong value.
@@ -945,30 +984,59 @@ async fn simulate_contract_call_once(
     method: &str,
     args: &[&str],
 ) -> Result<String, String> {
-    let rpc_url = &state.config.stellar_rpc_url;
-    let passphrase = &state.config.network_passphrase;
+    use stellar_xdr::{TransactionEnvelope, TransactionV1Envelope, WriteXdr};
 
-    let args_json: Vec<serde_json::Value> = args
+    let rpc_url = &state.config.stellar_rpc_url;
+
+    // Convert string arguments to ScVal — contract addresses become
+    // ScVal::Address, everything else becomes ScVal::Symbol (#997).
+    let scval_args: Vec<stellar_xdr::ScVal> = args
         .iter()
-        .map(|arg| serde_json::Value::String(arg.to_string()))
-        .collect();
+        .map(|arg| {
+            if arg.starts_with('C') || arg.starts_with('G') {
+                stellar_xdr::ScVal::Address(crate::chain::scval::strkey_to_sc_address(arg)?)
+            } else {
+                let sym: stellar_xdr::ScSymbol = arg
+                    .to_string()
+                    .try_into()
+                    .map_err(|_| format!("arg '{arg}' too long for ScSymbol"))?;
+                Ok(stellar_xdr::ScVal::Symbol(sym))
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    // Build a proper XDR transaction envelope using the same pipeline as
+    // sendTransaction, instead of hand-rolling a JSON object that doesn't
+    // match the Soroban RPC simulateTransaction contract (#997).
+    let tx = tx_builder::build_invoke_tx(
+        &state.config.keeper_account_id,
+        contract_id,
+        method,
+        scval_args,
+        100,
+        0, // sequence number is irrelevant for simulation
+        None,
+    )?;
+
+    let envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
+        tx,
+        signatures: stellar_xdr::VecM::default(),
+    });
+
+    let envelope_xdr = envelope
+        .to_xdr(stellar_xdr::Limits::none())
+        .map_err(|e| format!("failed to serialize envelope to XDR: {e}"))?;
+    let envelope_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &envelope_xdr,
+    );
 
     let payload = serde_json::to_string(&serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "simulateTransaction",
         "params": {
-            "transaction": {
-                "source_account": state.config.keeper_account_id,
-                "fee": "100",
-                "network_passphrase": passphrase,
-                "operations": [{
-                    "type": "invoke",
-                    "contract_id": contract_id,
-                    "method": method,
-                    "args": args_json
-                }]
-            }
+            "transaction": envelope_b64
         }
     }))
     .map_err(|e| format!("failed to serialize request: {e}"))?;
