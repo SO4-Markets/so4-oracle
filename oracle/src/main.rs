@@ -68,6 +68,11 @@ async fn main() {
     // If either background task panics or returns unexpectedly while the
     // server is still running, trigger a full shutdown so an external
     // restart policy can take over rather than serving a half-dead process.
+    //
+    // NOTE: With panic = "abort" in [profile.release] (Cargo.toml), a panic
+    // inside a spawned task aborts the entire process before this match can
+    // observe JoinHandle::Err. This code only executes under panic = "unwind"
+    // (debug builds, cargo test). Cross-reference: Cargo.toml [profile.release].
     let exited_early = tokio::select! {
         result = &mut price_loop => {
             match result {

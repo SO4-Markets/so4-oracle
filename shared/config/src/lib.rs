@@ -41,12 +41,12 @@ pub struct TokenConfig {
     pub stale_after_seconds: u64,
     /// Minimum movement before on-chain submission, in basis points.
     pub submit_threshold_bps: u32,
+    /// Maximum allowed Pyth confidence interval width in basis points.
+    pub pyth_max_confidence_bps: u32,
     /// Minimum price bound (used by the API server for display).
     pub min: f64,
     /// Maximum price bound (used by the API server for display).
     pub max: f64,
-    /// Sources that contributed to the latest price (populated at runtime).
-    pub sources_used: Vec<String>,
 }
 
 impl Default for TokenConfig {
@@ -64,9 +64,9 @@ impl Default for TokenConfig {
             max_deviation_bps: 100,
             stale_after_seconds: 60,
             submit_threshold_bps: 10,
+            pyth_max_confidence_bps: 50,
             min: 0.0,
             max: 0.0,
-            sources_used: vec![],
         }
     }
 }
@@ -267,6 +267,15 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
             return Err(ConfigError::InvalidToken {
                 symbol: token.symbol.clone(),
                 reason: "min_sources must be at least 1".to_string(),
+            });
+        }
+        if token.pyth_max_confidence_bps > 10_000 {
+            return Err(ConfigError::InvalidToken {
+                symbol: token.symbol.clone(),
+                reason: format!(
+                    "pyth_max_confidence_bps ({}) must be between 0 and 10000",
+                    token.pyth_max_confidence_bps
+                ),
             });
         }
     }

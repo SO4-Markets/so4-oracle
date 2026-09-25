@@ -444,7 +444,7 @@ async fn fetch_source_price(
                     &feed.price,
                     crate::current_timestamp_secs(),
                     token.stale_after_seconds,
-                    50,
+                    token.pyth_max_confidence_bps,
                 )
             } else {
                 // If batch failed, we should not fall back to individual requests
@@ -479,7 +479,7 @@ async fn fetch_source_price(
                             &feed.price,
                             crate::current_timestamp_secs(),
                             token.stale_after_seconds,
-                            50,
+                            token.pyth_max_confidence_bps,
                         )
                     })
             }

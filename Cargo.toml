@@ -14,6 +14,12 @@ mismatched_lifetime_syntaxes = "allow"
 # ensures the probe reflects real liveness (/ready inspects state.cycle_status).
 # Setting panic = "abort" ensures any unexpected panic crashes the process,
 # allowing the ON_FAILURE restart policy to detect and restart it.
+#
+# NOTE: With panic = "abort", the panic-recovery code in main.rs's
+# tokio::select! (the price_loop/keeper_loop JoinHandle match arms) is
+# unreachable in release builds — a panic anywhere aborts the entire process
+# before JoinHandle::Err can be observed. That code only executes under
+# panic = "unwind" (debug builds, cargo test). Cross-reference: main.rs.
 [profile.release]
 overflow-checks = true
 panic = "abort"
