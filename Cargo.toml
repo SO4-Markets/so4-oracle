@@ -3,7 +3,14 @@ members = ["oracle", "shared/config"]
 resolver = "2"
 
 [workspace.package]
+version = "0.1.0"
+edition = "2021"
 rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/SO4-Markets/so4-oracle"
+homepage = "https://so4.market"
+description = "Production Axum service for the SO4.market Soroban oracle and keeper"
+authors = ["SO4 Markets"]
 
 [workspace.lints.rust]
 mismatched_lifetime_syntaxes = "allow"
