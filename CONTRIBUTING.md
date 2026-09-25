@@ -131,6 +131,16 @@ All open issues are tracked on [GitHub Issues](https://github.com/SO4-Markets/so
 | `documentation` | Docs, comments, diagrams |
 | `enhancement` | New feature or improvement |
 | `infrastructure` | CI, Docker, deploy scripts, tooling |
+| `apis` | HTTP API, REST endpoints, request/response handling |
+| `contracts` | Soroban smart contract interactions, on-chain calls |
+| `oracle-worker` | Cloudflare Worker oracle crate |
+| `performance` | Performance improvement |
+| `testing` | Test infrastructure, coverage, flaky tests |
+| `security` | Security vulnerability or hardening |
+| `priority` | High-priority issue requiring immediate attention |
+| `dependencies` | Dependency updates, version bumps |
+| `github_actions` | CI/CD workflows, GitHub Actions configuration |
+| `rust` | Rust language–specific issues or improvements |
 
 Before starting, leave a comment on the issue so no one duplicates effort.
 
