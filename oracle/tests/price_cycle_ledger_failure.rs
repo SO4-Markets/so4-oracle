@@ -359,37 +359,39 @@ async fn ledger_failure_records_non_zero_latency_in_metrics() {
 
 #[tokio::test]
 async fn fail_ok_fail_sequence_counts_all_three_cycles() {
+    let mock = MockServer::start().await;
+    let state = test_state(&mock.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
+
     // cycle 1: ledger fails
-    let mock_fail1 = MockServer::start().await;
-    Mock::given(method("POST"))
+    let m1 = Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
-        .mount(&mock_fail1)
+        .mount(&mock)
         .await;
-    let state1 = test_state(&mock_fail1.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
-    run_price_cycle(Arc::clone(&state1)).await;
+    run_price_cycle(Arc::clone(&state)).await;
+    m1.drop().await;
 
     // cycle 2: ledger succeeds
-    let mock_ok = MockServer::start().await;
-    Mock::given(method("POST"))
+    let m2 = Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
-        .mount(&mock_ok)
+        .mount(&mock)
         .await;
-    let state2 = test_state(&mock_ok.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
-    run_price_cycle(Arc::clone(&state2)).await;
+    run_price_cycle(Arc::clone(&state)).await;
+    m2.drop().await;
 
     // cycle 3: ledger fails again
-    let mock_fail2 = MockServer::start().await;
-    Mock::given(method("POST"))
+    let m3 = Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
-        .mount(&mock_fail2)
+        .mount(&mock)
         .await;
-    let state3 = test_state(&mock_fail2.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
-    run_price_cycle(Arc::clone(&state3)).await;
+    run_price_cycle(Arc::clone(&state)).await;
+    m3.drop().await;
 
-    // Each state instance only sees 1 cycle; all three counted individually.
-    assert_eq!(state1.metrics.to_response().price_cycle_count, 1);
-    assert_eq!(state2.metrics.to_response().price_cycle_count, 1);
-    assert_eq!(state3.metrics.to_response().price_cycle_count, 1);
+    // Single state instance sees all three cycles; count must be 3.
+    assert_eq!(
+        state.metrics.to_response().price_cycle_count,
+        3,
+        "a single AppState must accumulate cycle counts across fail-ok-fail sequence"
+    );
 }
 
 #[tokio::test]
