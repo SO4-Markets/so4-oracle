@@ -829,10 +829,7 @@ fn is_bad_sequence_xdr(error_result_xdr: &str) -> bool {
         },
     };
 
-    matches!(
-        tx_result.result,
-        TransactionResultResult::TxBadSeq(_)
-    )
+    matches!(tx_result.result, TransactionResultResult::TxBadSeq(_))
 }
 
 /// Execute a handler contract call, using and maintaining a per-cycle cached
@@ -1043,10 +1040,8 @@ async fn simulate_contract_call_once(
     let envelope_xdr = envelope
         .to_xdr(stellar_xdr::Limits::none())
         .map_err(|e| format!("failed to serialize envelope to XDR: {e}"))?;
-    let envelope_b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        &envelope_xdr,
-    );
+    let envelope_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &envelope_xdr);
 
     let payload = serde_json::to_string(&serde_json::json!({
         "jsonrpc": "2.0",

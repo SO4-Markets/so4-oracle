@@ -64,8 +64,13 @@ pub enum SubmitError {
         status: String,
         error_result_xdr: Option<String>,
     },
-    TransactionFailed { events: Vec<String> },
-    PollTimeout { hash: String },
+    Retryable(String),
+    TransactionFailed {
+        events: Vec<String>,
+    },
+    PollTimeout {
+        hash: String,
+    },
 }
 
 impl std::fmt::Display for SubmitError {
@@ -80,6 +85,7 @@ impl std::fmt::Display for SubmitError {
                 }
                 Ok(())
             }
+            SubmitError::Retryable(msg) => write!(f, "retryable: {msg}"),
             SubmitError::TransactionFailed { events } => {
                 write!(
                     f,
@@ -178,14 +184,29 @@ async fn send_transaction_xdr(rpc_url: &str, signed_xdr: &str) -> Result<String,
 
     let result = parse_send_response(&body)?;
 
-    if result.status != "PENDING" {
-        return Err(SubmitError::Rejected {
+    match result.status.as_str() {
+        "PENDING" => Ok(result.hash),
+        // DUPLICATE: the transaction was already submitted and is being processed.
+        // Proceed to poll using the hash — the transaction is already pending.
+        "DUPLICATE" => {
+            tracing::debug!(
+                hash = result.hash,
+                "sendTransaction returned DUPLICATE; polling existing transaction"
+            );
+            Ok(result.hash)
+        }
+        // TRY_AGAIN_LATER: the node's submission queue is full — a genuinely
+        // transient condition that should be retried, not treated as a hard error.
+        "TRY_AGAIN_LATER" => Err(SubmitError::Retryable(format!(
+            "sendTransaction returned TRY_AGAIN_LATER for hash {}",
+            result.hash
+        ))),
+        // ERROR and any unrecognized status: hard rejection.
+        _ => Err(SubmitError::Rejected {
             status: result.status,
             error_result_xdr: result.error_result_xdr,
-        });
+        }),
     }
-
-    Ok(result.hash)
 }
 
 /// Poll `getTransaction` until confirmed or until `MAX_POLL_ATTEMPTS` are exhausted.
