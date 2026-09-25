@@ -6,6 +6,8 @@ resolver = "2"
 rust-version = "1.95"
 
 [workspace.lints.rust]
+unsafe_code = "forbid"
+# Allow during the Rust 2024 migration while dependencies and generated code settle on one lifetime spelling.
 mismatched_lifetime_syntaxes = "allow"
 
 # Aligned with railway.json healthcheck: setting healthcheckPath to /ready
