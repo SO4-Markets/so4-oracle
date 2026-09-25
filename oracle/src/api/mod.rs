@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::FromRequestParts;
 use axum::extract::MatchedPath;
-use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Method, StatusCode};
@@ -240,9 +240,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/oracle/failed-submissions",
             get(prices::failed_submissions),
         )
-        .fallback(|| async {
-            ApiError::new(StatusCode::NOT_FOUND, "not_found")
-        })
+        .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found") })
         .with_state(state.clone())
         // #1044 — CatchPanicLayer must be the OUTERMOST layer so it wraps
         // every handler. With `panic = "abort"` in the release profile a

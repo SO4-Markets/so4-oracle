@@ -503,7 +503,7 @@ async fn keeper_cycle_freezes_order_when_budget_exceeded_and_freeze_succeeds() {
                             "result": {
                                 "status": "FAILED",
                                 "ledger": 50001,
-                                "diagnosticEventsXdr": ["HostError: Error(Budget, ExceededLimit)"]
+                                "diagnosticEventsXdr": ["SG9zdEVycm9yOiBFcnJvcihCdWRnZXQsIEV4Y2VlZGVkTGltaXQp"]
                             }
                         }))
                     } else {

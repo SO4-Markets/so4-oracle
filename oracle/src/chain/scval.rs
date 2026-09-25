@@ -181,7 +181,8 @@ mod tests {
     #[test]
     fn test_strkey_to_sc_address_rejects_secret_seed() {
         // S... secret seed is unsupported
-        let err = strkey_to_sc_address("SCZANGBA5YHTNYVVV2M3SFZJ5B5Z2B6XR57DGZNH5QTW3JJDEYTHKQZV").unwrap_err();
+        let err = strkey_to_sc_address("SCZANGBA5YHTNYVVV2M3SFZJ5B5Z2B6XR57DGZNH5QTW3JJDEYTHKQZV")
+            .unwrap_err();
         assert!(
             err.contains("unsupported strkey type"),
             "unexpected error: {err}"
