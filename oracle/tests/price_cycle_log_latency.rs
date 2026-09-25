@@ -423,34 +423,41 @@ async fn accumulated_cycle_count_matches_invocations() {
 
 #[tokio::test]
 async fn mixed_ledger_fail_and_ok_both_logged_in_metrics() {
-    // Cycle 1: ledger fails — finish_cycle still runs, logs latency_ms.
-    let mock_fail = MockServer::start().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
-        .mount(&mock_fail)
-        .await;
-    let state = test_state(&mock_fail.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
-    run_price_cycle(Arc::clone(&state)).await;
+    // One mock server, one AppState: swap the ledger response between the two
+    // cycles (via scoped mocks) so a genuine fail-then-ok sequence runs against
+    // the *same* state and `price_cycle_count` is asserted to accumulate to 2 —
+    // rather than checking two independent states that each trivially reach 1
+    // (#787).
+    let mock = MockServer::start().await;
+    let state = test_state(&mock.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
 
+    // Cycle 1: ledger fails — finish_cycle still runs and logs latency_ms.
+    {
+        let _guard = Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
+            .mount_as_scoped(&mock)
+            .await;
+        run_price_cycle(Arc::clone(&state)).await;
+    }
     assert_eq!(
         state.metrics.to_response().price_cycle_count,
         1,
         "failed ledger cycle must also log latency_ms"
     );
 
-    // Cycle 2: ledger succeeds — a second log event.
-    let mock_ok = MockServer::start().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
-        .mount(&mock_ok)
-        .await;
-    let state2 = test_state(&mock_ok.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
-    run_price_cycle(Arc::clone(&state2)).await;
+    // Cycle 2: ledger succeeds — a second cycle_complete event on the same state.
+    {
+        let _guard = Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
+            .mount_as_scoped(&mock)
+            .await;
+        run_price_cycle(Arc::clone(&state)).await;
+    }
 
     assert_eq!(
-        state2.metrics.to_response().price_cycle_count,
-        1,
-        "successful cycle also logs latency_ms"
+        state.metrics.to_response().price_cycle_count,
+        2,
+        "price_cycle_count must accumulate to 2 across a fail-then-ok sequence on one state"
     );
 }
 

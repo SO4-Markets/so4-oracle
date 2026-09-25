@@ -1,7 +1,10 @@
 use serde::Deserialize;
 
 pub const BINANCE_TICKER_PRICE_URL: &str = "https://data-api.binance.vision/api/v3/ticker/price";
-pub const FLOAT_PRECISION: i128 = 1_000_000_000_000_000_000_000_000_000_000;
+
+/// Re-exported from the crate root so existing `crate::binance::FLOAT_PRECISION`
+/// callers keep working; the value lives in one place now (#709).
+pub use crate::FLOAT_PRECISION;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinancePriceError {
@@ -99,8 +102,8 @@ pub fn parse_ticker_http_result(
     parse_ticker_http_response(status_code, &body, symbols)
 }
 
-// Only exercised by the URL-shape tests below; the live fetch path builds its
-// query through reqwest instead.
+// Test-only convenience wrapper around the same URL builder used by the live
+// fetch path.
 #[cfg(test)]
 fn build_spot_price_url(symbols: &[String]) -> String {
     build_spot_price_url_for(BINANCE_TICKER_PRICE_URL, symbols)
@@ -177,11 +180,13 @@ pub fn parse_price_to_precision(raw: &str) -> Result<i128, BinancePriceError> {
         )));
     }
 
-    let whole_val = whole
-        .parse::<i128>()
-        .map_err(|_| BinancePriceError::PriceParseError(format!("invalid whole part: {text}")))?;
+    let whole_val = whole.parse::<i128>().map_err(|_| {
+        BinancePriceError::PriceParseError(format!(
+            "overflow for price (whole part too large): {text}"
+        ))
+    })?;
 
-    let scale_digits = 30usize;
+    let scale_digits = crate::SCALE_DIGITS as usize;
     // Use UTF-8-safe char iteration to take at most `scale_digits` digits.
     let normalized_frac = if frac.chars().count() >= scale_digits {
         frac.chars().take(scale_digits).collect::<String>()
@@ -247,6 +252,18 @@ mod tests {
     #[test]
     fn parse_price_invalid() {
         assert!(parse_price_to_precision("abc").is_err());
+    }
+    #[test]
+    fn parse_price_reports_whole_part_overflow() {
+        let oversized_whole = "1".repeat(40);
+        let err = parse_price_to_precision(&oversized_whole).unwrap_err();
+
+        assert_eq!(
+            err,
+            BinancePriceError::PriceParseError(format!(
+                "overflow for price (whole part too large): {oversized_whole}"
+            )),
+        );
     }
 
     // #345 — rejects negatives and multiple dots

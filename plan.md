@@ -1,3 +1,5 @@
+> **HISTORICAL — SUPERSEDED:** This greenfield rewrite plan has been completed. Keep it only as architectural history; do not follow its file paths or implementation instructions for current setup work.
+
 # SO4 Oracle + Keeper — Full Rewrite to a Production Axum Service
 
 Date: 2026-06-18 (rev 2 — full rewrite)

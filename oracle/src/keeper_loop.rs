@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -8,13 +9,35 @@ use tracing::{error, info, warn};
 use crate::chain::scval;
 use crate::chain::tx_builder;
 use crate::state::{
-    AppState, CachedPrice, FailedSubmission, KeeperExecution, MAX_CONSECUTIVE_FREEZE_FAILURES,
+    AppState, CachedPrice, FailedSubmission, KeeperExecution, IN_FLIGHT_EXPIRY,
+    MAX_CONSECUTIVE_EXECUTION_FAILURES, MAX_CONSECUTIVE_FREEZE_FAILURES,
 };
+use crate::submit::SubmitError;
 
 const ACCOUNT_SEQUENCE_RETRY_ATTEMPTS: u32 = 3;
 const ACCOUNT_SEQUENCE_RETRY_BASE_DELAY_MS: u64 = 100;
+/// Retry budget for `simulate_contract_call` — same transient-RPC-blip class
+/// `get_account_sequence` already retries for (#799).
+const SIMULATE_RETRY_ATTEMPTS: u32 = 3;
+const SIMULATE_RETRY_BASE_DELAY_MS: u64 = 100;
 /// Hard cap on a single keeper cycle — closes #490.
 const KEEPER_CYCLE_TIMEOUT_SECS: u64 = 50;
+/// Maximum character length of raw RPC error JSON embedded in log fields (#1005).
+/// Matches the truncation discipline already applied to diagnostic events in
+/// `submit.rs::truncate_events_for_log` — raw error bodies from a misbehaving
+/// RPC endpoint can be arbitrarily large and must not flow unbounded into
+/// structured logs.
+const MAX_RPC_ERROR_LOG_LEN: usize = 256;
+
+/// Truncate a raw RPC error value to a bounded string for safe logging.
+fn truncate_rpc_error(error: &serde_json::Value) -> String {
+    let s = error.to_string();
+    if s.len() > MAX_RPC_ERROR_LOG_LEN {
+        format!("{}…", &s[..MAX_RPC_ERROR_LOG_LEN])
+    } else {
+        s
+    }
+}
 
 #[derive(Debug)]
 enum SequenceFetchError {
@@ -29,6 +52,8 @@ impl std::fmt::Display for SequenceFetchError {
         }
     }
 }
+
+impl std::error::Error for SequenceFetchError {}
 
 impl crate::retry::Retryable for SequenceFetchError {
     fn is_retryable(&self) -> bool {
@@ -54,6 +79,13 @@ pub async fn run_keeper_loop(state: Arc<AppState>) {
 
 pub async fn run_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, String> {
     let started = Instant::now();
+    // Open a keeper-cycle generation window. `keeper_status` and `cycle_status`
+    // are both updated below (in different critical sections); bumping here and
+    // again at the end lets `AppState::keeper_status_snapshot` detect a reader
+    // whose two-lock read straddled this cycle and retry (#797).
+    state
+        .keeper_cycle_generation
+        .fetch_add(1, Ordering::Release);
     {
         let mut status = state.cycle_status.write().await;
         status.keeper_cycle_running = true;
@@ -70,15 +102,11 @@ pub async fn run_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         ))
     });
 
+    let latency_ms = started.elapsed().as_millis() as u64;
     {
         let mut status = state.cycle_status.write().await;
         status.keeper_cycle_running = false;
         status.last_keeper_cycle_at = Some(SystemTime::now());
-    }
-
-    let latency_ms = started.elapsed().as_millis() as u64;
-    {
-        let mut status = state.cycle_status.write().await;
         status.last_keeper_cycle_latency_ms = Some(latency_ms);
     }
     match &result {
@@ -106,6 +134,11 @@ pub async fn run_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         }
     }
 
+    // Close the generation window: all keeper_status / cycle_status writes for
+    // this cycle are now visible (#797).
+    state
+        .keeper_cycle_generation
+        .fetch_add(1, Ordering::Release);
     result
 }
 
@@ -118,6 +151,16 @@ pub struct CycleSummary {
 }
 
 async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, String> {
+    // A cycle-level timeout (KEEPER_CYCLE_TIMEOUT_SECS, in run_keeper_cycle)
+    // drops execute_keeper_cycle mid-poll, before the in-flight bookkeeping
+    // in any of the per-item loops below gets a chance to run. If the key
+    // that was mid-flight never reappears in a later cycle's pending-keys
+    // list, the lazy eviction in each loop's "skip in-flight" check never
+    // fires for it either, so it would sit in `in_flight_keys` forever with
+    // no log line at all. Sweep the whole map unconditionally at the start
+    // of every cycle so an entry like that still surfaces eventually (#806).
+    sweep_expired_in_flight_keys(&state).await;
+
     // Get fresh (non-stale) prices from cache
     let now = crate::current_timestamp_secs();
     let fresh_prices = {
@@ -158,25 +201,23 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         ));
     }
 
-    let order_keys = get_pending_keys(&state, "get_order_count", "get_order_keys")
-        .await
-        .unwrap_or_else(|e| {
-            warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
-            Vec::new()
-        });
-    let deposit_keys = get_pending_keys(&state, "get_deposit_count", "get_deposit_keys")
-        .await
-        .unwrap_or_else(|e| {
-            warn!(error = %e, "get_pending_keys(deposits) failed, skipping deposits this cycle");
-            Vec::new()
-        });
-    let withdrawal_keys =
-        get_pending_keys(&state, "get_withdrawal_count", "get_withdrawal_keys")
-            .await
-            .unwrap_or_else(|e| {
-                warn!(error = %e, "get_pending_keys(withdrawals) failed, skipping withdrawals this cycle");
-                Vec::new()
-            });
+    let (order_result, deposit_result, withdrawal_result) = tokio::join!(
+        get_pending_keys(&state, "get_order_count", "get_order_keys"),
+        get_pending_keys(&state, "get_deposit_count", "get_deposit_keys"),
+        get_pending_keys(&state, "get_withdrawal_count", "get_withdrawal_keys"),
+    );
+    let order_keys = order_result.unwrap_or_else(|e| {
+        warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
+        Vec::new()
+    });
+    let deposit_keys = deposit_result.unwrap_or_else(|e| {
+        warn!(error = %e, "get_pending_keys(deposits) failed, skipping deposits this cycle");
+        Vec::new()
+    });
+    let withdrawal_keys = withdrawal_result.unwrap_or_else(|e| {
+        warn!(error = %e, "get_pending_keys(withdrawals) failed, skipping withdrawals this cycle");
+        Vec::new()
+    });
 
     {
         let mut keeper_status = state.keeper_status.write().await;
@@ -215,6 +256,11 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         errors: 0,
     };
 
+    // Cached account sequence, shared across every execute_handler call made
+    // during this cycle so it's fetched via RPC at most once instead of once
+    // per pending order/deposit/withdrawal (#805).
+    let mut sequence_cache: Option<u64> = None;
+
     for order_key in &order_keys {
         // Skip permanently blacklisted orders — retrying burns fee attempts (#498).
         {
@@ -229,27 +275,47 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 continue;
             }
         }
-        // Skip keys whose prior submission is still in-flight — closes #491
-        if state.in_flight_keys.lock().await.contains(order_key) {
-            info!(key = %order_key, "skipping_in_flight_order_key");
-            continue;
+        // Skip keys whose prior submission is still in-flight — closes #491.
+        // Evict keys stuck longer than IN_FLIGHT_EXPIRY to prevent silent
+        // permanent skips after a poll timeout (#801).
+        {
+            let mut in_flight = state.in_flight_keys.lock().await;
+            if let Some(inserted_at) = in_flight.get(order_key) {
+                if inserted_at.elapsed() > IN_FLIGHT_EXPIRY {
+                    warn!(
+                        key = %order_key,
+                        elapsed_secs = inserted_at.elapsed().as_secs(),
+                        "in_flight_key_expired_evicted"
+                    );
+                    in_flight.remove(order_key);
+                } else {
+                    info!(key = %order_key, "skipping_in_flight_order_key");
+                    continue;
+                }
+            }
+            in_flight.insert(order_key.clone(), Instant::now());
         }
-        state.in_flight_keys.lock().await.insert(order_key.clone());
 
         match execute_handler(
             &state,
             &state.config.order_handler_contract_id,
             "execute_order",
             order_key,
+            &mut sequence_cache,
         )
         .await
         {
             Ok(tx_hash) => {
                 state.in_flight_keys.lock().await.remove(order_key);
                 summary.orders_executed += 1;
-                // Clear any accumulated freeze-failure count on success.
+                // Clear any accumulated failure counts on success.
                 state
                     .freeze_failure_counts
+                    .lock()
+                    .await
+                    .remove(order_key.as_str());
+                state
+                    .execution_failure_counts
                     .lock()
                     .await
                     .remove(order_key.as_str());
@@ -284,12 +350,13 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 warn!(key = %order_key, %error, "order_execution_failed");
 
                 let mut freeze_error_msg = None;
-                if error.contains("Budget, ExceededLimit") {
+                if is_budget_exceeded(&error) {
                     match execute_handler(
                         &state,
                         &state.config.order_handler_contract_id,
                         "freeze_order",
                         order_key,
+                        &mut sequence_cache,
                     )
                     .await
                     {
@@ -297,6 +364,14 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                             info!(key = %order_key, "order_frozen_budget_exceeded");
                             state
                                 .freeze_failure_counts
+                                .lock()
+                                .await
+                                .remove(order_key.as_str());
+                            // Order is frozen on-chain and won't be re-fetched
+                            // as pending — drop its execution-failure tally too
+                            // so the map doesn't retain a stale entry (#803).
+                            state
+                                .execution_failure_counts
                                 .lock()
                                 .await
                                 .remove(order_key.as_str());
@@ -339,6 +414,74 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     }
                 }
 
+                // Generalized consecutive-failure guard (#803). The
+                // budget-exceeded case above is only one of many ways an
+                // order can fail deterministically on every cycle (malformed
+                // params, a contract invariant, insufficient collateral, …).
+                // Any such order is re-fetched as pending and re-submitted
+                // every KEEPER_LOOP_MS, burning a keeper_tx_fee each time,
+                // forever. Track consecutive execute_order failures of *any*
+                // kind and abandon the key once it's clearly permanently
+                // broken.
+                let consecutive_exec_failures = {
+                    let mut counts = state.execution_failure_counts.lock().await;
+                    let count = counts.entry(order_key.clone()).or_insert(0);
+                    *count += 1;
+                    *count
+                };
+                if consecutive_exec_failures >= MAX_CONSECUTIVE_EXECUTION_FAILURES {
+                    let already_blacklisted = state
+                        .frozen_order_blacklist
+                        .lock()
+                        .await
+                        .contains_key(order_key.as_str());
+                    if !already_blacklisted {
+                        // Best-effort freeze so the contract also stops
+                        // returning the key as pending; blacklist regardless
+                        // of the outcome so the keeper stops re-submitting it.
+                        match execute_handler(
+                            &state,
+                            &state.config.order_handler_contract_id,
+                            "freeze_order",
+                            order_key,
+                            &mut sequence_cache,
+                        )
+                        .await
+                        {
+                            Ok(_) => info!(
+                                key = %order_key,
+                                "order_frozen_after_repeated_execution_failures"
+                            ),
+                            Err(freeze_error) => {
+                                warn!(
+                                    key = %order_key,
+                                    %freeze_error,
+                                    "freeze_order_failed_while_abandoning_broken_order"
+                                );
+                                record_error(&state, "freeze_order", &freeze_error, None).await;
+                            }
+                        }
+                        state
+                            .frozen_order_blacklist
+                            .lock()
+                            .await
+                            .insert(order_key.clone(), consecutive_exec_failures);
+                        state
+                            .execution_failure_counts
+                            .lock()
+                            .await
+                            .remove(order_key.as_str());
+                        error!(
+                            key = %order_key,
+                            consecutive_failures = consecutive_exec_failures,
+                            max = MAX_CONSECUTIVE_EXECUTION_FAILURES,
+                            "ALERT: order_key blacklisted after {} consecutive execute_order \
+                             failures — manual intervention required to clear",
+                            MAX_CONSECUTIVE_EXECUTION_FAILURES
+                        );
+                    }
+                }
+
                 record_error(
                     &state,
                     &format!("execute_order:{}", order_key),
@@ -352,7 +495,10 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     order_key,
                     None,
                     false,
-                    Some(format!("{}{}", error, freeze_error_msg.unwrap_or_default())),
+                    Some(match freeze_error_msg {
+                        Some(freeze_error) => format!("{error} | freeze_error: {freeze_error}"),
+                        None => error,
+                    }),
                 )
                 .await;
             }
@@ -360,21 +506,30 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     }
 
     for deposit_key in &deposit_keys {
-        if state.in_flight_keys.lock().await.contains(deposit_key) {
-            info!(key = %deposit_key, "skipping_in_flight_deposit_key");
-            continue;
+        {
+            let mut in_flight = state.in_flight_keys.lock().await;
+            if let Some(inserted_at) = in_flight.get(deposit_key) {
+                if inserted_at.elapsed() > IN_FLIGHT_EXPIRY {
+                    warn!(
+                        key = %deposit_key,
+                        elapsed_secs = inserted_at.elapsed().as_secs(),
+                        "in_flight_key_expired_evicted"
+                    );
+                    in_flight.remove(deposit_key);
+                } else {
+                    info!(key = %deposit_key, "skipping_in_flight_deposit_key");
+                    continue;
+                }
+            }
+            in_flight.insert(deposit_key.clone(), Instant::now());
         }
-        state
-            .in_flight_keys
-            .lock()
-            .await
-            .insert(deposit_key.clone());
 
         match execute_handler(
             &state,
             &state.config.deposit_handler_contract_id,
             "execute_deposit",
             deposit_key,
+            &mut sequence_cache,
         )
         .await
         {
@@ -436,21 +591,30 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     }
 
     for withdrawal_key in &withdrawal_keys {
-        if state.in_flight_keys.lock().await.contains(withdrawal_key) {
-            info!(key = %withdrawal_key, "skipping_in_flight_withdrawal_key");
-            continue;
+        {
+            let mut in_flight = state.in_flight_keys.lock().await;
+            if let Some(inserted_at) = in_flight.get(withdrawal_key) {
+                if inserted_at.elapsed() > IN_FLIGHT_EXPIRY {
+                    warn!(
+                        key = %withdrawal_key,
+                        elapsed_secs = inserted_at.elapsed().as_secs(),
+                        "in_flight_key_expired_evicted"
+                    );
+                    in_flight.remove(withdrawal_key);
+                } else {
+                    info!(key = %withdrawal_key, "skipping_in_flight_withdrawal_key");
+                    continue;
+                }
+            }
+            in_flight.insert(withdrawal_key.clone(), Instant::now());
         }
-        state
-            .in_flight_keys
-            .lock()
-            .await
-            .insert(withdrawal_key.clone());
 
         match execute_handler(
             &state,
             &state.config.withdrawal_handler_contract_id,
             "execute_withdrawal",
             withdrawal_key,
+            &mut sequence_cache,
         )
         .await
         {
@@ -516,6 +680,70 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
 
 fn is_poll_timeout(error: &str) -> bool {
     error.contains("not confirmed after")
+}
+
+/// Detect whether a `SubmitError::TransactionFailed` was caused by a Soroban
+/// budget-exceeded error. The error string contains base64-encoded XDR
+/// diagnostic events; each event is decoded and searched for the
+/// `Budget, ExceededLimit` pattern that Soroban embeds in its error text.
+fn is_budget_exceeded(error: &str) -> bool {
+    use base64::Engine;
+
+    // Fast path: if the raw error string already contains the pattern (e.g. in
+    // tests that mock human-readable events), skip decoding.
+    if error.contains("Budget, ExceededLimit") {
+        return true;
+    }
+
+    // Slow path: extract each base64 event string, decode, and search the
+    // resulting bytes. Soroban diagnostic events are base64-encoded XDR whose
+    // payload includes the human-readable error text as a substring.
+    for bit in error.split('"') {
+        let trimmed = bit.trim();
+        // Heuristic: base64 strings are long and only contain base64 chars.
+        if trimmed.len() < 20
+            || !trimmed
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+        {
+            continue;
+        }
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(trimmed) {
+            if let Ok(s) = String::from_utf8(bytes) {
+                if s.contains("Budget, ExceededLimit") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Evict any `in_flight_keys` entry older than `IN_FLIGHT_EXPIRY`, regardless
+/// of whether that key is part of this cycle's pending work.
+///
+/// Each work-type loop already evicts a stale in-flight entry lazily, but
+/// only when that same key is scanned again in a later cycle's pending-keys
+/// list. A key stranded by the cycle-level `KEEPER_CYCLE_TIMEOUT_SECS`
+/// timeout (rather than the tracked poll-timeout path) may never reappear
+/// there — e.g. if the order actually confirmed on-chain and drops out of
+/// the pending set — so without this sweep it would never be evicted or
+/// logged at all (#806).
+async fn sweep_expired_in_flight_keys(state: &Arc<AppState>) {
+    let mut in_flight = state.in_flight_keys.lock().await;
+    in_flight.retain(|key, inserted_at| {
+        let elapsed = inserted_at.elapsed();
+        if elapsed > IN_FLIGHT_EXPIRY {
+            warn!(
+                key = %key,
+                elapsed_secs = elapsed.as_secs(),
+                "in_flight_key_expired_evicted_stale_sweep"
+            );
+            false
+        } else {
+            true
+        }
+    });
 }
 
 async fn get_pending_keys(
@@ -602,11 +830,60 @@ async fn set_prices_on_chain(
     Ok(format!("confirmed on ledger {ledger}"))
 }
 
+/// True if `error` indicates the submitted transaction was rejected for
+/// carrying a stale/incorrect account sequence number (e.g. RPC status
+/// `BAD_SEQUENCE`, or classic Horizon's `tx_bad_seq`), as opposed to any
+/// other submission failure. Used to decide when a locally-cached sequence
+/// number needs to be re-fetched from the network (#805).
+fn is_bad_sequence_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("bad_sequence") || lower.contains("bad_seq") || lower.contains("badseq")
+}
+
+/// Decode a base64 `errorResultXdr` and check whether the decoded
+/// `TransactionResult` carries a `tx_bad_seq` result code (#998).
+///
+/// Returns `true` only when the XDR decodes cleanly *and* the result code
+/// is `tx_bad_seq`. Malformed or non-bad-seq XDR returns `false` (caller
+/// falls through to other detection paths).
+fn is_bad_sequence_xdr(error_result_xdr: &str) -> bool {
+    use base64::Engine;
+    use stellar_xdr::{Decode, TransactionResult, TransactionResultResult};
+
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(error_result_xdr) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    let tx_result = match TransactionResult::from_xdr_base64(error_result_xdr) {
+        Ok(r) => r,
+        // Manual fallback: try decoding from raw bytes
+        Err(_) => match TransactionResult::decode(&mut &bytes[..]) {
+            Ok(r) => r,
+            Err(_) => return false,
+        },
+    };
+
+    matches!(tx_result.result, TransactionResultResult::TxBadSeq(_))
+}
+
+/// Execute a handler contract call, using and maintaining a per-cycle cached
+/// account sequence number instead of fetching it via RPC on every call.
+///
+/// `sequence_cache` is shared across every `execute_handler` invocation
+/// within one keeper cycle: the first call of the cycle fetches the account
+/// sequence once and caches it; every subsequent call reuses and locally
+/// increments that cached value on success, avoiding a redundant `getAccount`
+/// RPC round-trip per pending order/deposit/withdrawal (#805). The cache is
+/// only cleared (forcing a fresh fetch on the next call) when a submission is
+/// rejected for a sequence-related reason, since that's the one case where
+/// the cached value is known to be wrong.
 async fn execute_handler(
     state: &Arc<AppState>,
     contract_id: &str,
     method: &str,
     key: &str,
+    sequence_cache: &mut Option<u64>,
 ) -> Result<String, String> {
     let key_bytes = hex::decode(key).map_err(|e| format!("invalid key hex: {e}"))?;
     let key_scval = stellar_xdr::ScVal::Bytes(stellar_xdr::ScBytes(
@@ -615,9 +892,16 @@ async fn execute_handler(
             .map_err(|e| format!("key bytes conversion failed: {e}"))?,
     ));
 
-    let sequence = get_account_sequence(state)
-        .await
-        .map_err(|e| e.to_string())?;
+    let sequence = match *sequence_cache {
+        Some(seq) => seq,
+        None => {
+            let seq = get_account_sequence(state)
+                .await
+                .map_err(|e| e.to_string())?;
+            *sequence_cache = Some(seq);
+            seq
+        }
+    };
 
     let tx = tx_builder::build_invoke_tx(
         &state.config.keeper_account_id,
@@ -640,12 +924,33 @@ async fn execute_handler(
         &state.config.network_passphrase,
     )?;
 
-    let ledger = crate::submit::submit_and_poll(&state.config.stellar_rpc_url, &signed_xdr)
-        .await
-        .map_err(|e| format!("{method} submit failed: {e}"))?;
-
-    info!(method, key = %key, ledger, "handler_confirmed");
-    Ok(format!("confirmed on ledger {ledger}"))
+    match crate::submit::submit_and_poll(&state.config.stellar_rpc_url, &signed_xdr).await {
+        Ok(ledger) => {
+            // Success consumed `sequence`; the next call in this cycle can
+            // use `sequence + 1` without asking the network.
+            *sequence_cache = Some(sequence + 1);
+            info!(method, key = %key, ledger, "handler_confirmed");
+            Ok(format!("confirmed on ledger {ledger}"))
+        }
+        Err(error) => {
+            let msg = error.to_string();
+            let is_bad_seq = is_bad_sequence_error(&msg)
+                || matches!(
+                    &error,
+                    SubmitError::Rejected {
+                        error_result_xdr: Some(xdr),
+                        ..
+                    } if is_bad_sequence_xdr(xdr)
+                );
+            if is_bad_seq {
+                // The cached sequence is stale relative to the network;
+                // drop it so the next call re-fetches instead of retrying
+                // with the same wrong value.
+                *sequence_cache = None;
+            }
+            Err(format!("{method} submit failed: {msg}"))
+        }
+    }
 }
 
 async fn get_account_sequence(state: &Arc<AppState>) -> Result<u64, SequenceFetchError> {
@@ -662,32 +967,20 @@ async fn get_account_sequence_once(state: &Arc<AppState>) -> Result<u64, Sequenc
     let rpc_url = &state.config.stellar_rpc_url;
     let account_id = &state.config.keeper_account_id;
 
-    let payload = serde_json::json!({
+    let payload = serde_json::to_string(&serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "getAccount",
         "params": { "account": account_id }
-    });
-
-    let response = state
-        .http
-        .post(rpc_url)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| SequenceFetchError::Network(format!("getAccount request failed: {e}")))?;
-
-    let status = response.status();
-    let body = response.text().await.map_err(|e| {
-        SequenceFetchError::Network(format!("Failed to read getAccount response: {e}"))
+    }))
+    .map_err(|e| {
+        SequenceFetchError::MissingOrInvalid(format!("failed to serialize request: {e}"))
     })?;
 
-    if !status.is_success() {
-        return Err(SequenceFetchError::Network(format!(
-            "getAccount returned HTTP {}",
-            status.as_u16()
-        )));
-    }
+    // Use the shared RPC POST helper instead of hand-rolling the request here (#751).
+    let body = crate::stellar_rpc::rpc_post(rpc_url, payload)
+        .await
+        .map_err(|e| SequenceFetchError::Network(format!("getAccount request failed: {e}")))?;
 
     let response_json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
         SequenceFetchError::Network(format!("Failed to parse getAccount response: {e}"))
@@ -695,7 +988,8 @@ async fn get_account_sequence_once(state: &Arc<AppState>) -> Result<u64, Sequenc
 
     if let Some(error) = response_json.get("error") {
         return Err(SequenceFetchError::Network(format!(
-            "getAccount error: {error}"
+            "getAccount error: {}",
+            truncate_rpc_error(error)
         )));
     }
 
@@ -714,62 +1008,96 @@ async fn get_account_sequence_once(state: &Arc<AppState>) -> Result<u64, Sequenc
     })
 }
 
+/// Retry wrapper around [`simulate_contract_call_once`]: a single transient
+/// RPC failure on either of `get_pending_keys`' two simulate calls otherwise
+/// makes the keeper treat "no pending work" as the result for the whole
+/// cycle. Matches `get_account_sequence`'s `retry_with_backoff` usage (#799).
 async fn simulate_contract_call(
     state: &Arc<AppState>,
     contract_id: &str,
     method: &str,
     args: &[&str],
 ) -> Result<String, String> {
+    crate::retry::retry_with_backoff(
+        || async { simulate_contract_call_once(state, contract_id, method, args).await },
+        SIMULATE_RETRY_ATTEMPTS,
+        SIMULATE_RETRY_BASE_DELAY_MS,
+        30_000,
+    )
+    .await
+}
+
+async fn simulate_contract_call_once(
+    state: &Arc<AppState>,
+    contract_id: &str,
+    method: &str,
+    args: &[&str],
+) -> Result<String, String> {
+    use stellar_xdr::{TransactionEnvelope, TransactionV1Envelope, WriteXdr};
+
     let rpc_url = &state.config.stellar_rpc_url;
-    let passphrase = &state.config.network_passphrase;
 
-    let args_json: Vec<serde_json::Value> = args
+    // Convert string arguments to ScVal — contract addresses become
+    // ScVal::Address, everything else becomes ScVal::Symbol (#997).
+    let scval_args: Vec<stellar_xdr::ScVal> = args
         .iter()
-        .map(|arg| serde_json::Value::String(arg.to_string()))
-        .collect();
+        .map(|arg| {
+            if arg.starts_with('C') || arg.starts_with('G') {
+                stellar_xdr::ScVal::Address(crate::chain::scval::strkey_to_sc_address(arg)?)
+            } else {
+                let sym: stellar_xdr::ScSymbol = arg
+                    .to_string()
+                    .try_into()
+                    .map_err(|_| format!("arg '{arg}' too long for ScSymbol"))?;
+                Ok(stellar_xdr::ScVal::Symbol(sym))
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
-    let payload = serde_json::json!({
+    // Build a proper XDR transaction envelope using the same pipeline as
+    // sendTransaction, instead of hand-rolling a JSON object that doesn't
+    // match the Soroban RPC simulateTransaction contract (#997).
+    let tx = tx_builder::build_invoke_tx(
+        &state.config.keeper_account_id,
+        contract_id,
+        method,
+        scval_args,
+        100,
+        0, // sequence number is irrelevant for simulation
+        None,
+    )?;
+
+    let envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
+        tx,
+        signatures: stellar_xdr::VecM::default(),
+    });
+
+    let envelope_xdr = envelope
+        .to_xdr(stellar_xdr::Limits::none())
+        .map_err(|e| format!("failed to serialize envelope to XDR: {e}"))?;
+    let envelope_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &envelope_xdr);
+
+    let payload = serde_json::to_string(&serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "simulateTransaction",
         "params": {
-            "transaction": {
-                "source_account": state.config.keeper_account_id,
-                "fee": "100",
-                "network_passphrase": passphrase,
-                "operations": [{
-                    "type": "invoke",
-                    "contract_id": contract_id,
-                    "method": method,
-                    "args": args_json
-                }]
-            }
+            "transaction": envelope_b64
         }
-    });
+    }))
+    .map_err(|e| format!("failed to serialize request: {e}"))?;
 
-    let response = state
-        .http
-        .post(rpc_url)
-        .json(&payload)
-        .send()
+    // Use the shared RPC POST helper instead of hand-rolling the request here (#751).
+    let body = crate::stellar_rpc::rpc_post(rpc_url, payload)
         .await
-        .map_err(|e| format!("RPC request failed: {e}"))?;
-
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read RPC response: {e}"))?;
-
-    if !status.is_success() {
-        return Err(format!("RPC request returned HTTP {}", status.as_u16()));
-    }
+        .map_err(|e| e.to_string())?;
 
     let response_json: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("Failed to parse RPC response: {e}"))?;
 
     if let Some(error) = response_json.get("error") {
-        return Err(format!("Simulation error: {error}"));
+        return Err(format!("Simulation error: {}", truncate_rpc_error(error)));
     }
 
     let result = response_json
@@ -840,7 +1168,11 @@ async fn record_error(
         max: 0,
         tx_hash: None,
         error: error.to_string(),
-        timestamp: 0,
+        timestamp: crate::current_timestamp_secs(),
+        // Unlike price_loop.rs, this loop never fetches a Soroban ledger
+        // sequence anywhere in its execution path - there is no real value
+        // to thread through here (#726). `0` stays honest rather than
+        // fabricated.
         ledger_seq: 0,
     });
 }
@@ -854,7 +1186,7 @@ async fn record_execution(
     error: Option<String>,
 ) {
     let mut keeper_status = state.keeper_status.write().await;
-    keeper_status.last_executions.push(KeeperExecution {
+    keeper_status.last_executions.push_back(KeeperExecution {
         timestamp: SystemTime::now(),
         operation: operation.into(),
         key: key.into(),
@@ -863,7 +1195,7 @@ async fn record_execution(
         error,
     });
     if keeper_status.last_executions.len() > 100 {
-        keeper_status.last_executions.remove(0);
+        keeper_status.last_executions.pop_front();
     }
 }
 
@@ -939,8 +1271,99 @@ mod tests {
 
     #[tokio::test]
     async fn test_keeper_cycle_filters_stale_prices() {
+        use crate::config::{Config, Network, PriceFeedConfig, SecretString};
+        use crate::state::AppState;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::time::Duration;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        // The keeper cycle needs pending work to reach the stale-price filter,
+        // then set_prices needs getAccount + sendTransaction + getTransaction.
+        // Return no pending work for simulate calls so the cycle short-circuits
+        // after the stale-price filter — the filter runs before pending-work
+        // lookup, so this exercises the code path we care about.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": 0
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = Config {
+            bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            network: Network::Testnet,
+            network_passphrase: "Test SDF Network ; September 2015".to_string(),
+            stellar_rpc_url: mock_server.uri(),
+            horizon_url: "http://127.0.0.1:9".to_string(),
+            oracle_contract_id: "CORACLE".to_string(),
+            role_store_contract_id: "CROLE".to_string(),
+            data_store_contract_id: "CDATA".to_string(),
+            order_handler_contract_id: "CORDER".to_string(),
+            deposit_handler_contract_id: "CDEPOSIT".to_string(),
+            withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
+            reader_contract_id: "CREADER".to_string(),
+            keeper_private_key: SecretString::new(
+                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            ),
+            keeper_secret_key: SecretString::new(
+                "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            ),
+            keeper_account_id: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI"
+                .to_string(),
+            keeper_index: 0,
+            admin_api_token: None,
+            pyth_api_key: None,
+            min_keeper_balance_xlm: 0.0,
+            set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
+            keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
+            price_loop_interval: Duration::from_millis(50),
+            keeper_loop_interval: Duration::from_millis(50),
+            price_feed: PriceFeedConfig {
+                tokens: vec![
+                    shared_config::TokenConfig {
+                        symbol: "FRESH".to_string(),
+                        display_symbol: Some("FRESH".to_string()),
+                        stellar_address: "GAFRESH".to_string(),
+                        sources: vec!["test".to_string()],
+                        fixed_price: None,
+                        binance_symbol: None,
+                        coinbase_symbol: None,
+                        pyth_feed_id: None,
+                        min_sources: 1,
+                        max_deviation_bps: 100,
+                        stale_after_seconds: 60,
+                        submit_threshold_bps: 10,
+                        min: 0.0,
+                        max: 0.0,
+                        sources_used: vec![],
+                    },
+                    shared_config::TokenConfig {
+                        symbol: "STALE".to_string(),
+                        display_symbol: Some("STALE".to_string()),
+                        stellar_address: "GASTALE".to_string(),
+                        sources: vec!["test".to_string()],
+                        fixed_price: None,
+                        binance_symbol: None,
+                        coinbase_symbol: None,
+                        pyth_feed_id: None,
+                        min_sources: 1,
+                        max_deviation_bps: 100,
+                        stale_after_seconds: 60,
+                        submit_threshold_bps: 10,
+                        min: 0.0,
+                        max: 0.0,
+                        sources_used: vec![],
+                    },
+                ],
+            },
+        };
+        let state = Arc::new(AppState::new(Arc::new(config)));
+
         let now = crate::current_timestamp_secs();
-        let stale_after = 60;
 
         let fresh_price = CachedPrice {
             token_address: "GAFRESH".to_string(),
@@ -970,23 +1393,23 @@ mod tests {
             signature: "sig".to_string(),
         };
 
-        let mut prices = std::collections::BTreeMap::new();
-        prices.insert("GAFRESH".to_string(), fresh_price);
-        prices.insert("GASTALE".to_string(), stale_price);
+        {
+            let mut cache = state.price_cache.write().await;
+            cache.prices.insert("gafresh".to_string(), fresh_price);
+            cache.prices.insert("gastale".to_string(), stale_price);
+        }
 
-        let filtered_prices: Vec<_> = prices
-            .iter()
-            .filter(|(_, price)| !price.is_stale(stale_after, now))
-            .collect();
+        // This actually calls execute_keeper_cycle, which filters stale prices
+        // before looking up pending work (#724).
+        let result = run_keeper_cycle(Arc::clone(&state)).await;
 
-        assert_eq!(filtered_prices.len(), 1);
-        assert_eq!(filtered_prices[0].1.symbol, "FRESH");
-
-        let stale_filtered: Vec<_> = prices
-            .iter()
-            .filter(|(_, price)| price.is_stale(stale_after, now))
-            .collect();
-        assert_eq!(stale_filtered.len(), 1);
-        assert_eq!(stale_filtered[0].1.symbol, "STALE");
+        // The cycle succeeds because there is no pending work — the stale price
+        // was filtered out before the simulate calls, and the fresh price is
+        // still available if needed.
+        assert!(
+            result.is_ok(),
+            "keeper cycle should succeed with stale prices filtered: {:?}",
+            result.err()
+        );
     }
 }

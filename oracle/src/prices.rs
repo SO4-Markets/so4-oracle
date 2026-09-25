@@ -49,7 +49,7 @@ pub fn aggregate_prices(
     let filtered_sources = filter_result.filtered_sources;
 
     if filtered_prices.len() < min_sources {
-        let _rejected_sources: Vec<RejectedSource> = filter_result
+        let rejected_sources: Vec<RejectedSource> = filter_result
             .rejected
             .into_iter()
             .map(|(source, price, deviation)| RejectedSource {
@@ -60,9 +60,11 @@ pub fn aggregate_prices(
             .collect();
 
         return Err(format!(
-            "insufficient sources after filtering: got {}, need {} (rejected by MAD-based outlier filter)",
+            "insufficient sources after filtering: got {} of {}, need {} (rejected by MAD-based outlier filter: {:?})",
             filtered_prices.len(),
-            min_sources
+            prices.len(),
+            min_sources,
+            rejected_sources
         ));
     }
 
@@ -146,7 +148,7 @@ pub fn percentile(sorted: &[i128], p: u8) -> i128 {
 pub struct OutlierFilterResult {
     pub filtered_prices: Vec<i128>,
     pub filtered_sources: Vec<String>,
-    pub rejected: Vec<(String, i128, f64)>, // source, price, deviation
+    pub rejected: Vec<(String, i128, f64)>, // source, price, deviation_bps
 }
 
 /// Filter out prices that deviate too far from the median.
@@ -155,6 +157,11 @@ pub struct OutlierFilterResult {
 /// 6x the median absolute deviation (MAD). If MAD is zero (a degenerate/flat
 /// cluster where at least half the inputs have identical deviation), fall back
 /// to rejecting prices more than 3 standard deviations from the median.
+///
+/// Special case: with exactly 2 sources, MAD is structurally incapable of
+/// rejecting either price (both deviations equal MAD, so dev > 6*mad is
+/// always false). In this case, we require both sources to agree within
+/// 10% (1000 bps) of each other, rejecting the one farther from the other.
 pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResult {
     if prices.is_empty() {
         return OutlierFilterResult {
@@ -162,6 +169,49 @@ pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResu
             filtered_sources: vec![],
             rejected: vec![],
         };
+    }
+
+    // Special case: exactly 2 sources — MAD-based filtering is a no-op, so
+    // use a relative agreement check instead.
+    if prices.len() == 2 {
+        let p0 = prices[0] as f64;
+        let p1 = prices[1] as f64;
+        let avg = (p0 + p1) / 2.0;
+        if avg == 0.0 {
+            // Both zero — nothing to reject.
+            return OutlierFilterResult {
+                filtered_prices: prices.to_vec(),
+                filtered_sources: sources.to_vec(),
+                rejected: vec![],
+            };
+        }
+        let deviation_bps = ((p0 - p1).abs() / avg.abs()) * 10_000.0;
+        // If the two sources agree within 1000 bps (10%), keep both.
+        if deviation_bps <= 1000.0 {
+            return OutlierFilterResult {
+                filtered_prices: prices.to_vec(),
+                filtered_sources: sources.to_vec(),
+                rejected: vec![],
+            };
+        }
+        // Otherwise, keep the price closer to the average and reject the other.
+        let dev0 = (p0 - avg).abs();
+        let dev1 = (p1 - avg).abs();
+        if dev0 <= dev1 {
+            // Keep prices[0], reject prices[1]
+            return OutlierFilterResult {
+                filtered_prices: vec![prices[0]],
+                filtered_sources: vec![sources[0].clone()],
+                rejected: vec![(sources[1].clone(), prices[1], deviation_bps)],
+            };
+        } else {
+            // Keep prices[1], reject prices[0]
+            return OutlierFilterResult {
+                filtered_prices: vec![prices[1]],
+                filtered_sources: vec![sources[1].clone()],
+                rejected: vec![(sources[0].clone(), prices[0], deviation_bps)],
+            };
+        }
     }
 
     // 1. Compute median
@@ -209,7 +259,7 @@ pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResu
         };
 
         if is_outlier {
-            rejected.push((sources[i].clone(), p, dev));
+            rejected.push((sources[i].clone(), p, deviation_bps(p, median)));
         } else {
             filtered_prices.push(p);
             filtered_sources.push(sources[i].clone());

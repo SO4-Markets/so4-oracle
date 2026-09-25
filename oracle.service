@@ -21,7 +21,9 @@ EnvironmentFile=/opt/oracle/.env
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/oracle
+# The oracle process never writes to disk (tokens.json is embedded at compile
+# time via include_str!, and EnvironmentFile is read by systemd itself, not
+# the process) — ReadWritePaths=/opt/oracle granted unneeded write access.
 
 # Logging
 StandardOutput=journal

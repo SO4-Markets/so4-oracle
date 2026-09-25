@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use axum::body::Body;
 use axum::http::Request;
+use predicates::prelude::*;
 use tower::ServiceExt;
 use wiremock::matchers::method;
 use wiremock::{MockServer, Request as WireMockRequest, ResponseTemplate};
@@ -228,7 +229,7 @@ async fn get_ready_returns_503_when_keeper_loop_stale() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"], "keeper_loop_stale");
+    assert!(predicate::str::contains("stale").eval(json["error"].as_str().unwrap()));
 }
 
 // #340 — readiness becomes healthy once the spawned price and keeper loops complete

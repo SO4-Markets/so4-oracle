@@ -7,7 +7,7 @@ This repository contains a single Rust binary that runs:
 - Keeper loop that executes pending orders, deposits, and withdrawals on-chain
 - HTTP API for price feeds and operational endpoints
 
-## Architecture
+## Architecture.
 
 ```
 so4-oracle  (single statically-deployed binary)
@@ -18,6 +18,7 @@ so4-oracle  (single statically-deployed binary)
 │     GET /prices                      public   serves in-memory PriceCache (frontend)
 │     GET /oracle/status               admin    last cycle, balance, per-token state
 │     GET /keeper/status               admin    pending work + last N executions
+│     GET /keeper/balance              admin    live keeper account XLM balance
 │     GET /oracle/failed-submissions   admin    ring buffer of failures
 │     GET /metrics                     admin    Prometheus metrics
 ├── task: price_loop   tokio::interval(~1s)
@@ -41,10 +42,10 @@ READER=CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC
 DATA_STORE=CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J
 ROLE_STORE=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q
 NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
-RPC_URL=https://soroban-testnet.stellar.org
+STELLAR_RPC_URL=https://soroban-testnet.stellar.org
 ```
 
-## Required Environment Variables
+## Required Environment Variables.
 
 The names below are the exact names the binary reads at startup via
 `Config::from_env()`. Using any other name (e.g. `ORDER_HANDLER_CONTRACT_ID`)
@@ -110,6 +111,22 @@ cargo build --release --bin oracle
 
 ## Deployment
 
+**This service must run as exactly one instance — do not scale it horizontally.**
+Double-submission prevention and the freeze-failure/blacklist counters
+(`AppState::in_flight_keys`, `freeze_failure_counts`, `frozen_order_blacklist`,
+`execution_failure_counts` in `oracle/src/state.rs`) live entirely in
+in-process memory, not in a shared store. A second replica would start with
+an empty `in_flight_keys` map, independently poll the same pending
+orders/deposits/withdrawals, and race the first replica to submit competing
+transactions for the same keys — the exact scenario the in-flight tracking
+exists to prevent, reopened at the process level. `fly.toml`'s
+`min_machines_running = 1` only guarantees at least one machine stays up
+(so Fly's autostop doesn't suspend it to zero); it does not cap the count,
+so running `fly scale count 2` (or setting a replica count on Railway)
+would silently introduce this race with no error or warning. See
+`AGENTS.md`'s "Repository-Specific Traps" for the same note in the
+contributor-facing doc.
+
 ### Docker
 
 ```bash
@@ -119,6 +136,13 @@ docker build -t so4-oracle .
 # Run with environment variables
 docker run -p 8080:8080 \
   -e STELLAR_RPC_URL=https://soroban-testnet.stellar.org \
+  -e ORACLE_CONTRACT_ID=CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY \
+  -e ROLE_STORE=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q \
+  -e DATA_STORE=CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J \
+  -e ORDER_HANDLER=CC35OFZVWUTAZPV3B6UKSDVAVORZEWUUMOMTHO33H4YR4C5FKPEFODKY \
+  -e DEPOSIT_HANDLER=CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C \
+  -e WITHDRAWAL_HANDLER=CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE \
+  -e READER=CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC \
   -e KEEPER_PRIVATE_KEY=<key> \
   -e KEEPER_SECRET_KEY=<secret> \
   -e KEEPER_ACCOUNT_ID=<account> \
@@ -128,6 +152,16 @@ docker run -p 8080:8080 \
 ### Systemd
 
 ```bash
+# Build the release binary
+cargo build --release --bin oracle
+
+# Create the deployment directory
+sudo mkdir -p /opt/oracle
+
+# Copy the binary
+sudo cp target/release/oracle /opt/oracle/oracle
+sudo chown oracle:oracle /opt/oracle/oracle
+
 # Copy the service file
 sudo cp oracle.service /etc/systemd/system/
 
@@ -135,6 +169,7 @@ sudo cp oracle.service /etc/systemd/system/
 sudo cp .env /opt/oracle/.env
 
 # Enable and start
+sudo systemctl daemon-reload
 sudo systemctl enable oracle
 sudo systemctl start oracle
 ```
@@ -169,6 +204,7 @@ railway up
 | `/prices` | GET | No | Current price feeds (CORS-enabled) |
 | `/oracle/status` | GET | Admin | Oracle status and recent errors |
 | `/keeper/status` | GET | Admin | Keeper status and execution history |
+| `/keeper/balance` | GET | Admin | Live keeper account XLM balance |
 | `/oracle/failed-submissions` | GET | Admin | Failed submission history |
 | `/metrics` | GET | Admin | Prometheus metrics |
 

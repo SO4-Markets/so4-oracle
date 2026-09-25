@@ -114,7 +114,9 @@ async fn test_promtool_validation() {
     {
         Ok(child) => child,
         Err(_) if std::env::var("CI").is_ok() => {
-            panic!("promtool not found in CI — install it in the test job to validate /metrics output");
+            panic!(
+                "promtool not found in CI — install it in the test job to validate /metrics output"
+            );
         }
         Err(_) => {
             println!("promtool not found, skipping validation test");
@@ -139,4 +141,141 @@ async fn test_promtool_validation() {
             stdout, stderr
         );
     }
+}
+
+/// #1010 — GET /metrics must return the Prometheus exposition text format
+/// Content-Type header so strict scrapers (promtool, real Prometheus) parse
+/// the response correctly.
+#[tokio::test]
+async fn metrics_endpoint_content_type_matches_prometheus_exposition_format() {
+    let mock_server = MockServer::start().await;
+    let config = test_config(&mock_server.uri(), "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let req = Request::builder()
+        .uri("/metrics")
+        .header("Authorization", "Bearer test-admin-token")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+
+    let content_type = res
+        .headers()
+        .get("content-type")
+        .expect("response should have content-type header")
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        content_type, "text/plain; version=0.0.4; charset=utf-8",
+        "GET /metrics must return the Prometheus exposition text format Content-Type"
+    );
+}
+
+/// #1012 — CORS is deliberately scoped to the public /prices route only;
+/// admin and health routes must not be cross-origin reachable. This pair of
+/// tests locks in that security boundary.
+#[tokio::test]
+async fn cors_headers_present_on_public_prices_route() {
+    let mock_server = MockServer::start().await;
+    let config = test_config(&mock_server.uri(), "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let req = Request::builder()
+        .uri("/prices")
+        .header("Origin", "https://example.com")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+
+    assert!(
+        res.headers().contains_key("access-control-allow-origin"),
+        "GET /prices must include Access-Control-Allow-Origin header"
+    );
+}
+
+#[tokio::test]
+async fn cors_headers_absent_on_admin_route() {
+    let mock_server = MockServer::start().await;
+    let config = test_config(&mock_server.uri(), "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let req = Request::builder()
+        .uri("/oracle/status")
+        .header("Origin", "https://example.com")
+        .header("Authorization", "Bearer test-admin-token")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+
+    assert!(
+        !res.headers().contains_key("access-control-allow-origin"),
+        "GET /oracle/status must NOT include Access-Control-Allow-Origin header"
+    );
+}
+
+/// #790 — `trace_layer` runs *after* `SetRequestIdLayer` now, so a request's
+/// span carries the real request id instead of an empty string. Drives a
+/// request with an explicit `x-request-id` through the real router with a
+/// capturing subscriber and asserts that id shows up in the span's structured
+/// output. Before the layer reorder this string is absent (the span field is
+/// `""`).
+#[tokio::test]
+async fn trace_span_carries_the_request_id_not_an_empty_string() {
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+    impl Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+        .with_current_span(true)
+        .with_span_list(true)
+        .with_writer(CaptureWriter(Arc::clone(&buf)))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mock_server = MockServer::start().await;
+    let config = test_config(&mock_server.uri(), "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    // /oracle/status emits an `info!("request completed")` event inside the
+    // request span (health/ready log at debug and would be filtered out here).
+    let req = Request::builder()
+        .uri("/oracle/status")
+        .header("x-request-id", "trace-req-id-790")
+        .body(Body::empty())
+        .unwrap();
+    let _ = app.oneshot(req).await.unwrap();
+
+    let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        logs.contains("trace-req-id-790"),
+        "the trace span should carry the request id; got logs:\n{logs}"
+    );
+    assert!(
+        !logs.contains("\"request_id\":\"\""),
+        "the trace span's request_id must not be empty:\n{logs}"
+    );
 }

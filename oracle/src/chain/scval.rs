@@ -142,6 +142,53 @@ mod tests {
         assert!(matches!(sc_addr, stellar_xdr::ScAddress::Account(_)));
     }
 
+    // #1031 — Contract branch (C... strkey) and unsupported-strkey error branch
+
+    #[test]
+    fn test_strkey_to_sc_address_contract() {
+        // CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY is a valid C... contract strkey
+        let addr = "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY";
+        let sc_addr = strkey_to_sc_address(addr).unwrap();
+        match sc_addr {
+            stellar_xdr::ScAddress::Contract(contract_id) => {
+                // Round-trip: convert the Hash bytes back to a contract strkey
+                let roundtrip = stellar_strkey::contract::ContractId(contract_id.0).to_string();
+                assert_eq!(roundtrip, addr);
+            }
+            other => panic!("expected ScAddress::Contract, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_strkey_to_sc_address_rejects_unsupported_strkey_type() {
+        // Create a muxed strkey (M... type) which is unsupported
+        let pk = stellar_strkey::ed25519::PublicKey::from_string(
+            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+        )
+        .unwrap();
+        let muxed_strkey = stellar_strkey::ed25519::MuxedAccount {
+            ed25519: pk.0,
+            id: 1,
+        }
+        .to_string();
+        let err = strkey_to_sc_address(&muxed_strkey).unwrap_err();
+        assert!(
+            err.contains("unsupported strkey type"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_strkey_to_sc_address_rejects_secret_seed() {
+        // S... secret seed is unsupported
+        let err = strkey_to_sc_address("SCZANGBA5YHTNYVVV2M3SFZJ5B5Z2B6XR57DGZNH5QTW3JJDEYTHKQZV")
+            .unwrap_err();
+        assert!(
+            err.contains("unsupported strkey type"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn test_encode_signed_price_produces_sorted_map() {
         let price = CachedPrice {

@@ -3,10 +3,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, PartialEq, Clone)]
 pub enum RpcError {
     NetworkError(String),
-    HttpError { status: u16, body: String },
+    HttpError {
+        status: u16,
+        body: String,
+    },
     JsonError(String),
-    RpcFault { code: i64, message: String },
-    BalanceBelowMinimum { balance_xlm: f64, min_xlm: f64 },
+    RpcFault {
+        code: i64,
+        message: String,
+    },
+    BalanceBelowMinimum {
+        balance_stroops: i64,
+        balance_xlm: f64,
+        min_xlm: f64,
+    },
 }
 
 impl Eq for RpcError {}
@@ -44,6 +54,7 @@ impl std::fmt::Display for RpcError {
             RpcError::BalanceBelowMinimum {
                 balance_xlm,
                 min_xlm,
+                ..
             } => {
                 write!(
                     f,
@@ -54,26 +65,28 @@ impl std::fmt::Display for RpcError {
     }
 }
 
+impl std::error::Error for RpcError {}
+
 // ── JSON-RPC wire types ──────────────────────────────────────────────────────
 
 #[derive(Serialize)]
-struct JsonRpcRequest<'a> {
-    jsonrpc: &'a str,
-    id: u32,
-    method: &'a str,
-    params: serde_json::Value,
+pub(crate) struct JsonRpcRequest<'a, P: Serialize = serde_json::Value> {
+    pub(crate) jsonrpc: &'a str,
+    pub(crate) id: u32,
+    pub(crate) method: &'a str,
+    pub(crate) params: P,
 }
 
 #[derive(Deserialize)]
-struct JsonRpcResponse<T> {
-    result: Option<T>,
-    error: Option<JsonRpcFault>,
+pub(crate) struct JsonRpcResponse<T> {
+    pub(crate) result: Option<T>,
+    pub(crate) error: Option<JsonRpcFault>,
 }
 
 #[derive(Deserialize)]
-struct JsonRpcFault {
-    code: i64,
-    message: String,
+pub(crate) struct JsonRpcFault {
+    pub(crate) code: i64,
+    pub(crate) message: String,
 }
 
 // ── getLatestLedger ──────────────────────────────────────────────────────────

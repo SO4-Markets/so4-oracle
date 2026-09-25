@@ -66,6 +66,134 @@ async fn keeper_status_returns_expected_fields() {
     assert!(json.get("pending_withdrawals").is_some());
     assert!(json.get("last_executions").is_some());
     assert!(json["last_executions"].as_array().unwrap().len() <= 50);
+    assert!(json.get("blacklisted_keys").is_some());
+    assert!(json["blacklisted_keys"].as_array().unwrap().is_empty());
+}
+
+// ── #802 — blacklisted_keys visibility + DELETE /keeper/blacklist/{key} ──────
+
+#[tokio::test]
+async fn keeper_status_lists_blacklisted_keys() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    state
+        .frozen_order_blacklist
+        .lock()
+        .await
+        .insert("deadbeef".to_string(), 3);
+
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/keeper/status")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let blacklisted = json["blacklisted_keys"].as_array().unwrap();
+    assert_eq!(blacklisted.len(), 1);
+    assert_eq!(blacklisted[0]["key"], "deadbeef");
+    assert_eq!(blacklisted[0]["consecutive_failures"], 3);
+}
+
+#[tokio::test]
+async fn clear_blacklisted_key_returns_401_without_token() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/keeper/blacklist/deadbeef")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn clear_blacklisted_key_returns_404_for_unknown_key() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/keeper/blacklist/not-blacklisted")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn clear_blacklisted_key_removes_key_and_resets_failure_count() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    {
+        let mut blacklist = state.frozen_order_blacklist.lock().await;
+        blacklist.insert("deadbeef".to_string(), 3);
+        let mut counts = state.freeze_failure_counts.lock().await;
+        counts.insert("deadbeef".to_string(), 3);
+    }
+
+    let app = build_router(Arc::clone(&state));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/keeper/blacklist/deadbeef")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["key"], "deadbeef");
+    assert_eq!(json["cleared"], true);
+
+    assert!(!state
+        .frozen_order_blacklist
+        .lock()
+        .await
+        .contains_key("deadbeef"));
+    assert!(!state
+        .freeze_failure_counts
+        .lock()
+        .await
+        .contains_key("deadbeef"));
 }
 
 // ── #432 — GET /oracle/failed-submissions ────────────────────────────────────

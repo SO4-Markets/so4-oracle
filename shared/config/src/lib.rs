@@ -4,8 +4,6 @@
 //! `config/tokens.json` remains as a checked-in example for local setup.
 
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::path::Path;
 
 // ── Unified token config ─────────────────────────────────────────────────────
 
@@ -73,9 +71,9 @@ impl Default for TokenConfig {
     }
 }
 
-/// Canonical token address for lookups.  Returns `stellar_address` if set,
-/// otherwise falls back to the lowercased symbol.
 impl TokenConfig {
+    /// Canonical token address for lookups.  Returns `stellar_address` if set,
+    /// otherwise falls back to the lowercased symbol.
     pub fn lookup_key(&self) -> String {
         if self.stellar_address.is_empty() {
             self.symbol.to_lowercase()
@@ -84,8 +82,13 @@ impl TokenConfig {
         }
     }
 
+    /// Returns the configured `display_symbol`, or falls back to `symbol`
+    /// if unset or empty.
     pub fn display_symbol(&self) -> &str {
-        self.display_symbol.as_deref().unwrap_or(&self.symbol)
+        self.display_symbol
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.symbol)
     }
 }
 
@@ -94,8 +97,6 @@ impl TokenConfig {
 /// Error type for configuration loading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
-    /// The `PRICE_FEED_CONFIG` env var is missing.
-    MissingEnvVar,
     /// JSON parsing failed.
     MalformedJson(String),
     /// The token list is empty.
@@ -109,9 +110,6 @@ pub enum ConfigError {
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConfigError::MissingEnvVar => {
-                write!(f, "required env var 'PRICE_FEED_CONFIG' is not set")
-            }
             ConfigError::MalformedJson(msg) => {
                 write!(f, "PRICE_FEED_CONFIG is not valid JSON: {msg}")
             }
@@ -140,6 +138,9 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
     }
 
     let mut symbols_seen = std::collections::HashSet::new();
+    let mut pyth_feed_ids_seen = std::collections::HashSet::new();
+    let mut binance_symbols_seen = std::collections::HashSet::new();
+    let mut coinbase_symbols_seen = std::collections::HashSet::new();
     for token in &tokens {
         if token.symbol.is_empty() {
             return Err(ConfigError::InvalidToken {
@@ -157,11 +158,37 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
         // stellar_address and sources are optional for the API server path,
         // but required for the oracle path — the oracle validates separately.
 
+        // Reject duplicate cross-token source identifiers to catch copy-paste
+        // errors where two tokens silently read the same price feed (#995).
+        if let Some(ref feed_id) = token.pyth_feed_id {
+            if !feed_id.is_empty() && !pyth_feed_ids_seen.insert(feed_id.clone()) {
+                return Err(ConfigError::InvalidToken {
+                    symbol: token.symbol.clone(),
+                    reason: format!("duplicate pyth_feed_id '{feed_id}' across tokens"),
+                });
+            }
+        }
+        if let Some(ref sym) = token.binance_symbol {
+            if !sym.is_empty() && !binance_symbols_seen.insert(sym.clone()) {
+                return Err(ConfigError::InvalidToken {
+                    symbol: token.symbol.clone(),
+                    reason: format!("duplicate binance_symbol '{sym}' across tokens"),
+                });
+            }
+        }
+        if let Some(ref sym) = token.coinbase_symbol {
+            if !sym.is_empty() && !coinbase_symbols_seen.insert(sym.clone()) {
+                return Err(ConfigError::InvalidToken {
+                    symbol: token.symbol.clone(),
+                    reason: format!("duplicate coinbase_symbol '{sym}' across tokens"),
+                });
+            }
+        }
+
         // Reject duplicate source entries so one config source cannot be
         // double-counted in price aggregation (#755).
         {
-            let unique_sources: std::collections::HashSet<_> =
-                token.sources.iter().collect();
+            let unique_sources: std::collections::HashSet<_> = token.sources.iter().collect();
             if unique_sources.len() != token.sources.len() {
                 return Err(ConfigError::InvalidToken {
                     symbol: token.symbol.clone(),
@@ -247,30 +274,6 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
     Ok(tokens)
 }
 
-/// Load tokens from the `PRICE_FEED_CONFIG` env var (JSON string).
-/// Returns `None` if the var is not set (caller can fall back to file).
-pub fn load_from_env_var(env_value: Option<&str>) -> Result<Option<Vec<TokenConfig>>, ConfigError> {
-    match env_value {
-        Some(raw) => parse_token_configs(raw).map(Some),
-        None => Ok(None),
-    }
-}
-
-/// Load tokens from a JSON file on disk.
-pub fn load_from_file(path: &Path) -> Result<Vec<TokenConfig>, ConfigError> {
-    let raw = std::fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
-    parse_token_configs(&raw)
-}
-
-/// Build a lookup map keyed by lowercased symbol.
-pub fn build_lookup(tokens: &[TokenConfig]) -> HashMap<String, &TokenConfig> {
-    let mut map = HashMap::new();
-    for token in tokens {
-        map.insert(token.symbol.to_lowercase(), token);
-    }
-    map
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -327,18 +330,6 @@ mod tests {
     }
 
     #[test]
-    fn load_from_env_var_returns_none_when_unset() {
-        let result = load_from_env_var(None).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn load_from_env_var_parses_json() {
-        let result = load_from_env_var(Some(VALID_JSON)).unwrap().unwrap();
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
     fn lookup_key_uses_stellar_address() {
         let tokens = parse_token_configs(VALID_JSON).unwrap();
         assert_eq!(tokens[0].lookup_key(), "cbtcaddr");
@@ -352,31 +343,17 @@ mod tests {
     }
 
     #[test]
-    fn build_lookup_creates_lowercase_map() {
-        let tokens = parse_token_configs(VALID_JSON).unwrap();
-        let map = build_lookup(&tokens);
-        assert!(map.contains_key("btc"));
-        assert!(map.contains_key("eth"));
-        assert!(!map.contains_key("BTC"));
-    }
-
-    #[test]
-    fn build_lookup_returns_correct_references() {
-        let tokens = parse_token_configs(VALID_JSON).unwrap();
-        let map = build_lookup(&tokens);
-        assert_eq!(map.get("btc").unwrap().symbol, "BTC");
-        assert_eq!(map.get("eth").unwrap().symbol, "ETH");
-    }
-
-    #[test]
-    fn build_lookup_keys_are_lowercased_symbol() {
-        let json = r#"[{"symbol":"MIXEDcase","sources":["binance"]},{"symbol":"UPPER","sources":["fixed"],"fixed_price":"1"}]"#;
+    fn display_symbol_falls_back_to_symbol_when_empty() {
+        let json = r#"[{"symbol":"BTC","display_symbol":"","sources":["binance"]}]"#;
         let tokens = parse_token_configs(json).unwrap();
-        let map = build_lookup(&tokens);
-        assert!(map.contains_key("mixedcase"));
-        assert!(map.contains_key("upper"));
-        assert!(!map.contains_key("MIXEDcase"));
-        assert!(!map.contains_key("UPPER"));
+        assert_eq!(tokens[0].display_symbol(), "BTC");
+    }
+
+    #[test]
+    fn display_symbol_returns_configured_value() {
+        let json = r#"[{"symbol":"BTC","display_symbol":"XBTC","sources":["binance"]}]"#;
+        let tokens = parse_token_configs(json).unwrap();
+        assert_eq!(tokens[0].display_symbol(), "XBTC");
     }
 
     // #504 — deny_unknown_fields: typo'd keys must be rejected, not silently ignored.
@@ -428,5 +405,66 @@ mod tests {
         let json = r#"[{"symbol":"BTC","sources":["binance"],"min_sources":0}]"#;
         let err = parse_token_configs(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }), "{err:?}");
+    }
+
+    // #995 — cross-token duplicate pyth_feed_id must be rejected.
+    #[test]
+    fn reject_duplicate_pyth_feed_id() {
+        let json = r#"[
+            {"symbol":"BTC","stellar_address":"CBTC","sources":["pyth"],"pyth_feed_id":"abc123"},
+            {"symbol":"ETH","stellar_address":"CETH","sources":["pyth"],"pyth_feed_id":"abc123"}
+        ]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        match err {
+            ConfigError::InvalidToken { symbol, reason } => {
+                assert_eq!(symbol, "ETH");
+                assert!(reason.contains("duplicate pyth_feed_id"));
+            }
+            _ => panic!("expected ConfigError::InvalidToken for duplicate pyth_feed_id"),
+        }
+    }
+
+    // #995 — cross-token duplicate binance_symbol must be rejected.
+    #[test]
+    fn reject_duplicate_binance_symbol() {
+        let json = r#"[
+            {"symbol":"BTC","stellar_address":"CBTC","sources":["binance"],"binance_symbol":"BTCUSDT"},
+            {"symbol":"WBTC","stellar_address":"CWBTC","sources":["binance"],"binance_symbol":"BTCUSDT"}
+        ]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        match err {
+            ConfigError::InvalidToken { symbol, reason } => {
+                assert_eq!(symbol, "WBTC");
+                assert!(reason.contains("duplicate binance_symbol"));
+            }
+            _ => panic!("expected ConfigError::InvalidToken for duplicate binance_symbol"),
+        }
+    }
+
+    // #995 — cross-token duplicate coinbase_symbol must be rejected.
+    #[test]
+    fn reject_duplicate_coinbase_symbol() {
+        let json = r#"[
+            {"symbol":"BTC","stellar_address":"CBTC","sources":["coinbase"],"coinbase_symbol":"BTC"},
+            {"symbol":"TBTC","stellar_address":"CTBTC","sources":["coinbase"],"coinbase_symbol":"BTC"}
+        ]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        match err {
+            ConfigError::InvalidToken { symbol, reason } => {
+                assert_eq!(symbol, "TBTC");
+                assert!(reason.contains("duplicate coinbase_symbol"));
+            }
+            _ => panic!("expected ConfigError::InvalidToken for duplicate coinbase_symbol"),
+        }
+    }
+
+    // #995 — different source identifiers across different source types are OK.
+    #[test]
+    fn allow_different_source_identifiers() {
+        let json = r#"[
+            {"symbol":"BTC","stellar_address":"CBTC","sources":["binance","pyth"],"binance_symbol":"BTCUSDT","pyth_feed_id":"feed1"},
+            {"symbol":"ETH","stellar_address":"CETH","sources":["coinbase"],"coinbase_symbol":"ETH"}
+        ]"#;
+        assert!(parse_token_configs(json).is_ok());
     }
 }

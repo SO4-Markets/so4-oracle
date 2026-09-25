@@ -13,6 +13,11 @@ use crate::state::{AppState, CachedPrice, FailedSubmission};
 
 const READY_BALANCE_RETRY_ATTEMPTS: u32 = 3;
 const READY_BALANCE_RETRY_BASE_DELAY_MS: u64 = 100;
+/// Hard cap on the entire `/ready` external-check path (RPC reachability +
+/// keeper balance with retries). Must stay below both Fly's and Railway's
+/// health-check timeouts so the service returns 503 promptly instead of
+/// hanging until the platform probe kills it (#1042).
+const READY_CHECK_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Deserialize)]
 pub struct FailedSubmissionsQuery {
@@ -128,19 +133,33 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
         }
     }
 
-    // Check cached external RPC and keeper balance readiness result (3s TTL)
+    // Check cached external RPC and keeper balance readiness result (3s TTL).
+    // Hold a single write lock across the entire check-then-populate sequence
+    // so concurrent requests during a cache miss are coalesced into one
+    // outbound check rather than each independently triggering
+    // perform_external_ready_checks (#1021).
     let metrics = state.metrics.to_response();
     {
-        let cache = state.ready_cache.read().await;
+        let mut cache = state.ready_cache.write().await;
         if let Some(last) = cache.last_checked {
             if last.elapsed() < std::time::Duration::from_secs(3) {
                 if let Some((status, msg)) = cache.last_error.clone() {
                     return Err(ApiError::new(status, msg));
                 }
+                // Compute cycle times like health() does
+                let cycle = state.cycle_status.read().await;
+                let last_price_cycle_secs_ago = cycle
+                    .last_price_cycle_at
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|d| d.as_secs());
+                let last_keeper_cycle_secs_ago = cycle
+                    .last_keeper_cycle_at
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|d| d.as_secs());
                 return Ok(Json(HealthResponse {
                     status: "ok",
-                    last_price_cycle_secs_ago: None,
-                    last_keeper_cycle_secs_ago: None,
+                    last_price_cycle_secs_ago,
+                    last_keeper_cycle_secs_ago,
                     price_cycle_count: metrics.price_cycle_count,
                     keeper_cycle_count: metrics.keeper_cycle_count,
                     token_fetch_failures: metrics.token_fetch_failures,
@@ -148,11 +167,22 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
                 }));
             }
         }
-    }
 
-    let check_res = perform_external_ready_checks(&state).await;
-    {
-        let mut cache = state.ready_cache.write().await;
+        // #1042 — cap the total worst-case duration of external checks so the
+        // endpoint always returns 503 promptly instead of hanging past the
+        // platform's health-check timeout (Fly: 20s, Railway: 30s).
+        let check_res = match tokio::time::timeout(
+            Duration::from_secs(READY_CHECK_TIMEOUT_SECS),
+            perform_external_ready_checks(&state),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ready_check_timeout",
+            )),
+        };
         cache.last_checked = Some(std::time::Instant::now());
         match check_res {
             Ok(()) => {
@@ -166,10 +196,20 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
     }
 
     let metrics = state.metrics.to_response();
+    // Compute cycle times like health() does
+    let cycle = state.cycle_status.read().await;
+    let last_price_cycle_secs_ago = cycle
+        .last_price_cycle_at
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs());
+    let last_keeper_cycle_secs_ago = cycle
+        .last_keeper_cycle_at
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs());
     Ok(Json(HealthResponse {
         status: "ok",
-        last_price_cycle_secs_ago: None,
-        last_keeper_cycle_secs_ago: None,
+        last_price_cycle_secs_ago,
+        last_keeper_cycle_secs_ago,
         price_cycle_count: metrics.price_cycle_count,
         keeper_cycle_count: metrics.keeper_cycle_count,
         token_fetch_failures: metrics.token_fetch_failures,

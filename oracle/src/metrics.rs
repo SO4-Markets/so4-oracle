@@ -46,6 +46,13 @@ struct Counters {
 pub struct Metrics {
     counters: Mutex<Counters>,
     pub token_source_fetch_failures: Mutex<BTreeMap<TokenSourceLabels, u64>>,
+    /// Per (symbol, token, source) count of times that source's price was
+    /// excluded by the MAD-based outlier filter in `aggregate_prices`, even
+    /// on cycles where enough other sources still met `min_sources` and the
+    /// cycle succeeded. Surfaces `AggregatedPrice.rejected_sources`, which
+    /// was previously computed on every successful aggregation and then
+    /// discarded before reaching any consumer (#728).
+    pub token_source_outlier_rejections: Mutex<BTreeMap<TokenSourceLabels, u64>>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -120,6 +127,24 @@ impl Metrics {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *failures.entry(labels).or_insert(0) += 1;
         drop(failures);
+        let mut c = self.counters.lock().unwrap_or_else(|p| p.into_inner());
+        Self::stamp(&mut c);
+    }
+
+    /// Record that `source`'s price for `symbol`/`token` was excluded by the
+    /// outlier filter during a price cycle (#728).
+    pub fn record_token_source_outlier_rejection(&self, symbol: &str, token: &str, source: &str) {
+        let labels = TokenSourceLabels {
+            symbol: symbol.to_string(),
+            token: token.to_string(),
+            source: source.to_string(),
+        };
+        let mut rejections = self
+            .token_source_outlier_rejections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *rejections.entry(labels).or_insert(0) += 1;
+        drop(rejections);
         let mut c = self.counters.lock().unwrap_or_else(|p| p.into_inner());
         Self::stamp(&mut c);
     }
@@ -302,6 +327,23 @@ impl Metrics {
             ));
         }
 
+        output.push_str("# HELP oracle_token_source_outlier_rejections_total Total times a source's price was excluded by the outlier filter, including cycles that otherwise succeeded\n");
+        output.push_str("# TYPE oracle_token_source_outlier_rejections_total counter\n");
+        for (labels, count) in self
+            .token_source_outlier_rejections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+        {
+            output.push_str(&format!(
+                "oracle_token_source_outlier_rejections_total{{symbol=\"{}\",token=\"{}\",source=\"{}\"}} {}\n",
+                escape_label_value(&labels.symbol),
+                escape_label_value(&labels.token),
+                escape_label_value(&labels.source),
+                count
+            ));
+        }
+
         output.push_str("# HELP oracle_submit_failures_total Total number of submit failures\n");
         output.push_str("# TYPE oracle_submit_failures_total counter\n");
         output.push_str(&format!(
@@ -309,10 +351,10 @@ impl Metrics {
             c.submit_failures
         ));
 
-        output.push_str("# HELP oracle_last_metrics_update Timestamp of last metrics update\n");
-        output.push_str("# TYPE oracle_last_metrics_update gauge\n");
+        output.push_str("# HELP oracle_last_cycle_metrics_update Timestamp of last price/keeper cycle metrics update\n");
+        output.push_str("# TYPE oracle_last_cycle_metrics_update gauge\n");
         output.push_str(&format!(
-            "oracle_last_metrics_update {}\n",
+            "oracle_last_cycle_metrics_update {}\n",
             c.last_metrics_update
         ));
 

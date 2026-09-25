@@ -1,17 +1,20 @@
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::FromRequestParts;
 use axum::extract::MatchedPath;
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, CACHE_CONTROL};
 use axum::http::request::Parts;
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::{Json, Router};
 use serde::Serialize;
 use std::time::Duration;
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
@@ -138,6 +141,27 @@ async fn track_metrics(
     response
 }
 
+/// Middleware that converts axum's bare 405 Method Not Allowed responses into
+/// the same `{"error": "..."}` JSON envelope this API returns for every other
+/// error path (#1029).
+async fn map_method_not_allowed(
+    request: axum::http::Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let response = next.run(request).await;
+    if response.status() == StatusCode::METHOD_NOT_ALLOWED {
+        (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(ErrorBody {
+                error: "method_not_allowed".to_string(),
+            }),
+        )
+            .into_response()
+    } else {
+        response
+    }
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
         .allow_methods([Method::GET])
@@ -207,16 +231,47 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/oracle/status", get(admin::oracle_status))
         .route("/keeper/status", get(admin::keeper_status))
         .route("/keeper/balance", get(admin::keeper_balance))
+        .route(
+            "/keeper/blacklist/{key}",
+            delete(admin::clear_blacklisted_key),
+        )
         .route("/metrics", get(admin::metrics))
         .route(
             "/oracle/failed-submissions",
             get(prices::failed_submissions),
         )
+        .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found") })
         .with_state(state.clone())
+        // #1044 — CatchPanicLayer must be the OUTERMOST layer so it wraps
+        // every handler. With `panic = "abort"` in the release profile a
+        // panicking handler would otherwise abort the entire process; this
+        // layer converts panics into 500 responses instead, isolating faults
+        // to the offending request.
+        .layer(CatchPanicLayer::new())
+        // Layer ordering: `.layer()` calls chained directly on a `Router` make
+        // the LAST-added layer the OUTERMOST — it sees the request first. So
+        // `SetRequestIdLayer` must be added *after* `trace_layer` for the ID
+        // to be in the request extensions by the time `trace_layer`'s
+        // `make_span_with` reads it; otherwise every span's `request_id` is
+        // "" (#790). `PropagateRequestIdLayer` only needs to run after the
+        // handler, so it stays innermost.
         .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(trace_layer)
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(axum::middleware::from_fn_with_state(state, track_metrics))
+        // No response from this service is meant to be cached — /prices is
+        // the one endpoint explicitly CORS-enabled for direct browser
+        // access, updates roughly once a second, and backs a trading
+        // frontend, so a response with no cache directives at all is
+        // otherwise subject to whatever default heuristics a browser,
+        // proxy, or CDN in front of this service chooses to apply (#1026).
+        // Applied to every route, not just /prices, since nothing here is
+        // cacheable.
+        .layer(SetResponseHeaderLayer::overriding(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
+        .layer(axum::middleware::from_fn(map_method_not_allowed))
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -237,15 +292,63 @@ mod tests {
     use super::constant_time_eq;
     use crate::{AppState, Config};
     use axum::body::Body;
+    use axum::http::header::CACHE_CONTROL;
     use axum::http::Request;
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    // #1026 — every response, not just /prices, must carry an explicit
+    // no-store directive so no browser/proxy/CDN in front of this service
+    // applies default caching heuristics to a price that updates ~1/sec.
+    #[tokio::test]
+    async fn every_response_sets_cache_control_no_store() {
+        let config = Arc::new(Config::default_for_tests());
+        let state = Arc::new(AppState::new(config));
+        let app = super::build_router(state);
+
+        for uri in ["/health", "/ready", "/prices"] {
+            let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response
+                    .headers()
+                    .get(CACHE_CONTROL)
+                    .map(|v| v.to_str().unwrap()),
+                Some("no-store"),
+                "missing/incorrect Cache-Control on {uri}"
+            );
+        }
+    }
 
     #[test]
     fn constant_time_comparison_matches_equal_values_only() {
         assert!(constant_time_eq(b"secret", b"secret"));
         assert!(!constant_time_eq(b"secret", b"Secret"));
         assert!(!constant_time_eq(b"secret", b"secret2"));
+    }
+
+    // #1029 — a wrong HTTP method on a known route must return the API's JSON
+    // error envelope, not axum's bare 405.
+    #[tokio::test]
+    async fn method_not_allowed_returns_json_envelope() {
+        let config = Arc::new(Config::default_for_tests());
+        let state = Arc::new(AppState::new(config));
+        let app = super::build_router(state);
+
+        // POST to /prices (which only accepts GET) should return 405 with JSON body
+        let request = Request::builder()
+            .method("POST")
+            .uri("/prices")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "method_not_allowed");
     }
 
     #[tokio::test]
@@ -261,10 +364,10 @@ mod tests {
         let state = Arc::new(AppState::new(Arc::new(config)));
         let app = super::build_router(Arc::clone(&state));
 
-        // Make an unauthorized admin request
-        let _request = Request::builder()
+        // Make both successful and failing admin requests to test that secrets don't leak in either case
+        let successful_request = Request::builder()
             .uri("/oracle/status")
-            .header("Authorization", format!("Bearer {}", test_admin_token)) // wait, we want a failing one to check auth failure metrics
+            .header("Authorization", format!("Bearer {}", test_admin_token))
             .body(Body::empty())
             .unwrap();
 
@@ -274,6 +377,8 @@ mod tests {
             .body(Body::empty())
             .unwrap();
 
+        // Send both requests
+        let _ = app.clone().oneshot(successful_request).await;
         let _ = app.clone().oneshot(failing_request).await;
 
         let metrics_out = state.metrics.to_prometheus();

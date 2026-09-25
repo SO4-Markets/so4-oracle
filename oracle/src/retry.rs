@@ -1,10 +1,25 @@
+/// Applies multiplicative jitter to a computed backoff delay, scaling it by a
+/// random factor in `[0.5, 1.0)` (resolves #583).
+///
+/// Concurrent retry loops (e.g. multiple keeper cycles or price-source
+/// fetches) that hit a transient outage at the same wall-clock moment would
+/// otherwise back off on the exact same schedule and retry in lockstep —
+/// the classic thundering-herd pattern. Jittering only the sleep duration,
+/// rather than the growth trajectory itself, keeps the delay's order of
+/// magnitude intact while still spreading concurrent retries apart.
+pub fn jitter(delay_ms: u64) -> u64 {
+    let factor = 0.5 + rand::random::<f64>() * 0.5;
+    ((delay_ms as f64) * factor) as u64
+}
+
 /// Retry an async fallible closure with exponential backoff (resolves #356, #585).
 ///
 /// Doubles the delay after every failure, starting at `base_delay_ms`, and
 /// caps the delay at `max_delay_ms` so that runaway growth is impossible
 /// regardless of how many attempts the caller configures.  Mirrors the
 /// explicit `(backoff_ms * 2).min(30_000)` cap already present in
-/// `poll_until_confirmed` in `submit.rs`.
+/// `poll_until_confirmed` in `submit.rs`. Each sleep is jittered (#583) so
+/// concurrent callers don't retry in lockstep.
 ///
 /// Returns `Ok(T)` on the first success, or the last `Err(E)` after all
 /// attempts are exhausted.
@@ -43,7 +58,7 @@ where
 
                 last_err = Some(e);
                 if attempt < max_attempts {
-                    sleep_ms(delay_ms).await;
+                    sleep_ms(jitter(delay_ms)).await;
                     delay_ms = (delay_ms * 2).min(max_delay_ms);
                 }
             }

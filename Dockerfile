@@ -46,8 +46,10 @@ USER oracle
 # Expose port
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+# Health check — timeout covers /ready's worst-case (RPC reachability +
+# keeper-balance retries), capped at 15s by READY_CHECK_TIMEOUT_SECS (#1042,
+# #1043). Use /health for pure liveness (always fast, in-memory only).
+HEALTHCHECK --interval=30s --timeout=20s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
 # Run the binary

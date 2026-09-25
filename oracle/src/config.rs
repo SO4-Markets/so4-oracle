@@ -17,6 +17,8 @@ pub const DEFAULT_KEEPER_LOOP_MS: u64 = 1_500;
 pub const DEFAULT_SET_PRICES_TX_FEE: u32 = 1_000_000;
 /// Default inclusion fee (stroops) for keeper handler transactions.
 pub const DEFAULT_KEEPER_TX_FEE: u32 = 2_000_000;
+/// Default timeout in seconds for graceful shutdown of background tasks.
+pub const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
 /// Oracle-specific view of a token feed config.
 /// Re-exports fields from `TokenConfig` for backward compatibility with
@@ -64,32 +66,56 @@ impl fmt::Debug for SecretString {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Address and port the HTTP server binds to. Env: `BIND_ADDR`, default `0.0.0.0:8080`.
     pub bind_addr: SocketAddr,
+    /// Stellar network to connect to. Env: `STELLAR_NETWORK`, default `testnet`.
     pub network: Network,
+    /// Stellar network passphrase for transaction signing.
     pub network_passphrase: String,
+    /// Stellar RPC node URL. Env: `STELLAR_RPC_URL` (defaults to public testnet RPC).
     pub stellar_rpc_url: String,
+    /// Horizon server URL for account queries. Env: `HORIZON_URL`.
     pub horizon_url: String,
+    /// On-chain oracle contract address. Env: `ORACLE_CONTRACT_ID`.
     pub oracle_contract_id: String,
+    /// On-chain role-store contract address. Env: `ROLE_STORE`.
     pub role_store_contract_id: String,
+    /// On-chain data-store contract address. Env: `DATA_STORE`.
     pub data_store_contract_id: String,
+    /// On-chain order-handler contract address. Env: `ORDER_HANDLER`.
     pub order_handler_contract_id: String,
+    /// On-chain deposit-handler contract address. Env: `DEPOSIT_HANDLER`.
     pub deposit_handler_contract_id: String,
+    /// On-chain withdrawal-handler contract address. Env: `WITHDRAWAL_HANDLER`.
     pub withdrawal_handler_contract_id: String,
+    /// On-chain reader contract address. Env: `READER`.
     pub reader_contract_id: String,
+    /// Keeper ed25519 private key (hex-encoded 32 bytes). Env: `KEEPER_PRIVATE_KEY`.
     pub keeper_private_key: SecretString,
+    /// Keeper Stellar strkey secret seed (S-prefixed). Env: `KEEPER_SECRET_KEY`.
     pub keeper_secret_key: SecretString,
+    /// Keeper Stellar account ID (G-prefixed strkey). Env: `KEEPER_ACCOUNT_ID`.
     pub keeper_account_id: String,
+    /// Index of this keeper instance, used only to label which keeper signed a
+    /// given price submission. Has no work-partitioning behavior — every
+    /// instance processes the full pending-work set regardless of index.
+    /// Env: `KEEPER_INDEX`, default `0`.
     pub keeper_index: u32,
+    /// Optional bearer token for admin API endpoints. Env: `ADMIN_API_TOKEN`.
     pub admin_api_token: Option<SecretString>,
     /// API key used to authenticate requests to the production Hermes endpoint.
     pub pyth_api_key: Option<SecretString>,
+    /// Minimum keeper XLM balance before halting (in XLM, not stroops). Env: `MIN_KEEPER_BALANCE_XLM`.
     pub min_keeper_balance_xlm: f64,
     /// Inclusion fee (stroops) for oracle `set_prices` transactions.
     pub set_prices_tx_fee: u32,
     /// Inclusion fee (stroops) for keeper handler execute/freeze transactions.
     pub keeper_tx_fee: u32,
+    /// Interval between price-feed refresh cycles. Env: `PRICE_LOOP_MS`, default 1000ms.
     pub price_loop_interval: Duration,
+    /// Interval between keeper execution cycles. Env: `KEEPER_LOOP_MS`, default 1500ms.
     pub keeper_loop_interval: Duration,
+    /// Token feed configuration (symbols, sources, addresses).
     pub price_feed: PriceFeedConfig,
 }
 
@@ -120,9 +146,9 @@ impl From<ConfigError> for EnvError {
 
 /// A collection of one or more environment-variable configuration errors.
 ///
-/// Returned by [`Config::from_lookup`] and [`Config::from_env`] when multiple
-/// fields are invalid or missing, allowing the caller to report every problem
-/// in a single pass rather than failing on the first one.
+/// Returned by [`Config::from_env`] when multiple fields are invalid or
+/// missing, allowing the caller to report every problem in a single pass
+/// rather than failing on the first one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvErrors(pub Vec<EnvError>);
 
@@ -175,7 +201,7 @@ impl Config {
 
         let bind_addr = collect_or_default!(
             parse_or_default(&mut lookup, "BIND_ADDR", DEFAULT_BIND_ADDR),
-            "0.0.0.0:8080".parse().unwrap()
+            DEFAULT_BIND_ADDR.parse().unwrap()
         );
         let (network_passphrase, stellar_rpc_url, horizon_url) = match network {
             Network::Testnet => (
@@ -201,7 +227,7 @@ impl Config {
         };
 
         let price_feed = collect_or_default!(
-            load_price_feed_config(lookup("PRICE_FEED_CONFIG").as_deref()).map_err(EnvError::from),
+            load_price_feed_config(lookup(ENV_KEY).as_deref()).map_err(EnvError::from),
             PriceFeedConfig { tokens: vec![] }
         );
 
@@ -403,7 +429,9 @@ fn required_any(
     lookup(primary)
         .filter(|value| !value.trim().is_empty())
         .or_else(|| lookup(fallback).filter(|value| !value.trim().is_empty()))
-        .ok_or(EnvError::MissingVar(primary))
+        .ok_or(EnvError::MissingVar(
+            "ORACLE_CONTRACT_ID' (or fallback alias 'ORACLE')",
+        ))
 }
 
 fn parse_or_default<T>(
@@ -518,13 +546,13 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
                         reason: "coinbase_symbol is required for coinbase source".to_string(),
                     });
                 }
-                "pyth" if token.pyth_feed_id.is_none() => {
+                "pyth" if token.pyth_feed_id.as_deref().unwrap_or("").is_empty() => {
                     return Err(ConfigError::InvalidToken {
                         symbol: token.symbol.clone(),
                         reason: "pyth_feed_id is required for pyth source".to_string(),
                     });
                 }
-                "fixed" if token.fixed_price.is_none() => {
+                "fixed" if token.fixed_price.as_deref().unwrap_or("").is_empty() => {
                     return Err(ConfigError::InvalidToken {
                         symbol: token.symbol.clone(),
                         reason: "fixed_price is required for fixed source".to_string(),
@@ -618,6 +646,12 @@ mod tests {
     ]"#;
 
     #[test]
+    fn network_as_str_returns_expected_wire_values() {
+        assert_eq!(Network::Testnet.as_str(), "testnet");
+        assert_eq!(Network::Mainnet.as_str(), "mainnet");
+    }
+
+    #[test]
     fn parse_or_default_uses_value_when_set() {
         let mut env = HashMap::new();
         env.insert("TEST_VAR".to_string(), "42".to_string());
@@ -681,6 +715,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.port(), 3000);
+    }
+
+    #[test]
+    fn config_from_lookup_uses_default_bind_addr_when_unset() {
+        let env = valid_env();
+        assert!(!env.contains_key("BIND_ADDR"));
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(
+            cfg.bind_addr,
+            DEFAULT_BIND_ADDR.parse::<std::net::SocketAddr>().unwrap()
+        );
     }
 
     #[test]
@@ -790,8 +837,22 @@ mod tests {
     }
 
     #[test]
+    fn reject_empty_pyth_feed_id() {
+        let json = r#"[{"symbol":"TWBTC","stellar_address":"CADDR","sources":["pyth"],"pyth_feed_id":""}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }));
+    }
+
+    #[test]
     fn reject_missing_fixed_price() {
         let json = r#"[{"symbol":"TUSDC","stellar_address":"CADDR","sources":["fixed"]}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }));
+    }
+
+    #[test]
+    fn reject_empty_fixed_price() {
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CADDR","sources":["fixed"],"fixed_price":""}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
