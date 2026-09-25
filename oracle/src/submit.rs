@@ -64,8 +64,12 @@ pub enum SubmitError {
         status: String,
         error_result_xdr: Option<String>,
     },
-    TransactionFailed { events: Vec<String> },
-    PollTimeout { hash: String },
+    TransactionFailed {
+        events: Vec<String>,
+    },
+    PollTimeout {
+        hash: String,
+    },
 }
 
 impl std::fmt::Display for SubmitError {
