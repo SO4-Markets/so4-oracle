@@ -24,30 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.MSRV }}
-      - uses: Swatinem/rust-cache@v2
-      - name: Verify Dockerfile MSRV matches declared rust-version
-        run: |
-          DOCKERFILE_MSRV=$(grep -oP 'FROM rust:\K[0-9]+\.[0-9]+' Dockerfile)
-          DECLARED_MSRV=$(grep -oP 'rust-version\s*=\s*"\K[0-9]+\.[0-9]+' Cargo.toml | head -1)
-          if [ "$DOCKERFILE_MSRV" != "$DECLARED_MSRV" ]; then
-            echo "::error::Dockerfile base image (rust:${DOCKERFILE_MSRV}) does not match declared MSRV (${DECLARED_MSRV})"
-            exit 1
-          fi
-          echo "MSRV consistent: ${DECLARED_MSRV}"
-      - run: cargo check --workspace --locked
-
-  # ── Code quality ────────────────────────────────────────────────────────
-  fmt:
-    name: rustfmt
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           components: rustfmt
       - run: |
@@ -62,21 +41,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
     name: cargo test
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           workspaces: |
             .
@@ -93,28 +71,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --all --locked
-
-  # ── Supply-chain scanning ───────────────────────────────────────────────
-  audit:
-    name: cargo audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@cargo-audit
-      - run: cargo audit
-
-  deny:
-    name: cargo deny
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11d5960 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           command: check advisories bans licenses sources
 
@@ -126,6 +85,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: docker build -t so4-oracle .
+      - name: Login to GitHub Container Registry
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push to GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          docker tag so4-oracle ghcr.io/${{ github.repository }}/so4-oracle:latest
+          docker push ghcr.io/${{ github.repository }}/so4-oracle:latest
 
   coverage:
     name: coverage

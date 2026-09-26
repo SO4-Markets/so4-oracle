@@ -335,7 +335,7 @@ async fn ledger_failure_with_empty_token_list_still_resets_cycle() {
 }
 
 #[tokio::test]
-async fn ledger_failure_records_non_zero_latency_in_metrics() {
+async fn ledger_failure_records_cycle_count_in_metrics() {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))

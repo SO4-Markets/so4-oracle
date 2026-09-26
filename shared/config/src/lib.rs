@@ -95,7 +95,7 @@ impl TokenConfig {
 // ── Loading helpers ──────────────────────────────────────────────────────────
 
 /// Error type for configuration loading.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum ConfigError {
     /// JSON parsing failed.
     MalformedJson(String),

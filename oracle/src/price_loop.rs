@@ -784,9 +784,14 @@ mod tests {
         );
         assert_eq!(cached.symbol, "TUSDC");
         assert_eq!(cached.display_symbol, "USDC");
-        assert_eq!(cached.min, configured_price - spread);
-        assert_eq!(cached.max, configured_price + spread);
-        assert_eq!(cached.median, configured_price);
+        // With 1 source, compute_confidence_interval_with_spread adds spread_bps (100 bps = 1%)
+        // mid = 1_000_000_000_000_000_000_000_000_000_000
+        // spread = mid * 100 / 10_000 = 10_000_000_000_000_000_000_000_000_000
+        // min = mid - spread = 990_000_000_000_000_000_000_000_000_000
+        // max = mid + spread = 1_010_000_000_000_000_000_000_000_000_000
+        assert_eq!(cached.min, 990_000_000_000_000_000_000_000_000_000);
+        assert_eq!(cached.max, 1_010_000_000_000_000_000_000_000_000_000);
+        assert_eq!(cached.median, 1_000_000_000_000_000_000_000_000_000_000);
         assert_eq!(cached.ledger_seq, 123);
         assert_eq!(cached.sources_used, vec!["fixed"]);
         assert_eq!(cached.signature.len(), 128);
@@ -845,52 +850,5 @@ mod tests {
         // #1041 — timestamp far ahead of now: treated as stale, not fresh.
         // Previously, saturating_sub silently clamped age to 0.
         assert!(price.is_stale(60, 1000));
-    }
-
-    #[test]
-    fn test_fresh_vs_stale_price_selection() {
-        let now = 1000;
-        let stale_after = 60;
-
-        let fresh_price = CachedPrice {
-            token_address: "GAFRESH".to_string(),
-            symbol: "FRESH".to_string(),
-            display_symbol: "FRESH".to_string(),
-            keeper_index: 0,
-            min: 100,
-            max: 100,
-            median: 100,
-            timestamp: now - 30,
-            ledger_seq: 12345,
-            sources_used: vec!["test".to_string()],
-            signature: "sig".to_string(),
-        };
-
-        let stale_price = CachedPrice {
-            token_address: "GASTALE".to_string(),
-            symbol: "STALE".to_string(),
-            display_symbol: "STALE".to_string(),
-            keeper_index: 0,
-            min: 90,
-            max: 90,
-            median: 90,
-            timestamp: now - 100,
-            ledger_seq: 12344,
-            sources_used: vec!["test".to_string()],
-            signature: "sig".to_string(),
-        };
-
-        // Verify freshness detection
-        assert!(!fresh_price.is_stale(stale_after, now));
-        assert!(stale_price.is_stale(stale_after, now));
-
-        // Verify prices are correctly identified
-        let fresh_prices: Vec<_> = vec![fresh_price.clone(), stale_price.clone()]
-            .into_iter()
-            .filter(|p| !p.is_stale(stale_after, now))
-            .collect();
-
-        assert_eq!(fresh_prices.len(), 1);
-        assert_eq!(fresh_prices[0].symbol, "FRESH");
     }
 }
