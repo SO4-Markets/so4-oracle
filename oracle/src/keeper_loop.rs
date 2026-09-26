@@ -7,6 +7,7 @@ use tracing::{error, info, warn};
 
 use crate::chain::scval;
 use crate::chain::tx_builder;
+use crate::keeper;
 use crate::state::{AppState, CachedPrice, FailedSubmission, KeeperExecution};
 
 const KEEPER_TX_FEE: u32 = 2_000_000;
@@ -45,6 +46,8 @@ pub async fn run_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 deposits = summary.deposits_executed,
                 withdrawals = summary.withdrawals_executed,
                 errors = summary.errors,
+                prices_stale = summary.prices_stale,
+                keeper_balance_low = summary.keeper_balance_low,
                 "keeper_cycle_complete"
             );
             state.metrics.record_keeper_cycle(
@@ -53,6 +56,8 @@ pub async fn run_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 summary.deposits_executed,
                 summary.withdrawals_executed,
                 summary.errors,
+                summary.keeper_balance_low,
+                summary.prices_stale,
             );
         }
         Err(error) => {
@@ -71,13 +76,35 @@ pub struct CycleSummary {
     pub deposits_executed: usize,
     pub withdrawals_executed: usize,
     pub errors: usize,
+    pub prices_stale: bool,
+    pub keeper_balance_low: bool,
 }
 
 async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, String> {
+    let keeper_cfg = keeper::KeeperBalanceConfig {
+        horizon_url: state.config.horizon_url.clone(),
+        account_id: state.config.keeper_account_id.clone(),
+        min_balance_xlm: state.config.min_keeper_balance_xlm,
+    };
+
+    let keeper_balance_low = match keeper::check_keeper_balance(&keeper_cfg).await {
+        Ok(stroops) => {
+            let xlm = stroops as f64 / keeper::XLM_IN_STROOPS as f64;
+            if xlm < state.config.min_keeper_balance_xlm {
+                warn!(balance_xlm = xlm, min_balance_xlm = state.config.min_keeper_balance_xlm, "keeper_balance_low; skipping submissions this cycle");
+                true
+            } else {
+                false
+            }
+        }
+        Err(e) => {
+            error!(%e, "keeper_balance_check_failed; skipping submissions this cycle");
+            true
+        }
+    };
+
     let prices = state.price_cache.read().await.prices.clone();
-    if prices.is_empty() {
-        return Err("No prices available in cache".to_string());
-    }
+    let prices_stale = prices.is_empty();
 
     let order_keys = get_pending_keys(&state, "get_order_count", "get_order_keys").await?;
     let deposit_keys = get_pending_keys(&state, "get_deposit_count", "get_deposit_keys").await?;
@@ -98,6 +125,8 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             deposits_executed: 0,
             withdrawals_executed: 0,
             errors: 0,
+            prices_stale,
+            keeper_balance_low,
         });
     }
 
@@ -105,82 +134,103 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         orders = order_keys.len(),
         deposits = deposit_keys.len(),
         withdrawals = withdrawal_keys.len(),
+        prices_stale,
+        keeper_balance_low,
         "found_pending_work"
     );
 
-    let tx_hash = set_prices_on_chain(&state, &prices).await?;
-    info!(hash = %tx_hash, "set_prices_confirmed");
-    tokio::time::sleep(Duration::from_millis(5000)).await;
+    if keeper_balance_low {
+        warn!("keeper_balance_below_min; skipping all on-chain submissions this cycle");
+        return Ok(CycleSummary {
+            orders_executed: 0,
+            deposits_executed: 0,
+            withdrawals_executed: 0,
+            errors: 0,
+            prices_stale,
+            keeper_balance_low: true,
+        });
+    }
 
     let mut summary = CycleSummary {
         orders_executed: 0,
         deposits_executed: 0,
         withdrawals_executed: 0,
         errors: 0,
+        prices_stale,
+        keeper_balance_low: false,
     };
 
-    for order_key in &order_keys {
-        match execute_handler(
-            &state,
-            &state.config.order_handler_contract_id,
-            "execute_order",
-            order_key,
-        )
-        .await
-        {
-            Ok(tx_hash) => {
-                summary.orders_executed += 1;
-                record_execution(
-                    &state,
-                    "execute_order",
-                    order_key,
-                    Some(tx_hash),
-                    true,
-                    None,
-                )
-                .await;
-            }
-            Err(error) => {
-                summary.errors += 1;
-                warn!(key = %order_key, %error, "order_execution_failed");
+    if !prices_stale {
+        let tx_hash = set_prices_on_chain(&state, &prices).await?;
+        info!(hash = %tx_hash, "set_prices_confirmed");
+        tokio::time::sleep(Duration::from_millis(5000)).await;
 
-                let mut freeze_error_msg = None;
-                if error.contains("Budget, ExceededLimit") {
-                    match execute_handler(
+        for order_key in &order_keys {
+            match execute_handler(
+                &state,
+                &state.config.order_handler_contract_id,
+                "execute_order",
+                order_key,
+            )
+            .await
+            {
+                Ok(tx_hash) => {
+                    summary.orders_executed += 1;
+                    record_execution(
                         &state,
-                        &state.config.order_handler_contract_id,
-                        "freeze_order",
+                        "execute_order",
                         order_key,
+                        Some(tx_hash),
+                        true,
+                        None,
                     )
-                    .await
-                    {
-                        Ok(_) => info!(key = %order_key, "order_frozen_budget_exceeded"),
-                        Err(freeze_error) => {
-                            error!(key = %order_key, %freeze_error, "freeze_order_failed");
-                            freeze_error_msg = Some(freeze_error.clone());
-                            record_error(&state, "freeze_order", &freeze_error, None).await;
+                    .await;
+                }
+                Err(error) => {
+                    summary.errors += 1;
+                    warn!(key = %order_key, %error, "order_execution_failed");
+
+                    let mut freeze_error_msg = None;
+                    if error.contains("Budget, ExceededLimit") {
+                        match execute_handler(
+                            &state,
+                            &state.config.order_handler_contract_id,
+                            "freeze_order",
+                            order_key,
+                        )
+                        .await
+                        {
+                            Ok(_) => info!(key = %order_key, "order_frozen_budget_exceeded"),
+                            Err(freeze_error) => {
+                                error!(key = %order_key, %freeze_error, "freeze_order_failed");
+                                freeze_error_msg = Some(freeze_error.clone());
+                                record_error(&state, "freeze_order", &freeze_error, None).await;
+                            }
                         }
                     }
-                }
 
-                record_error(
-                    &state,
-                    &format!("execute_order:{}", order_key),
-                    &error,
-                    None,
-                )
-                .await;
-                record_execution(
-                    &state,
-                    "execute_order",
-                    order_key,
-                    None,
-                    false,
-                    Some(format!("{}{}", error, freeze_error_msg.unwrap_or_default())),
-                )
-                .await;
+                    record_error(
+                        &state,
+                        &format!("execute_order:{}", order_key),
+                        &error,
+                        None,
+                    )
+                    .await;
+                    record_execution(
+                        &state,
+                        "execute_order",
+                        order_key,
+                        None,
+                        false,
+                        Some(format!("{}{}", error, freeze_error_msg.unwrap_or_default())),
+                    )
+                    .await;
+                }
             }
         }
+    } else {
+        warn!("prices_stale; skipping set_prices and order execution, processing deposits/withdrawals only");
+        summary.prices_stale = true;
     }
 
     for deposit_key in &deposit_keys {

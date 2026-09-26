@@ -14,6 +14,8 @@ pub struct Metrics {
     pub deposits_executed: AtomicU64,
     pub withdrawals_executed: AtomicU64,
     pub submit_failures: AtomicU64,
+    pub keeper_balance_low_count: AtomicU64,
+    pub prices_stale_count: AtomicU64,
     pub last_metrics_update: AtomicU64,
 }
 
@@ -27,6 +29,8 @@ pub struct MetricsResponse {
     pub deposits_executed: u64,
     pub withdrawals_executed: u64,
     pub submit_failures: u64,
+    pub keeper_balance_low_count: u64,
+    pub prices_stale_count: u64,
     pub last_metrics_update: u64,
 }
 
@@ -49,6 +53,8 @@ impl Metrics {
         deposits: usize,
         withdrawals: usize,
         errors: usize,
+        keeper_balance_low: bool,
+        prices_stale: bool,
     ) {
         self.keeper_cycle_count.fetch_add(1, Ordering::Relaxed);
         self.keeper_cycle_latency_ms
@@ -61,6 +67,12 @@ impl Metrics {
             .fetch_add(withdrawals as u64, Ordering::Relaxed);
         self.submit_failures
             .fetch_add(errors as u64, Ordering::Relaxed);
+        if keeper_balance_low {
+            self.keeper_balance_low_count.fetch_add(1, Ordering::Relaxed);
+        }
+        if prices_stale {
+            self.prices_stale_count.fetch_add(1, Ordering::Relaxed);
+        }
         self.update_timestamp();
     }
 
@@ -87,6 +99,8 @@ impl Metrics {
             deposits_executed: self.deposits_executed.load(Ordering::Relaxed),
             withdrawals_executed: self.withdrawals_executed.load(Ordering::Relaxed),
             submit_failures: self.submit_failures.load(Ordering::Relaxed),
+            keeper_balance_low_count: self.keeper_balance_low_count.load(Ordering::Relaxed),
+            prices_stale_count: self.prices_stale_count.load(Ordering::Relaxed),
             last_metrics_update: self.last_metrics_update.load(Ordering::Relaxed),
         }
     }
@@ -155,6 +169,20 @@ impl Metrics {
             self.submit_failures.load(Ordering::Relaxed)
         ));
 
+        output.push_str("# HELP oracle_keeper_balance_low_count Total number of cycles with keeper balance below minimum\n");
+        output.push_str("# TYPE oracle_keeper_balance_low_count counter\n");
+        output.push_str(&format!(
+            "oracle_keeper_balance_low_count {}\n",
+            self.keeper_balance_low_count.load(Ordering::Relaxed)
+        ));
+
+        output.push_str("# HELP oracle_prices_stale_count Total number of cycles with stale prices\n");
+        output.push_str("# TYPE oracle_prices_stale_count counter\n");
+        output.push_str(&format!(
+            "oracle_prices_stale_count {}\n",
+            self.prices_stale_count.load(Ordering::Relaxed)
+        ));
+
         output.push_str("# HELP oracle_last_metrics_update Timestamp of last metrics update\n");
         output.push_str("# TYPE oracle_last_metrics_update gauge\n");
         output.push_str(&format!(
@@ -174,7 +202,7 @@ mod tests {
     fn test_metrics_recording() {
         let metrics = Metrics::new();
         metrics.record_price_cycle(100);
-        metrics.record_keeper_cycle(200, 5, 3, 2, 1);
+        metrics.record_keeper_cycle(200, 5, 3, 2, 1, true, false);
 
         let response = metrics.to_response();
         assert_eq!(response.price_cycle_count, 1);
@@ -185,6 +213,8 @@ mod tests {
         assert_eq!(response.deposits_executed, 3);
         assert_eq!(response.withdrawals_executed, 2);
         assert_eq!(response.submit_failures, 1);
+        assert_eq!(response.keeper_balance_low_count, 1);
+        assert_eq!(response.prices_stale_count, 0);
     }
 
     #[test]

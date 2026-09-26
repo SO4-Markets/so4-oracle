@@ -1,8 +1,4 @@
 pub mod price;
-
-use axum::{routing::get, Router};
-use tower_service::Service;
-use worker::*;
 pub mod binance;
 pub mod chain;
 pub mod coinbase;
