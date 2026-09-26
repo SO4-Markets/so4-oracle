@@ -1265,4 +1265,36 @@ mod tests {
             err.0.len()
         );
     }
+
+    #[test]
+    fn config_from_lookup_rejects_zero_set_prices_tx_fee() {
+        let mut env = valid_env();
+        env.insert("SET_PRICES_TX_FEE", "0".to_string());
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        assert!(matches!(
+            &err.0[0],
+            EnvError::InvalidVar {
+                var: "SET_PRICES_TX_FEE",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn config_from_lookup_rejects_zero_keeper_tx_fee() {
+        let mut env = valid_env();
+        env.insert("KEEPER_TX_FEE", "0".to_string());
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        assert!(matches!(
+            &err.0[0],
+            EnvError::InvalidVar {
+                var: "KEEPER_TX_FEE",
+                ..
+            }
+        ));
+    }
 }

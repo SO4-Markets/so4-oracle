@@ -6,10 +6,6 @@ FROM rust:1.95-slim AS builder
 WORKDIR /app
 
 # Install dependencies
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./

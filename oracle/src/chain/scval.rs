@@ -152,7 +152,7 @@ mod tests {
         match sc_addr {
             stellar_xdr::ScAddress::Contract(contract_id) => {
                 // Round-trip: convert the Hash bytes back to a contract strkey
-                let roundtrip = stellar_strkey::contract::ContractId(contract_id.0).to_string();
+                let roundtrip = stellar_strkey::Contract(contract_id.0.into()).to_string();
                 assert_eq!(roundtrip, addr);
             }
             other => panic!("expected ScAddress::Contract, got {other:?}"),
