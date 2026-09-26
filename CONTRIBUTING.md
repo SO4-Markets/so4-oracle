@@ -96,7 +96,7 @@ so4-oracle/
 │   └── config/src/lib.rs    TokenConfig struct + parse_token_configs() — shared by oracle
 ├── config/
 │   └── tokens.json          Example token config for local development
-└── tests/                   Integration tests
+└── oracle/tests/            Integration tests
 ```
 
 There is **no** Cloudflare Worker, `wrangler.toml`, or `apis/` crate in this repository. The oracle is a plain Axum binary deployed via Docker (see `Dockerfile`) on Fly.io / Railway (see `fly.toml`, `railway.json`).
@@ -190,7 +190,7 @@ If you are using an autonomous coding agent (or if you are an agent), you must r
 ## Testing
 
 - Unit tests go in the same file: `#[cfg(test)] mod tests { ... }`.
-- Integration tests go in `tests/` at the workspace root.
+- Integration tests go in `oracle/tests/`.
 - For HTTP endpoint tests, use `axum::test` or `reqwest` against a spawned server.
 
 ---

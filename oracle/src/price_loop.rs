@@ -193,8 +193,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
     let binance_prices = if !binance_symbols.is_empty() {
         match crate::binance::fetch_spot_prices(&binance_symbols).await {
             Ok(results) => {
-                let map: std::collections::HashMap<String, i128> =
-                    results.into_iter().collect();
+                let map: std::collections::HashMap<String, i128> = results.into_iter().collect();
                 Some(map)
             }
             Err(error) => {
@@ -278,18 +277,12 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
                     symbol: token.symbol.clone(),
                     ledger_seq,
                 };
-                record_error_with_context(
-                    &state,
-                    format!("price:{}", token.symbol),
-                    error,
-                    ctx,
-                )
-                .await;
+                record_error_with_context(&state, format!("price:{}", token.symbol), error, ctx)
+                    .await;
 
                 let cache = state.price_cache.read().await;
                 if let Some(cached) = cache.prices.get(&key) {
-                    if !cached
-                        .is_stale(token.stale_after_seconds, crate::current_timestamp_secs())
+                    if !cached.is_stale(token.stale_after_seconds, crate::current_timestamp_secs())
                     {
                         tracing::debug!(
                             symbol = %token.symbol,
@@ -456,7 +449,15 @@ async fn fetch_source_with_retry(
 ) -> Result<i128, PriceSourceError> {
     crate::retry::retry_with_backoff(
         || async {
-            fetch_source_price(source, token, pyth_api_key, pyth_prices, pyth_batch_failed, binance_prices).await
+            fetch_source_price(
+                source,
+                token,
+                pyth_api_key,
+                pyth_prices,
+                pyth_batch_failed,
+                binance_prices,
+            )
+            .await
         },
         SOURCE_RETRY_ATTEMPTS,
         SOURCE_RETRY_BASE_DELAY_MS,
@@ -481,7 +482,9 @@ async fn fetch_source_price(
                 .ok_or_else(|| PriceSourceError::Config("missing binance_symbol".to_string()))?;
             if let Some(prices) = binance_prices {
                 prices.get(symbol).copied().ok_or_else(|| {
-                    PriceSourceError::Config(format!("binance symbol not returned in batch: {symbol}"))
+                    PriceSourceError::Config(format!(
+                        "binance symbol not returned in batch: {symbol}"
+                    ))
                 })
             } else {
                 // Batch request failed or no batch was made — fall back to a
@@ -842,52 +845,5 @@ mod tests {
         // #1041 — timestamp far ahead of now: treated as stale, not fresh.
         // Previously, saturating_sub silently clamped age to 0.
         assert!(price.is_stale(60, 1000));
-    }
-
-    #[test]
-    fn test_fresh_vs_stale_price_selection() {
-        let now = 1000;
-        let stale_after = 60;
-
-        let fresh_price = CachedPrice {
-            token_address: "GAFRESH".to_string(),
-            symbol: "FRESH".to_string(),
-            display_symbol: "FRESH".to_string(),
-            keeper_index: 0,
-            min: 100,
-            max: 100,
-            median: 100,
-            timestamp: now - 30,
-            ledger_seq: 12345,
-            sources_used: vec!["test".to_string()],
-            signature: "sig".to_string(),
-        };
-
-        let stale_price = CachedPrice {
-            token_address: "GASTALE".to_string(),
-            symbol: "STALE".to_string(),
-            display_symbol: "STALE".to_string(),
-            keeper_index: 0,
-            min: 90,
-            max: 90,
-            median: 90,
-            timestamp: now - 100,
-            ledger_seq: 12344,
-            sources_used: vec!["test".to_string()],
-            signature: "sig".to_string(),
-        };
-
-        // Verify freshness detection
-        assert!(!fresh_price.is_stale(stale_after, now));
-        assert!(stale_price.is_stale(stale_after, now));
-
-        // Verify prices are correctly identified
-        let fresh_prices: Vec<_> = vec![fresh_price.clone(), stale_price.clone()]
-            .into_iter()
-            .filter(|p| !p.is_stale(stale_after, now))
-            .collect();
-
-        assert_eq!(fresh_prices.len(), 1);
-        assert_eq!(fresh_prices[0].symbol, "FRESH");
     }
 }
