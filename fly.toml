@@ -40,6 +40,10 @@ primary_region = 'iad'
   KEEPER_INDEX = '0'
   SET_PRICES_TX_FEE = '1000000'
   KEEPER_TX_FEE = '2000000'
+  # Optional: Pyth API key for authenticated Hermes requests.
+  # Not required during migration period, but production deployments should
+  # set this before Pyth makes authentication mandatory.
+  # PYTH_API_KEY = 'YOUR_PYTH_API_KEY'
 
 [http_service]
   internal_port = 8080

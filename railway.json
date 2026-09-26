@@ -31,6 +31,7 @@
     "MIN_KEEPER_BALANCE_XLM": "10",
     "KEEPER_INDEX": "0",
     "SET_PRICES_TX_FEE": "1000000",
-    "KEEPER_TX_FEE": "2000000"
+    "KEEPER_TX_FEE": "2000000",
+    "PYTH_API_KEY": ""
   }
 }
