@@ -784,9 +784,14 @@ mod tests {
         );
         assert_eq!(cached.symbol, "TUSDC");
         assert_eq!(cached.display_symbol, "USDC");
-        assert_eq!(cached.min, configured_price - spread);
-        assert_eq!(cached.max, configured_price + spread);
-        assert_eq!(cached.median, configured_price);
+        // With 1 source, compute_confidence_interval_with_spread adds spread_bps (100 bps = 1%)
+        // mid = 1_000_000_000_000_000_000_000_000_000_000
+        // spread = mid * 100 / 10_000 = 10_000_000_000_000_000_000_000_000_000
+        // min = mid - spread = 990_000_000_000_000_000_000_000_000_000
+        // max = mid + spread = 1_010_000_000_000_000_000_000_000_000_000
+        assert_eq!(cached.min, 990_000_000_000_000_000_000_000_000_000);
+        assert_eq!(cached.max, 1_010_000_000_000_000_000_000_000_000_000);
+        assert_eq!(cached.median, 1_000_000_000_000_000_000_000_000_000_000);
         assert_eq!(cached.ledger_seq, 123);
         assert_eq!(cached.sources_used, vec!["fixed"]);
         assert_eq!(cached.signature.len(), 128);

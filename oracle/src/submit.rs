@@ -3,7 +3,8 @@ use serde::Deserialize;
 
 use crate::stellar_rpc::{rpc_post, JsonRpcRequest, JsonRpcResponse, RpcError};
 
-const MAX_POLL_ATTEMPTS: u32 = 10;
+const MAX_POLL_ATTEMPTS: u32 = 6;
+const MAX_BACKOFF_MS: u64 = 16_000;
 #[cfg(not(test))]
 const INITIAL_BACKOFF_MS: u64 = 1_000;
 #[cfg(test)]
@@ -285,8 +286,8 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                     next_backoff_ms = backoff_ms,
                     "transaction still pending"
                 );
-                sleep_ms(crate::retry::jitter(backoff_ms)).await;
-                backoff_ms = (backoff_ms * 2).min(30_000);
+                sleep_ms(backoff_ms).await;
+                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
             }
             _ => {
                 tracing::warn!(
@@ -295,8 +296,8 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                     attempt,
                     "unexpected transaction status; continuing poll"
                 );
-                sleep_ms(crate::retry::jitter(backoff_ms)).await;
-                backoff_ms = (backoff_ms * 2).min(30_000);
+                sleep_ms(backoff_ms).await;
+                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
             }
         }
     }
@@ -477,11 +478,11 @@ mod tests {
 
     #[test]
     fn submit_error_display_poll_timeout() {
-        let err = SubmitError::PollTimeout {
-            hash: "abc123def456".to_string(),
-        };
-        assert!(err.to_string().contains("not confirmed after 10 attempts"));
-        assert!(err.to_string().contains("abc123def456"));
+        let err = SubmitError::PollTimeout;
+        assert_eq!(
+            err.to_string(),
+            format!("transaction not confirmed after {MAX_POLL_ATTEMPTS} attempts")
+        );
     }
 
     #[test]
