@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::stellar_rpc::{rpc_post, RpcError};
 
-const MAX_POLL_ATTEMPTS: u32 = 10;
+const MAX_POLL_ATTEMPTS: u32 = 6;
+const MAX_BACKOFF_MS: u64 = 16_000;
 #[cfg(not(test))]
 const INITIAL_BACKOFF_MS: u64 = 1_000;
 #[cfg(test)]
@@ -183,7 +184,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                     "transaction still pending"
                 );
                 sleep_ms(backoff_ms).await;
-                backoff_ms = (backoff_ms * 2).min(30_000);
+                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
             }
             _ => {
                 tracing::warn!(
@@ -193,7 +194,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                     "unexpected transaction status; continuing poll"
                 );
                 sleep_ms(backoff_ms).await;
-                backoff_ms = (backoff_ms * 2).min(30_000);
+                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
             }
         }
     }
@@ -365,7 +366,7 @@ mod tests {
         let err = SubmitError::PollTimeout;
         assert_eq!(
             err.to_string(),
-            "transaction not confirmed after 10 attempts"
+            format!("transaction not confirmed after {MAX_POLL_ATTEMPTS} attempts")
         );
     }
 
