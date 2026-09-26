@@ -2,6 +2,19 @@
 Description=SO4 Oracle Service
 After=network.target
 Wants=network-online.target
+# Restart rate limiting lives in [Unit] (systemd >= 230); the [Service]
+# placement is deprecated. RestartSec=5 already spaces out attempts, so these
+# are only a backstop against a hot loop. The previous pair
+# (StartLimitInterval=60 / StartLimitBurst=3) let a crash loop trip the limit
+# in roughly 15 seconds, after which systemd stopped restarting the unit at
+# all and left the oracle down until someone ran `systemctl reset-failed` by
+# hand. A 3-restart ceiling is far too low for an oracle that must stay up;
+# 50 restarts in 5 minutes gives every transient boot failure (bad deploy,
+# missing env var, dependency still coming up) room to self-heal while still
+# bounding a genuinely broken binary (#544). Mirrors the intent of
+# railway.json's restartPolicyMaxRetries=100.
+StartLimitInterval=300
+StartLimitBurst=50
 
 [Service]
 Type=simple
@@ -11,8 +24,6 @@ WorkingDirectory=/opt/oracle
 ExecStart=/opt/oracle/oracle
 Restart=always
 RestartSec=5
-StartLimitInterval=60
-StartLimitBurst=3
 
 # Environment
 EnvironmentFile=/opt/oracle/.env

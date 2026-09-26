@@ -193,8 +193,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
     let binance_prices = if !binance_symbols.is_empty() {
         match crate::binance::fetch_spot_prices(&binance_symbols).await {
             Ok(results) => {
-                let map: std::collections::HashMap<String, i128> =
-                    results.into_iter().collect();
+                let map: std::collections::HashMap<String, i128> = results.into_iter().collect();
                 Some(map)
             }
             Err(error) => {
@@ -278,18 +277,12 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
                     symbol: token.symbol.clone(),
                     ledger_seq,
                 };
-                record_error_with_context(
-                    &state,
-                    format!("price:{}", token.symbol),
-                    error,
-                    ctx,
-                )
-                .await;
+                record_error_with_context(&state, format!("price:{}", token.symbol), error, ctx)
+                    .await;
 
                 let cache = state.price_cache.read().await;
                 if let Some(cached) = cache.prices.get(&key) {
-                    if !cached
-                        .is_stale(token.stale_after_seconds, crate::current_timestamp_secs())
+                    if !cached.is_stale(token.stale_after_seconds, crate::current_timestamp_secs())
                     {
                         tracing::debug!(
                             symbol = %token.symbol,
@@ -456,7 +449,15 @@ async fn fetch_source_with_retry(
 ) -> Result<i128, PriceSourceError> {
     crate::retry::retry_with_backoff(
         || async {
-            fetch_source_price(source, token, pyth_api_key, pyth_prices, pyth_batch_failed, binance_prices).await
+            fetch_source_price(
+                source,
+                token,
+                pyth_api_key,
+                pyth_prices,
+                pyth_batch_failed,
+                binance_prices,
+            )
+            .await
         },
         SOURCE_RETRY_ATTEMPTS,
         SOURCE_RETRY_BASE_DELAY_MS,
@@ -481,7 +482,9 @@ async fn fetch_source_price(
                 .ok_or_else(|| PriceSourceError::Config("missing binance_symbol".to_string()))?;
             if let Some(prices) = binance_prices {
                 prices.get(symbol).copied().ok_or_else(|| {
-                    PriceSourceError::Config(format!("binance symbol not returned in batch: {symbol}"))
+                    PriceSourceError::Config(format!(
+                        "binance symbol not returned in batch: {symbol}"
+                    ))
                 })
             } else {
                 // Batch request failed or no batch was made — fall back to a

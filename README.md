@@ -177,6 +177,16 @@ sudo systemctl enable oracle
 sudo systemctl start oracle
 ```
 
+The unit restarts on any exit with a 5-second delay, and systemd's start limit
+allows 50 restarts per 5 minutes — enough for a bad deploy or a transient boot
+dependency to self-heal. If the limit is ever exhausted (check with
+`systemctl status oracle`), clear it with:
+
+```bash
+sudo systemctl reset-failed oracle
+sudo systemctl start oracle
+```
+
 ### Fly.io
 
 ```bash
