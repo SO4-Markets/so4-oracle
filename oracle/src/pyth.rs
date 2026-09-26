@@ -1,12 +1,21 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 
-pub const PYTH_HERMES_URL: &str = "https://hermes.pyth.network/api/latest_price_feeds";
-pub const FLOAT_PRECISION: i128 = 1_000_000_000_000_000_000_000_000_000_000;
+/// Provider endpoint recommended by Pyth for authenticated production traffic.
+pub const PYTH_HERMES_URL: &str = "https://pyth.dourolabs.app/hermes/api/latest_price_feeds";
+
+/// Re-exported from the crate root so existing `crate::pyth::FLOAT_PRECISION`
+/// callers keep working; the precision invariant has one source of truth now
+/// (#709) rather than a separate copy per module.
+pub use crate::FLOAT_PRECISION;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PythPriceError {
     NetworkError(String),
-    HttpError(u16),
+    HttpError {
+        status: u16,
+        body: String,
+    },
     JsonError(String),
     PriceParseError(String),
     MissingFeedId(String),
@@ -18,16 +27,68 @@ pub enum PythPriceError {
         confidence_bps: f64,
         max_bps: u32,
     },
+    MissingPublishTime,
     InvalidPublishTime(i64),
 }
 
-#[derive(Debug, Deserialize)]
-pub struct PythPrice {
-    pub price: PythPriceData,
-    pub id: String,
+impl std::fmt::Display for PythPriceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NetworkError(error) => write!(f, "Pyth network error: {error}"),
+            Self::HttpError { status, body } => {
+                if body.is_empty() {
+                    write!(f, "Pyth returned HTTP {status}")
+                } else {
+                    write!(f, "Pyth returned HTTP {status}: {body}")
+                }
+            }
+            Self::JsonError(error) => write!(f, "invalid Pyth response: {error}"),
+            Self::PriceParseError(error) => write!(f, "invalid Pyth price: {error}"),
+            Self::MissingFeedId(id) => write!(f, "Pyth response is missing feed {id}"),
+            Self::StalePrice {
+                age_seconds,
+                max_age_seconds,
+            } => write!(
+                f,
+                "Pyth price is stale ({age_seconds}s; maximum {max_age_seconds}s)"
+            ),
+            Self::ConfidenceTooWide {
+                confidence_bps,
+                max_bps,
+            } => write!(
+                f,
+                "Pyth confidence interval is too wide ({confidence_bps:.2} bps; maximum {max_bps})"
+            ),
+            Self::MissingPublishTime => {
+                write!(f, "Pyth response is missing publish_time field")
+            }
+            Self::InvalidPublishTime(value) => write!(f, "invalid Pyth publish time: {value}"),
+        }
+    }
 }
 
-#[derive(Debug, Deserialize)]
+impl std::error::Error for PythPriceError {}
+
+impl crate::retry::Retryable for PythPriceError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            // Network errors and 5xx HTTP errors are transient
+            Self::NetworkError(_) => true,
+            Self::HttpError { status, .. } => *status >= 500,
+            // Stale prices might become fresh on retry
+            Self::StalePrice { .. } => true,
+            // Parse/JSON/config/validation errors are permanent failures
+            Self::JsonError(_)
+            | Self::PriceParseError(_)
+            | Self::MissingFeedId(_)
+            | Self::ConfidenceTooWide { .. }
+            | Self::MissingPublishTime
+            | Self::InvalidPublishTime(_) => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct PythPriceData {
     pub price: String,
     #[serde(default)]
@@ -37,7 +98,7 @@ pub struct PythPriceData {
     pub publish_time: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PythPriceFeed {
     pub id: String,
     pub price: PythPriceData,
@@ -56,7 +117,10 @@ enum HermesResponse {
 }
 
 pub fn normalize_pyth_price(price_str: &str, exponent: i32) -> Result<i128, PythPriceError> {
-    if !(-30..=0).contains(&exponent) {
+    // Pyth exponents are negative (or zero); anything below -SCALE_DIGITS
+    // can't be represented at our on-chain precision (#709).
+    let min_exponent = -(crate::SCALE_DIGITS as i32);
+    if !(min_exponent..=0).contains(&exponent) {
         return Err(PythPriceError::PriceParseError(format!(
             "unsupported exponent: {exponent}"
         )));
@@ -73,18 +137,23 @@ pub fn normalize_pyth_price(price_str: &str, exponent: i32) -> Result<i128, Pyth
         ));
     }
 
-    let exponent_diff = 30 + exponent;
+    // The range check above bounds `exponent` to `[-SCALE_DIGITS, 0]`, so
+    // `exponent_diff` is always in `[0, SCALE_DIGITS]` — the scaling is a pure
+    // multiplication and there is no division path (#703). If the range check
+    // is ever loosened this assertion fires loudly instead of silently
+    // truncating a fractional result.
+    let exponent_diff = crate::SCALE_DIGITS as i32 + exponent;
+    debug_assert!(
+        (0..=crate::SCALE_DIGITS as i32).contains(&exponent_diff),
+        "exponent_diff {exponent_diff} outside [0, {}] — the exponent range check is out of sync",
+        crate::SCALE_DIGITS,
+    );
 
-    if exponent_diff >= 0 {
-        price_int
-            .checked_mul(10i128.pow(exponent_diff as u32))
-            .ok_or_else(|| {
-                PythPriceError::PriceParseError("price overflow during normalization".to_string())
-            })
-    } else {
-        let divisor = 10i128.pow((-exponent_diff) as u32);
-        Ok(price_int / divisor)
-    }
+    price_int
+        .checked_mul(10i128.pow(exponent_diff.max(0) as u32))
+        .ok_or_else(|| {
+            PythPriceError::PriceParseError("price overflow during normalization".to_string())
+        })
 }
 
 pub fn validate_pyth_price(
@@ -96,11 +165,24 @@ pub fn validate_pyth_price(
     let price = normalize_pyth_price(&data.price, data.expo)?;
     let publish_time = data
         .publish_time
-        .ok_or(PythPriceError::InvalidPublishTime(-1))?;
+        .ok_or(PythPriceError::MissingPublishTime)?;
     if publish_time < 0 {
         return Err(PythPriceError::InvalidPublishTime(publish_time));
     }
     let publish_time = publish_time as u64;
+
+    // Reject future-dated publish times — a price claiming to originate from
+    // the future (malformed Hermes response, misbehaving publisher, or clock
+    // skew) must not silently pass the staleness check via saturating_sub's
+    // clamping to 0, which would treat it as maximally fresh.
+    let MAX_FUTURE_SKEW_SECONDS: u64 = 30;
+    if publish_time > now_seconds {
+        let skew = publish_time - now_seconds;
+        if skew > MAX_FUTURE_SKEW_SECONDS {
+            return Err(PythPriceError::InvalidPublishTime(publish_time as i64));
+        }
+    }
+
     let age_seconds = now_seconds.saturating_sub(publish_time);
     if age_seconds > stale_after_seconds {
         return Err(PythPriceError::StalePrice {
@@ -109,12 +191,16 @@ pub fn validate_pyth_price(
         });
     }
 
+    // #603 — the zero-price guard must hold regardless of whether the feed
+    // carried a `conf` field. Hermes responses that omit `conf` skip the
+    // confidence check by design; they must not skip this invariant with it.
+    if price <= 0 {
+        return Err(PythPriceError::PriceParseError(
+            "price must be greater than zero".to_string(),
+        ));
+    }
+
     if let Some(conf) = &data.conf {
-        if price <= 0 {
-            return Err(PythPriceError::PriceParseError(
-                "price must be greater than zero".to_string(),
-            ));
-        }
         let confidence = normalize_pyth_price(conf, data.expo)?;
         let confidence_bps = (confidence as f64 / price as f64) * 10_000.0;
         if confidence_bps > max_confidence_bps as f64 {
@@ -128,12 +214,16 @@ pub fn validate_pyth_price(
     Ok(price)
 }
 
-pub async fn fetch_pyth_price(
+// URL-injecting twin of the batched fetch path, used by the mock-server tests below.
+#[cfg(test)]
+pub(crate) async fn fetch_pyth_price_with_url(
+    base_url: &str,
     feed_id: &str,
     stale_after_seconds: u64,
     max_confidence_bps: u32,
 ) -> Result<i128, PythPriceError> {
-    let url_string = format!("{}?ids[]={}", PYTH_HERMES_URL, feed_id);
+    let query = format!("ids[]={feed_id}");
+    let url_string = format!("{base_url}?{query}");
 
     let response = crate::http::client()
         .get(&url_string)
@@ -142,38 +232,85 @@ pub async fn fetch_pyth_price(
         .map_err(|err| PythPriceError::NetworkError(err.to_string()))?;
 
     let status = response.status().as_u16();
-    if status != 200 {
-        return Err(PythPriceError::HttpError(status));
-    }
-
     let body = response
         .text()
         .await
         .map_err(|err| PythPriceError::NetworkError(err.to_string()))?;
 
-    let response: HermesResponse =
-        serde_json::from_str(&body).map_err(|err| PythPriceError::JsonError(err.to_string()))?;
-    let feed = match response {
-        HermesResponse::Array(mut feeds) => feeds
-            .pop()
-            .ok_or_else(|| PythPriceError::MissingFeedId(feed_id.to_string()))?,
-        HermesResponse::Wrapped(wrapped) => wrapped.data,
-    };
+    if status != 200 {
+        return Err(PythPriceError::HttpError {
+            status,
+            body: crate::http::truncate_error_body(&body),
+        });
+    }
 
+    let hermes_response: HermesResponse =
+        serde_json::from_str(&body).map_err(|err| PythPriceError::JsonError(err.to_string()))?;
+    let feeds = match hermes_response {
+        HermesResponse::Array(feeds) => feeds,
+        HermesResponse::Wrapped(wrapped) => vec![wrapped.data],
+    };
+    let feed = feeds
+        .into_iter()
+        .find(|f| f.id == feed_id)
+        .ok_or_else(|| PythPriceError::MissingFeedId(feed_id.to_string()))?;
     validate_pyth_price(
         &feed.price,
-        current_timestamp_secs(),
+        crate::current_timestamp_secs(),
         stale_after_seconds,
         max_confidence_bps,
     )
 }
 
-fn current_timestamp_secs() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+/// Fetches all requested feeds in a single Hermes request. The bearer token is
+/// optional during the migration period, but production deployments should set
+/// `PYTH_API_KEY` before authentication becomes mandatory.
+pub async fn fetch_pyth_prices(
+    feed_ids: &[&str],
+    api_key: Option<&str>,
+) -> Result<HashMap<String, PythPriceFeed>, PythPriceError> {
+    if feed_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let query = feed_ids
+        .iter()
+        .map(|id| format!("ids[]={id}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let url_string = format!("{PYTH_HERMES_URL}?{query}");
+
+    let mut request = crate::http::client().get(&url_string);
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|err| PythPriceError::NetworkError(err.to_string()))?;
+
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| PythPriceError::NetworkError(err.to_string()))?;
+
+    if status != 200 {
+        return Err(PythPriceError::HttpError {
+            status,
+            body: crate::http::truncate_error_body(&body),
+        });
+    }
+
+    let response: HermesResponse =
+        serde_json::from_str(&body).map_err(|err| PythPriceError::JsonError(err.to_string()))?;
+    let feeds = match response {
+        HermesResponse::Array(feeds) => feeds,
+        HermesResponse::Wrapped(wrapped) => vec![wrapped.data],
+    };
+    Ok(feeds
+        .into_iter()
+        .map(|feed| (feed.id.clone(), feed))
+        .collect())
 }
 
 #[cfg(test)]
@@ -249,7 +386,7 @@ mod tests {
             publish_time: None,
         };
         let err = validate_pyth_price(&data, 1_010, 60, 50).unwrap_err();
-        assert_eq!(err, PythPriceError::InvalidPublishTime(-1));
+        assert_eq!(err, PythPriceError::MissingPublishTime);
     }
 
     #[test]
@@ -269,6 +406,20 @@ mod tests {
         let data = PythPriceData {
             price: "0".to_string(),
             conf: Some("100000".to_string()),
+            expo: -8,
+            publish_time: Some(1_000),
+        };
+        let err = validate_pyth_price(&data, 1_010, 60, 50).unwrap_err();
+        assert!(matches!(err, PythPriceError::PriceParseError(_)));
+    }
+
+    // #603 — a feed that omits `conf` skips the confidence check; it must not
+    // skip the zero-price guard along with it.
+    #[test]
+    fn validate_pyth_price_rejects_zero_price_when_confidence_absent() {
+        let data = PythPriceData {
+            price: "0".to_string(),
+            conf: None,
             expo: -8,
             publish_time: Some(1_000),
         };
@@ -413,7 +564,7 @@ mod tests {
         assert_eq!(err, PythPriceError::InvalidPublishTime(-1));
     }
 
-    // #349 — fetch_pyth_price handles both array and wrapped Hermes response formats
+    // #349 — the Hermes response parser handles both array and wrapped formats
 
     #[test]
     fn hermes_response_deserializes_array_format() {
@@ -446,6 +597,200 @@ mod tests {
         assert!(matches!(response, HermesResponse::Array(v) if v.is_empty()));
     }
 
+    // ── HTTP-level wiremock tests ─────────────────────────────────────────────
+
+    fn recent_publish_time() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    #[tokio::test]
+    async fn fetch_pyth_price_array_format_success() {
+        use wiremock::matchers::{method, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let publish = recent_publish_time();
+        let body = format!(
+            r#"[{{"id":"feed-1","price":{{"price":"4500000000","expo":-8,"conf":"100000","publish_time":{}}}}}]"#,
+            publish
+        );
+
+        Mock::given(method("GET"))
+            .and(query_param("ids[]", "feed-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let result = super::fetch_pyth_price_with_url(&server.uri(), "feed-1", 60, 50)
+            .await
+            .unwrap();
+        assert_eq!(result, 45 * FLOAT_PRECISION);
+    }
+
+    #[tokio::test]
+    async fn fetch_pyth_price_wrapped_format_success() {
+        use wiremock::matchers::{method, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let publish = recent_publish_time();
+        let body = format!(
+            r#"{{"data":{{"id":"feed-1","price":{{"price":"4500000000","expo":-8,"conf":"100000","publish_time":{}}}}}}}"#,
+            publish
+        );
+
+        Mock::given(method("GET"))
+            .and(query_param("ids[]", "feed-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let result = super::fetch_pyth_price_with_url(&server.uri(), "feed-1", 60, 50)
+            .await
+            .unwrap();
+        assert_eq!(result, 45 * FLOAT_PRECISION);
+    }
+
+    // #603 — the exact trigger from the report: a fresh feed whose body omits
+    // `conf` entirely and carries a price of zero must be rejected, not fetched
+    // as a valid price.
+    #[tokio::test]
+    async fn fetch_pyth_price_rejects_zero_price_with_missing_conf_field() {
+        use wiremock::matchers::{method, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let publish = recent_publish_time();
+        let body = format!(
+            r#"[{{"id":"feed-1","price":{{"price":"0","expo":-8,"publish_time":{}}}}}]"#,
+            publish
+        );
+
+        Mock::given(method("GET"))
+            .and(query_param("ids[]", "feed-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let err = super::fetch_pyth_price_with_url(&server.uri(), "feed-1", 60, 50)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PythPriceError::PriceParseError(_)));
+    }
+
+    #[tokio::test]
+    async fn fetch_pyth_price_empty_array_returns_missing_feed_id() {
+        use wiremock::matchers::{method, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = r#"[]"#;
+
+        Mock::given(method("GET"))
+            .and(query_param("ids[]", "feed-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let err = super::fetch_pyth_price_with_url(&server.uri(), "feed-1", 60, 50)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PythPriceError::MissingFeedId(id) if id == "feed-1"));
+    }
+
+    #[tokio::test]
+    async fn fetch_pyth_price_404_returns_http_error() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = super::fetch_pyth_price_with_url(&server.uri(), "feed-1", 60, 50)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PythPriceError::HttpError { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_pyth_price_500_returns_http_error() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let err = super::fetch_pyth_price_with_url(&server.uri(), "feed-1", 60, 50)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PythPriceError::HttpError { status: 500, .. }));
+    }
+
+    // #532 — array branch must match the requested feed_id, not blindly pop
+    #[tokio::test]
+    async fn hermes_array_with_wrong_feed_id_returns_missing_feed_id_error() {
+        use wiremock::matchers::{method, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let publish = recent_publish_time();
+        // Array with a single feed whose id does NOT match the requested one
+        let body = format!(
+            r#"[{{"id":"other_feed_id","price":{{"price":"4500000000","expo":-8,"conf":"100000","publish_time":{}}}}}]"#,
+            publish
+        );
+
+        Mock::given(method("GET"))
+            .and(query_param("ids[]", "requested_feed_id"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let err = super::fetch_pyth_price_with_url(&server.uri(), "requested_feed_id", 60, 50)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::MissingFeedId(ref id) if id == "requested_feed_id"),
+            "expected MissingFeedId for requested_feed_id, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hermes_array_with_matching_feed_id_returns_correct_feed() {
+        use wiremock::matchers::{method, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let publish = recent_publish_time();
+        // Array with two feeds; only feed_b matches the requested id
+        let body = format!(
+            r#"[{{"id":"feed_a","price":{{"price":"1000000000","expo":-8,"conf":"100000","publish_time":{}}}}},{{"id":"feed_b","price":{{"price":"4500000000","expo":-8,"conf":"100000","publish_time":{}}}}}]"#,
+            publish, publish
+        );
+
+        Mock::given(method("GET"))
+            .and(query_param("ids[]", "feed_b"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let result = super::fetch_pyth_price_with_url(&server.uri(), "feed_b", 60, 50)
+            .await
+            .unwrap();
+        assert_eq!(result, 45 * FLOAT_PRECISION);
+    }
+
     // #365 — normalize_pyth_price("4500000000", -8) must equal 45 * FLOAT_PRECISION
     // exponent_diff = 30 + (-8) = 22 → 4_500_000_000 * 10^22 = 45 * 10^30
     #[test]
@@ -466,5 +811,117 @@ mod tests {
         // now=1_010, age=10 < stale_after=60 → accepted
         let price = validate_pyth_price(&data, 1_010, 60, 100).unwrap();
         assert_eq!(price, 45 * FLOAT_PRECISION);
+    }
+
+    // #366 — normalize_pyth_price rejects a positive exponent with PriceParseError
+    #[test]
+    fn issue_366_normalize_rejects_positive_exponent() {
+        // Any exponent > 0 is outside the accepted range (-30..=0)
+        // and must return Err(PriceParseError).
+        let err = normalize_pyth_price("100000000", 1).unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::PriceParseError(_)),
+            "expected PriceParseError for exponent 1, got {:?}",
+            err
+        );
+
+        let err2 = normalize_pyth_price("1", 30).unwrap_err();
+        assert!(
+            matches!(err2, PythPriceError::PriceParseError(_)),
+            "expected PriceParseError for exponent 30, got {:?}",
+            err2
+        );
+    }
+
+    // #368 — validate_pyth_price returns StalePrice when age > stale_after_seconds
+    #[test]
+    fn issue_368_validate_rejects_stale_price() {
+        // publish_time=1_000, now=1_500, age=500 > stale_after=60
+        let data = PythPriceData {
+            price: "4500000000".to_string(),
+            conf: None,
+            expo: -8,
+            publish_time: Some(1_000),
+        };
+        let err = validate_pyth_price(&data, 1_500, 60, 100).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PythPriceError::StalePrice {
+                    age_seconds,
+                    max_age_seconds: 60,
+                } if age_seconds == 500
+            ),
+            "expected StalePrice with age_seconds=500 and max_age_seconds=60, got {:?}",
+            err
+        );
+    }
+
+    // #369 — validate_pyth_price returns ConfidenceTooWide when confidence_bps > max_bps
+    #[test]
+    fn issue_369_validate_rejects_wide_confidence() {
+        // price=100_000_000, conf=10_000_000 → confidence_bps = 1_000 bps; max_bps=50 → rejected
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: Some("10000000".to_string()),
+            expo: -8,
+            publish_time: Some(1_000),
+        };
+        let err = validate_pyth_price(&data, 1_010, 60, 50).unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::ConfidenceTooWide { max_bps: 50, .. }),
+            "expected ConfidenceTooWide with max_bps=50, got {:?}",
+            err
+        );
+    }
+
+    // #1032 — future-dated publish_time must be rejected, not treated as fresh
+
+    #[test]
+    fn validate_pyth_price_rejects_future_publish_time_beyond_skew_tolerance() {
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: None,
+            expo: -8,
+            // publish_time 60 seconds in the future, beyond the 30s tolerance
+            publish_time: Some(1_060),
+        };
+        let err = validate_pyth_price(&data, 1_000, 60, 100).unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::InvalidPublishTime(1_060)),
+            "expected InvalidPublishTime for future publish_time, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_pyth_price_accepts_future_publish_time_within_skew_tolerance() {
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: None,
+            expo: -8,
+            // publish_time 10 seconds in the future, within the 30s tolerance
+            publish_time: Some(1_010),
+        };
+        // Should be accepted (minor clock skew is tolerated)
+        let result = validate_pyth_price(&data, 1_000, 60, 100);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_pyth_price_rejects_far_future_publish_time() {
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: None,
+            expo: -8,
+            // publish_time 1 hour in the future — definitely malicious/malformed
+            publish_time: Some(4_600),
+        };
+        let err = validate_pyth_price(&data, 1_000, 60, 100).unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::InvalidPublishTime(4_600)),
+            "expected InvalidPublishTime for far-future publish_time, got {:?}",
+            err
+        );
     }
 }

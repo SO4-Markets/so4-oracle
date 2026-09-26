@@ -1,3 +1,5 @@
+> **HISTORICAL — SUPERSEDED:** This greenfield rewrite plan has been completed. Keep it only as architectural history; do not follow its file paths or implementation instructions for current setup work.
+
 # SO4 Oracle + Keeper — Full Rewrite to a Production Axum Service
 
 Date: 2026-06-18 (rev 2 — full rewrite)
@@ -241,7 +243,8 @@ What is genuinely **new code**: `chain/tx_builder.rs`, `chain/scval.rs`, `chain/
       (cycle latency, executions, failures, balance) — optional Prometheus.
 - [ ] Dockerfile (multi-stage → debian-slim/distroless) + systemd unit (`Restart=always`)
       or Fly.io/Railway. Secrets via env/secret-store, never logged.
-- [ ] Delete `wrangler.toml`, `keeper/`, `oracle/build/`, `.wrangler/`.
+- [x] Delete `wrangler.toml`, `keeper/`, `oracle/build/`, `.wrangler/`. The TS keeper
+      worker is gone; `oracle/src/keeper_loop.rs` is the only keeper.
 
 ### Phase 7 — Tests
 - [ ] Carry the 96 unit tests; `wiremock` for source + RPC; ScVal/signing vector tests;

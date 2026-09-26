@@ -5,21 +5,58 @@ primary_region = 'iad'
   dockerfile = 'Dockerfile'
 
 [env]
-  PORT = '8080'
   BIND_ADDR = '0.0.0.0:8080'
-  STELLAR_NETWORK = 'testnet'
-  NETWORK_PASSPHRASE = 'Test SDF Network ; September 2015'
+  # REQUIRED: override this for your target network before deploying.
+  # The network passphrase is derived automatically from STELLAR_NETWORK
+  # (see oracle/src/config.rs) — it is not read from the environment.
+  # Testnet:  STELLAR_NETWORK=testnet
+  # Mainnet:  STELLAR_NETWORK=mainnet
+  STELLAR_NETWORK = 'YOUR_STELLAR_NETWORK'
+  # REQUIRED on mainnet (optional on testnet, where it defaults to the
+  # public testnet RPC endpoint).
+  STELLAR_RPC_URL = 'YOUR_STELLAR_RPC_URL'
+  # REQUIRED: Soroban contract IDs the oracle talks to.
+  ORACLE_CONTRACT_ID = 'YOUR_ORACLE_CONTRACT_ID'
+  ROLE_STORE = 'YOUR_ROLE_STORE_CONTRACT_ID'
+  DATA_STORE = 'YOUR_DATA_STORE_CONTRACT_ID'
+  ORDER_HANDLER = 'YOUR_ORDER_HANDLER_CONTRACT_ID'
+  DEPOSIT_HANDLER = 'YOUR_DEPOSIT_HANDLER_CONTRACT_ID'
+  WITHDRAWAL_HANDLER = 'YOUR_WITHDRAWAL_HANDLER_CONTRACT_ID'
+  READER = 'YOUR_READER_CONTRACT_ID'
+  # REQUIRED: keeper signing credentials. Set these as Fly secrets
+  # (`fly secrets set KEEPER_PRIVATE_KEY=... KEEPER_SECRET_KEY=...`)
+  # rather than plaintext values here.
+  KEEPER_PRIVATE_KEY = 'YOUR_KEEPER_PRIVATE_KEY_HEX'
+  KEEPER_SECRET_KEY = 'YOUR_KEEPER_SECRET_KEY'
+  KEEPER_ACCOUNT_ID = 'YOUR_KEEPER_ACCOUNT_ID'
+  # REQUIRED: admin API token. Set this as a Fly secret
+  # (`fly secrets set ADMIN_API_TOKEN=...`) rather than a plaintext value here.
+  # Without it, admin endpoints (/oracle/status, /keeper/status, /metrics, etc.)
+  # return 503 "ADMIN_API_TOKEN is not configured".
+  ADMIN_API_TOKEN = 'YOUR_ADMIN_API_TOKEN'
   PRICE_LOOP_MS = '1000'
   KEEPER_LOOP_MS = '1500'
   MIN_KEEPER_BALANCE_XLM = '10'
   KEEPER_INDEX = '0'
+  SET_PRICES_TX_FEE = '1000000'
+  KEEPER_TX_FEE = '2000000'
+  # Optional: Pyth API key for authenticated Hermes requests.
+  # Not required during migration period, but production deployments should
+  # set this before Pyth makes authentication mandatory.
+  # PYTH_API_KEY = 'YOUR_PYTH_API_KEY'
 
 [http_service]
   internal_port = 8080
   force_https = true
   auto_stop_machines = true
   auto_start_machines = true
-  min_machines_running = 0
+  # This only guarantees at least one machine stays up (so autostop doesn't
+  # suspend it to zero) — it does NOT cap the count. Do not run
+  # `fly scale count N` for N > 1: keeper state (in_flight_keys,
+  # freeze/execution failure counters) is in-process only and races across
+  # replicas with no coordination. See README.md "Deployment" and
+  # AGENTS.md "Repository-Specific Traps".
+  min_machines_running = 1
 
   [http_service.concurrency]
     type = 'connections'
@@ -42,6 +79,6 @@ primary_region = 'iad'
   [checks.ready]
     port = 8080
     type = 'http'
-    interval = '10s'
-    timeout = '3s'
+    interval = '20s'
+    timeout = '20s'
     path = '/ready'

@@ -1,15 +1,22 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
+use tracing::info;
 
-use super::AdminAuth;
+use super::{AdminAuth, ApiError};
 use crate::state::{AppState, CachedPrice, FailedSubmission};
+
+// Matches prices.rs's READY_BALANCE_RETRY_* constants (#1024) — the same
+// underlying Horizon call should be retried the same way regardless of
+// which endpoint triggers it.
+const KEEPER_BALANCE_RETRY_ATTEMPTS: u32 = 3;
+const KEEPER_BALANCE_RETRY_BASE_DELAY_MS: u64 = 100;
 
 #[derive(Debug, Serialize)]
 pub struct OracleStatusResponse {
@@ -20,11 +27,25 @@ pub struct OracleStatusResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct BlacklistedKey {
+    pub key: String,
+    pub consecutive_failures: u32,
+}
+
+#[derive(Debug, Serialize)]
 pub struct KeeperStatusResponse {
     pub pending_orders: usize,
     pub pending_deposits: usize,
     pub pending_withdrawals: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_cycle_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_cycle_latency_ms: Option<u64>,
     pub last_executions: Vec<crate::state::KeeperExecution>,
+    /// Order keys permanently blacklisted after MAX_CONSECUTIVE_FREEZE_FAILURES
+    /// freeze failures. Previously only visible via a one-time ALERT log line
+    /// with no way to discover or clear it through the API (#802).
+    pub blacklisted_keys: Vec<BlacklistedKey>,
 }
 
 pub async fn oracle_status(
@@ -45,7 +66,15 @@ pub async fn oracle_status(
         .values()
         .cloned()
         .collect();
-    let recent_errors = state.failures.lock().await.iter().rev().cloned().collect();
+    let recent_errors: Vec<_> = state
+        .failures
+        .lock()
+        .await
+        .iter()
+        .rev()
+        .take(20)
+        .cloned()
+        .collect();
 
     Json(OracleStatusResponse {
         last_cycle_time,
@@ -59,13 +88,75 @@ pub async fn keeper_status(
     _auth: AdminAuth,
     State(state): State<Arc<AppState>>,
 ) -> Json<KeeperStatusResponse> {
-    let keeper_status = state.keeper_status.read().await.clone();
+    // One consistent snapshot of both state objects — never a torn pair mixing
+    // pending counts from before a keeper cycle with timing from after it (#797).
+    let (keeper_status, cycle_status) = state.keeper_status_snapshot().await;
+
+    let last_cycle_at = cycle_status.last_keeper_cycle_at.and_then(system_time_secs);
+    let last_cycle_latency_ms = cycle_status.last_keeper_cycle_latency_ms;
+
+    let last_executions: Vec<_> = keeper_status
+        .last_executions
+        .into_iter()
+        .rev()
+        .take(50)
+        .collect();
+
+    let blacklisted_keys = state
+        .frozen_order_blacklist
+        .lock()
+        .await
+        .iter()
+        .map(|(key, consecutive_failures)| BlacklistedKey {
+            key: key.clone(),
+            consecutive_failures: *consecutive_failures,
+        })
+        .collect();
+
     Json(KeeperStatusResponse {
         pending_orders: keeper_status.pending_orders,
         pending_deposits: keeper_status.pending_deposits,
         pending_withdrawals: keeper_status.pending_withdrawals,
-        last_executions: keeper_status.last_executions,
+        last_cycle_at,
+        last_cycle_latency_ms,
+        last_executions,
+        blacklisted_keys,
     })
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClearBlacklistResponse {
+    pub key: String,
+    pub cleared: bool,
+}
+
+/// Clear a single order key from `frozen_order_blacklist`, making the
+/// "manual intervention required" the blacklist log message promises
+/// actually possible through the API (#802).
+///
+/// Also resets the key's consecutive freeze-failure count, so it gets a
+/// fresh `MAX_CONSECUTIVE_FREEZE_FAILURES` budget instead of being
+/// re-blacklisted after a single further failure.
+pub async fn clear_blacklisted_key(
+    _auth: AdminAuth,
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> Result<Json<ClearBlacklistResponse>, ApiError> {
+    let removed = state
+        .frozen_order_blacklist
+        .lock()
+        .await
+        .remove(&key)
+        .is_some();
+
+    if !removed {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "key_not_blacklisted"));
+    }
+
+    state.freeze_failure_counts.lock().await.remove(&key);
+
+    info!(key = %key, "blacklisted order key cleared via admin API");
+    Ok(Json(ClearBlacklistResponse { key, cleared: true }))
 }
 
 pub async fn metrics(_auth: AdminAuth, State(state): State<Arc<AppState>>) -> Response {
@@ -78,9 +169,112 @@ pub async fn metrics(_auth: AdminAuth, State(state): State<Arc<AppState>>) -> Re
         .into_response()
 }
 
+#[derive(Debug, Serialize)]
+pub struct BalanceResponse {
+    pub account_id: String,
+    pub balance_stroops: i64,
+    pub balance_xlm: f64,
+    pub min_balance_xlm: f64,
+    pub is_funded: bool,
+}
+
+pub async fn keeper_balance(
+    _auth: AdminAuth,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BalanceResponse>, ApiError> {
+    let keeper_cfg = crate::keeper::KeeperBalanceConfig {
+        horizon_url: state.config.horizon_url.clone(),
+        account_id: state.config.keeper_account_id.clone(),
+        min_balance_xlm: state.config.min_keeper_balance_xlm,
+    };
+
+    let result = crate::retry::retry_with_backoff(
+        || crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min),
+        KEEPER_BALANCE_RETRY_ATTEMPTS,
+        KEEPER_BALANCE_RETRY_BASE_DELAY_MS,
+        30_000,
+    )
+    .await;
+
+    match result {
+        Ok(stroops) => {
+            let response = crate::keeper::build_balance_response(&keeper_cfg, stroops);
+            Ok(Json(BalanceResponse {
+                account_id: response.account_id,
+                balance_stroops: response.balance_stroops,
+                balance_xlm: response.balance_xlm,
+                min_balance_xlm: response.min_balance_xlm,
+                is_funded: !response.below_minimum,
+            }))
+        }
+        Err(crate::stellar_rpc::RpcError::BalanceBelowMinimum {
+            balance_stroops,
+            balance_xlm,
+            min_xlm,
+        }) => Ok(Json(BalanceResponse {
+            account_id: state.config.keeper_account_id.clone(),
+            balance_stroops,
+            balance_xlm,
+            min_balance_xlm: min_xlm,
+            is_funded: false,
+        })),
+        Err(_) => Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "keeper_balance_check_failed",
+        )),
+    }
+}
+
 fn system_time_secs(value: SystemTime) -> Option<u64> {
     value
         .duration_since(UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Config;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // #1024 — GET /keeper/balance now retries a transient Horizon failure
+    // the same way /ready's equivalent check does, instead of surfacing it
+    // as a failure on the first blip.
+    #[tokio::test]
+    async fn keeper_balance_retries_transient_horizon_failure_then_succeeds() {
+        let server = MockServer::start().await;
+
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let request_count = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = request_count.clone();
+
+        Mock::given(method("GET"))
+            .respond_with(move |_: &wiremock::Request| {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(503)
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "id": "GKEEPER",
+                        "balances": [{"asset_type": "native", "balance": "20.0000000"}]
+                    }))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let mut config = Config::default_for_tests();
+        config.horizon_url = server.uri();
+        config.keeper_account_id = "GKEEPER".to_string();
+        config.min_keeper_balance_xlm = 10.0;
+        let state = std::sync::Arc::new(AppState::new(std::sync::Arc::new(config)));
+
+        let result = keeper_balance(AdminAuth, State(state)).await;
+
+        let Json(body) = result.expect("expected Ok after retry");
+        assert!(body.is_funded);
+        assert_eq!(body.balance_stroops, 200_000_000);
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+    }
 }

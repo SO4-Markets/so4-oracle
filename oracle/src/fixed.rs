@@ -6,6 +6,24 @@ pub enum FixedPriceError {
     InvalidFixedPrice(String),
 }
 
+impl std::fmt::Display for FixedPriceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingFixedPrice => f.write_str("fixed price is not configured"),
+            Self::InvalidFixedPrice(price) => write!(f, "invalid fixed price: {price}"),
+        }
+    }
+}
+
+impl std::error::Error for FixedPriceError {}
+
+impl crate::retry::Retryable for FixedPriceError {
+    fn is_retryable(&self) -> bool {
+        // Config/parse errors are permanent failures
+        false
+    }
+}
+
 pub fn fixed_price(token: &TokenConfig) -> Result<i128, FixedPriceError> {
     let raw = token
         .fixed_price
@@ -111,5 +129,48 @@ mod tests {
             fixed_price(&token).unwrap_err(),
             FixedPriceError::InvalidFixedPrice("abc".to_string()),
         );
+    }
+
+    // #571 — non-numeric parse failure must surface the raw input in the error
+    // message, not a synthetic "0" that would imply the value was a valid
+    // zero-price rather than an unparseable string.
+    #[test]
+    fn non_numeric_parse_error_display_names_raw_input_not_zero() {
+        let token = token_with_fixed_price(Some("not-a-number"));
+        let err = fixed_price(&token).unwrap_err();
+        assert!(
+            !matches!(err, FixedPriceError::MissingFixedPrice),
+            "non-numeric input must not produce MissingFixedPrice"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not-a-number"),
+            "error display must name the raw input; got: {msg}"
+        );
+        assert!(
+            !msg.contains(": 0"),
+            "error must not mislabel a non-numeric input as a zero-price; got: {msg}"
+        );
+    }
+
+    // #370 — fixed_price parses the configured i128 string and returns it exactly
+    #[test]
+    fn issue_370_fixed_source_returns_configured_value() {
+        // The oracle internally stores prices scaled to 30 decimal places.
+        // A USDC-pegged token fixed at 1.0 would be configured as
+        // "1000000000000000000000000000000" (1 followed by 30 zeros = 10^30).
+        let configured = "1000000000000000000000000000000";
+        let token = token_with_fixed_price(Some(configured));
+        let result = fixed_price(&token).unwrap();
+        assert_eq!(
+            result,
+            configured.parse::<i128>().unwrap(),
+            "fixed_price must return the configured i128 value unchanged"
+        );
+
+        // Also verify a different concrete value parses correctly.
+        let token2 = token_with_fixed_price(Some("42000000000000000000000000000000"));
+        let result2 = fixed_price(&token2).unwrap();
+        assert_eq!(result2, 42_000_000_000_000_000_000_000_000_000_000_i128);
     }
 }

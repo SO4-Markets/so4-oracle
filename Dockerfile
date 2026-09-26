@@ -1,5 +1,7 @@
 # Build stage
-FROM rust:1.76-slim as builder
+# Must stay >= the highest MSRV in Cargo.lock — stellar-rpc-client 27 requires
+# Rust 1.93, jsonrpsee 0.26 requires 1.85, axum 0.8 requires 1.80.
+FROM rust:1.95-slim AS builder
 
 WORKDIR /app
 
@@ -13,9 +15,12 @@ RUN apt-get update && apt-get install -y \
 COPY Cargo.toml Cargo.lock ./
 COPY shared/config ./shared/config
 COPY oracle ./oracle
+# config/tokens.json is embedded via include_str! at compile time and must
+# be present in the builder stage before cargo build runs (#502).
+COPY config ./config
 
 # Build the binary
-RUN cargo build --release --bin oracle
+RUN cargo build --release --locked --bin oracle
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -25,6 +30,7 @@ WORKDIR /app
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from builder
@@ -40,8 +46,10 @@ USER oracle
 # Expose port
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+# Health check — timeout covers /ready's worst-case (RPC reachability +
+# keeper-balance retries), capped at 15s by READY_CHECK_TIMEOUT_SECS (#1042,
+# #1043). Use /health for pure liveness (always fast, in-memory only).
+HEALTHCHECK --interval=30s --timeout=20s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
 # Run the binary

@@ -1,46 +1,92 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum RpcError {
     NetworkError(String),
-    HttpError(u16),
+    HttpError {
+        status: u16,
+        body: String,
+    },
     JsonError(String),
-    RpcFault { code: i64, message: String },
+    RpcFault {
+        code: i64,
+        message: String,
+    },
+    BalanceBelowMinimum {
+        balance_stroops: i64,
+        balance_xlm: f64,
+        min_xlm: f64,
+    },
+}
+
+impl Eq for RpcError {}
+
+/// Network errors and server-side/rate-limit HTTP statuses are transient and
+/// worth retrying; parse errors, RPC faults, and balance-precondition
+/// failures are not going to change on a bare retry, so they fail fast.
+impl crate::retry::Retryable for RpcError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            RpcError::NetworkError(_) => true,
+            RpcError::HttpError { status, .. } => *status >= 500 || *status == 429,
+            RpcError::JsonError(_) => false,
+            RpcError::RpcFault { .. } => false,
+            RpcError::BalanceBelowMinimum { .. } => false,
+        }
+    }
 }
 
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RpcError::NetworkError(msg) => write!(f, "network error: {msg}"),
-            RpcError::HttpError(code) => write!(f, "HTTP {code}"),
+            RpcError::HttpError { status, body } => {
+                if body.is_empty() {
+                    write!(f, "HTTP {status}")
+                } else {
+                    write!(f, "HTTP {status}: {body}")
+                }
+            }
             RpcError::JsonError(msg) => write!(f, "JSON parse error: {msg}"),
             RpcError::RpcFault { code, message } => {
                 write!(f, "RPC fault {code}: {message}")
+            }
+            RpcError::BalanceBelowMinimum {
+                balance_xlm,
+                min_xlm,
+                ..
+            } => {
+                write!(
+                    f,
+                    "balance {balance_xlm} XLM is below minimum {min_xlm} XLM"
+                )
             }
         }
     }
 }
 
+impl std::error::Error for RpcError {}
+
 // ── JSON-RPC wire types ──────────────────────────────────────────────────────
 
 #[derive(Serialize)]
-struct JsonRpcRequest<'a> {
-    jsonrpc: &'a str,
-    id: u32,
-    method: &'a str,
-    params: serde_json::Value,
+pub(crate) struct JsonRpcRequest<'a, P: Serialize = serde_json::Value> {
+    pub(crate) jsonrpc: &'a str,
+    pub(crate) id: u32,
+    pub(crate) method: &'a str,
+    pub(crate) params: P,
 }
 
 #[derive(Deserialize)]
-struct JsonRpcResponse<T> {
-    result: Option<T>,
-    error: Option<JsonRpcFault>,
+pub(crate) struct JsonRpcResponse<T> {
+    pub(crate) result: Option<T>,
+    pub(crate) error: Option<JsonRpcFault>,
 }
 
 #[derive(Deserialize)]
-struct JsonRpcFault {
-    code: i64,
-    message: String,
+pub(crate) struct JsonRpcFault {
+    pub(crate) code: i64,
+    pub(crate) message: String,
 }
 
 // ── getLatestLedger ──────────────────────────────────────────────────────────
@@ -111,7 +157,10 @@ pub(crate) async fn rpc_post(rpc_url: &str, payload: String) -> Result<String, R
         .map_err(|e| RpcError::NetworkError(e.to_string()))?;
 
     if status != 200 {
-        return Err(RpcError::HttpError(status));
+        return Err(RpcError::HttpError {
+            status,
+            body: crate::http::truncate_error_body(&body),
+        });
     }
 
     Ok(body)
@@ -173,7 +222,10 @@ pub async fn get_account_balance_stroops(
         .map_err(|e| RpcError::NetworkError(e.to_string()))?;
 
     if status != 200 {
-        return Err(RpcError::HttpError(status));
+        return Err(RpcError::HttpError {
+            status,
+            body: crate::http::truncate_error_body(&body),
+        });
     }
 
     parse_account_balance_response(&body)
@@ -183,6 +235,8 @@ pub async fn get_account_balance_stroops(
 mod tests {
     use super::*;
 
+    /// Verifies that a valid `getLatestLedger` RPC response is parsed correctly
+    /// and the sequence number is extracted. Closes #409.
     #[test]
     fn parse_valid_latest_ledger_response() {
         let body = r#"{
@@ -192,6 +246,9 @@ mod tests {
         assert_eq!(parse_latest_ledger_response(body).unwrap(), 12345u32);
     }
 
+    /// Verifies that an RPC fault in the `getLatestLedger` response is
+    /// propagated as `RpcError::RpcFault` with the correct code and message.
+    /// Closes #410.
     #[test]
     fn parse_rpc_fault_response() {
         let body = r#"{
@@ -260,5 +317,68 @@ mod tests {
     fn parse_account_balance_malformed_json() {
         let err = parse_account_balance_response("not json").unwrap_err();
         assert!(matches!(err, RpcError::JsonError(_)));
+    }
+
+    // ── get_account_balance_stroops — HTTP-level tests (#404) ────────────────
+
+    #[tokio::test]
+    async fn get_account_balance_stroops_200_returns_stroops() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = r#"{
+            "id": "GABC",
+            "balances": [
+                {"asset_type":"native","balance":"50.0000000"}
+            ]
+        }"#;
+
+        Mock::given(method("GET"))
+            .and(path("/accounts/GABC"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let result = get_account_balance_stroops(&server.uri(), "GABC").await;
+        assert_eq!(result.unwrap(), 500_000_000); // 50 XLM in stroops
+    }
+
+    #[tokio::test]
+    async fn get_account_balance_stroops_404_returns_http_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/accounts/GNOT_FOUND"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = get_account_balance_stroops(&server.uri(), "GNOT_FOUND")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RpcError::HttpError { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn get_account_balance_stroops_500_returns_http_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/accounts/GABC"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let err = get_account_balance_stroops(&server.uri(), "GABC")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RpcError::HttpError { status: 500, .. }));
     }
 }

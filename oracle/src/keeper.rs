@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use crate::stellar_rpc::{get_account_balance_stroops, RpcError};
 
 /// 1 XLM expressed in stroops.
@@ -15,21 +18,52 @@ pub struct KeeperBalanceConfig {
 
 /// Check the keeper balance.  Returns the current balance in stroops.
 ///
-/// Logs a critical warning and optionally returns the balance even when below
-/// threshold so the caller can decide whether to skip submission.
-pub async fn check_keeper_balance(cfg: &KeeperBalanceConfig) -> Result<i64, RpcError> {
+/// Logs `error!` only on the transition into the low-balance state (and
+/// `info!` on recovery). Subsequent checks while the balance remains low
+/// use `debug!` so readiness probes do not flood logs.
+///
+/// The `below_min` flag is scoped to the application instance rather than
+/// a bare process-global, so concurrent callers (e.g. /ready and
+/// /keeper/balance) share well-defined state (#737).
+pub async fn check_keeper_balance(
+    cfg: &KeeperBalanceConfig,
+    below_min: &Arc<AtomicBool>,
+) -> Result<i64, RpcError> {
     let stroops = get_account_balance_stroops(&cfg.horizon_url, &cfg.account_id).await?;
 
     let xlm = stroops as f64 / XLM_IN_STROOPS as f64;
     if xlm < cfg.min_balance_xlm {
-        tracing::error!(
+        let was_below = below_min.swap(true, Ordering::Relaxed);
+        if was_below {
+            tracing::debug!(
+                balance_xlm = xlm,
+                min_balance_xlm = cfg.min_balance_xlm,
+                account_id = cfg.account_id,
+                "keeper balance still below minimum"
+            );
+        } else {
+            tracing::error!(
+                balance_xlm = xlm,
+                min_balance_xlm = cfg.min_balance_xlm,
+                account_id = cfg.account_id,
+                "keeper balance below minimum"
+            );
+        }
+        return Err(RpcError::BalanceBelowMinimum {
+            balance_stroops: stroops,
+            balance_xlm: xlm,
+            min_xlm: cfg.min_balance_xlm,
+        });
+    }
+
+    if below_min.swap(false, Ordering::Relaxed) {
+        tracing::info!(
             balance_xlm = xlm,
             min_balance_xlm = cfg.min_balance_xlm,
-            account_id = cfg.account_id,
-            "keeper balance below minimum"
+            "keeper balance recovered above minimum"
         );
     } else {
-        tracing::info!(
+        tracing::debug!(
             balance_xlm = xlm,
             min_balance_xlm = cfg.min_balance_xlm,
             "keeper balance ok"
@@ -60,40 +94,12 @@ pub fn build_balance_response(cfg: &KeeperBalanceConfig, stroops: i64) -> Balanc
     }
 }
 
-/// Testnet Friendbot URL base (Issue #120).
-pub const FRIENDBOT_URL: &str = "https://friendbot.stellar.org";
-
-/// Call the Stellar testnet Friendbot to fund `account_id`.
-pub async fn fund_keeper_via_friendbot(account_id: &str) -> Result<(), String> {
-    let url = format!("{FRIENDBOT_URL}?addr={account_id}");
-    tracing::info!(account_id, "calling Friendbot");
-
-    let response = crate::http::client()
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("Friendbot fetch failed: {e}"))?;
-
-    let status = response.status().as_u16();
-    // 200 = funded; 400 = account already exists (idempotent — treat as success)
-    if status == 200 || status == 400 {
-        tracing::info!(account_id, status, "Friendbot response accepted");
-        return Ok(());
-    }
-
-    let body = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "(unreadable body)".to_string());
-    Err(format!(
-        "Friendbot returned {status} for {account_id}: {body}"
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::stellar_rpc::parse_account_balance_response;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn low_balance_body() -> &'static str {
         r#"{"id":"GABC","balances":[{"asset_type":"native","balance":"3.0000000"}]}"#
@@ -129,5 +135,71 @@ mod tests {
         let resp = build_balance_response(&cfg, stroops);
         assert!(!resp.below_minimum);
         assert_eq!(resp.balance_xlm, 20.0);
+    }
+
+    // ── check_keeper_balance — HTTP-level tests (#406) ────────────────────────
+
+    /// Closes #414: above minimum returns Ok(stroops).
+    #[tokio::test]
+    async fn check_keeper_balance_above_minimum_returns_ok() {
+        use wiremock::matchers::path;
+
+        let server = MockServer::start().await;
+        let body = r#"{
+            "id": "GKEEPER",
+            "balances": [{"asset_type":"native","balance":"20.0000000"}]
+        }"#;
+
+        Mock::given(method("GET"))
+            .and(path("/accounts/GKEEPER"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let cfg = KeeperBalanceConfig {
+            horizon_url: server.uri(),
+            account_id: "GKEEPER".to_string(),
+            min_balance_xlm: 10.0,
+        };
+
+        let below_min = Arc::new(AtomicBool::new(false));
+        let stroops = check_keeper_balance(&cfg, &below_min).await.unwrap();
+        assert_eq!(stroops, 200_000_000); // 20 XLM in stroops
+    }
+
+    /// Closes #413: below minimum returns Err(BalanceBelowMinimum).
+    #[tokio::test]
+    async fn check_keeper_balance_below_minimum_returns_err() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "balances": [{"asset_type": "native", "balance": "3.0000000"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let cfg = KeeperBalanceConfig {
+            horizon_url: server.uri(),
+            account_id: "GKEEPER".to_string(),
+            min_balance_xlm: 10.0,
+        };
+
+        let below_min = Arc::new(AtomicBool::new(false));
+        let err = check_keeper_balance(&cfg, &below_min).await.unwrap_err();
+        assert!(matches!(err, RpcError::BalanceBelowMinimum { .. }));
+    }
+
+    /// Horizon unreachable returns NetworkError.
+    #[tokio::test]
+    async fn check_keeper_balance_horizon_unreachable_returns_network_error() {
+        let cfg = KeeperBalanceConfig {
+            horizon_url: "http://127.0.0.1:19999".to_string(), // nothing listening
+            account_id: "GKEEPER".to_string(),
+            min_balance_xlm: 10.0,
+        };
+
+        let below_min = Arc::new(AtomicBool::new(false));
+        let err = check_keeper_balance(&cfg, &below_min).await.unwrap_err();
+        assert!(matches!(err, RpcError::NetworkError(_)));
     }
 }
