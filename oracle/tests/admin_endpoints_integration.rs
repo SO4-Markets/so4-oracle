@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -7,45 +6,12 @@ use tower::ServiceExt;
 use wiremock::matchers::method;
 use wiremock::{MockServer, ResponseTemplate};
 
+mod common;
+
+use common::test_config;
 use oracle::api::build_router;
-use oracle::config::{Config, Network, PriceFeedConfig, SecretString};
 use oracle::state::{AppState, FailedSubmission};
 use std::time::SystemTime;
-
-fn test_config(rpc_url: &str, horizon_url: &str) -> Arc<Config> {
-    Arc::new(Config {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        network: Network::Testnet,
-        network_passphrase: "Test SDF Network ; September 2015".to_string(),
-        stellar_rpc_url: rpc_url.to_string(),
-        horizon_url: horizon_url.to_string(),
-        oracle_contract_id: "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY".to_string(),
-        role_store_contract_id: "CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q"
-            .to_string(),
-        data_store_contract_id: "CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J"
-            .to_string(),
-        order_handler_contract_id: "CC35OFZVWUTAZPV3B6UKSDVAVORZEWUUMOMTHO33H4YR4C5FKPEFODKY"
-            .to_string(),
-        deposit_handler_contract_id: "CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C"
-            .to_string(),
-        withdrawal_handler_contract_id: "CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE"
-            .to_string(),
-        reader_contract_id: "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC".to_string(),
-        keeper_private_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_secret_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_account_id: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
-        keeper_index: 0,
-        admin_api_token: Some(SecretString::new("test-admin-token".to_string())),
-        min_keeper_balance_xlm: 10.0,
-        price_loop_interval: Duration::from_millis(1000),
-        keeper_loop_interval: Duration::from_millis(1500),
-        price_feed: PriceFeedConfig { tokens: vec![] },
-    })
-}
 
 fn auth_header() -> String {
     "Bearer test-admin-token".to_string()
@@ -100,6 +66,134 @@ async fn keeper_status_returns_expected_fields() {
     assert!(json.get("pending_withdrawals").is_some());
     assert!(json.get("last_executions").is_some());
     assert!(json["last_executions"].as_array().unwrap().len() <= 50);
+    assert!(json.get("blacklisted_keys").is_some());
+    assert!(json["blacklisted_keys"].as_array().unwrap().is_empty());
+}
+
+// ── #802 — blacklisted_keys visibility + DELETE /keeper/blacklist/{key} ──────
+
+#[tokio::test]
+async fn keeper_status_lists_blacklisted_keys() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    state
+        .frozen_order_blacklist
+        .lock()
+        .await
+        .insert("deadbeef".to_string(), 3);
+
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/keeper/status")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let blacklisted = json["blacklisted_keys"].as_array().unwrap();
+    assert_eq!(blacklisted.len(), 1);
+    assert_eq!(blacklisted[0]["key"], "deadbeef");
+    assert_eq!(blacklisted[0]["consecutive_failures"], 3);
+}
+
+#[tokio::test]
+async fn clear_blacklisted_key_returns_401_without_token() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/keeper/blacklist/deadbeef")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn clear_blacklisted_key_returns_404_for_unknown_key() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/keeper/blacklist/not-blacklisted")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn clear_blacklisted_key_removes_key_and_resets_failure_count() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    {
+        let mut blacklist = state.frozen_order_blacklist.lock().await;
+        blacklist.insert("deadbeef".to_string(), 3);
+        let mut counts = state.freeze_failure_counts.lock().await;
+        counts.insert("deadbeef".to_string(), 3);
+    }
+
+    let app = build_router(Arc::clone(&state));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/keeper/blacklist/deadbeef")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["key"], "deadbeef");
+    assert_eq!(json["cleared"], true);
+
+    assert!(!state
+        .frozen_order_blacklist
+        .lock()
+        .await
+        .contains_key("deadbeef"));
+    assert!(!state
+        .freeze_failure_counts
+        .lock()
+        .await
+        .contains_key("deadbeef"));
 }
 
 // ── #432 — GET /oracle/failed-submissions ────────────────────────────────────
@@ -272,6 +366,41 @@ async fn failed_submissions_respects_limit() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["failures"].as_array().unwrap().len(), 2);
     assert_eq!(json["total_count"], 5);
+}
+
+// #602 — a malformed `limit` must still come back as the API's JSON error
+// envelope rather than axum's default text/plain query rejection.
+#[tokio::test]
+async fn failed_submissions_rejects_non_numeric_limit_as_json() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/oracle/failed-submissions?limit=abc")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["error"].is_string());
 }
 
 // ── #433 — GET /keeper/balance ───────────────────────────────────────────────

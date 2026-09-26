@@ -3,8 +3,9 @@ use sha2::{Digest, Sha256};
 use stellar_xdr::{
     DecoratedSignature, InvokeContractArgs, InvokeHostFunctionOp, Limits, Memo, Operation,
     OperationBody, Preconditions, ScSymbol, ScVal, SequenceNumber, Signature, SignatureHint,
-    Transaction, TransactionEnvelope, TransactionExt, TransactionSignaturePayload,
-    TransactionSignaturePayloadTaggedTransaction, TransactionV1Envelope, VecM, WriteXdr,
+    SorobanTransactionData, Transaction, TransactionEnvelope, TransactionExt,
+    TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
+    TransactionV1Envelope, VecM, WriteXdr,
 };
 
 use crate::chain::scval::{account_strkey_to_muxed, strkey_to_sc_address};
@@ -16,6 +17,7 @@ pub fn build_invoke_tx(
     args: Vec<ScVal>,
     fee: u32,
     sequence: u64,
+    soroban_data: Option<SorobanTransactionData>,
 ) -> Result<Transaction, String> {
     let source_muxed = account_strkey_to_muxed(source_account)?;
     let contract_addr = strkey_to_sc_address(contract_id)?;
@@ -46,6 +48,11 @@ pub fn build_invoke_tx(
         .try_into()
         .map_err(|e| format!("failed to build operations VecM: {e}"))?;
 
+    let ext = match soroban_data {
+        Some(data) => TransactionExt::V1(data),
+        None => TransactionExt::V0,
+    };
+
     Ok(Transaction {
         source_account: source_muxed,
         fee,
@@ -53,7 +60,7 @@ pub fn build_invoke_tx(
         cond: Preconditions::None,
         memo: Memo::None,
         operations,
-        ext: TransactionExt::V0,
+        ext,
     })
 }
 
@@ -70,9 +77,12 @@ pub fn sign_transaction(
     } else if secret_key.len() == 64 && secret_key.chars().all(|c| c.is_ascii_hexdigit()) {
         hex::decode(secret_key).map_err(|e| format!("invalid secret key hex: {e}"))?
     } else {
+        // #735 — never echo any part of the secret key into an error message.
+        // Report only its length and format, which is enough to diagnose a
+        // misconfigured env var without leaking key material into logs.
         return Err(format!(
-            "secret key must be an S-prefixed strkey or 64-char hex, got: {}",
-            &secret_key[..secret_key.len().min(20)]
+            "secret key must be an S-prefixed strkey or 64-char hex (got {} chars, non-hex or wrong prefix)",
+            secret_key.len()
         ));
     };
 
@@ -163,6 +173,7 @@ mod tests {
             vec![ScVal::Void],
             100,
             1,
+            None,
         )
         .unwrap();
 
@@ -182,6 +193,7 @@ mod tests {
             vec![ScVal::Void],
             100,
             1,
+            None,
         )
         .unwrap();
 
@@ -208,7 +220,32 @@ mod tests {
             vec![ScVal::Void],
             100,
             1,
+            None,
         );
         assert!(err.is_err());
+    }
+
+    /// Regression test for #1025: assert that `compute_network_id` produces the
+    /// well-known network ID hash for the real Stellar testnet passphrase. This
+    /// catches silent corruption of `TESTNET_PASSPHRASE` in `network_config.rs`.
+    #[test]
+    fn compute_network_id_matches_known_testnet_hash() {
+        let expected = sha256_hash(b"Test SDF Network ; September 2015");
+        let actual = compute_network_id(crate::network_config::TESTNET_PASSPHRASE);
+        assert_eq!(
+            actual, expected,
+            "TESTNET_PASSPHRASE in network_config.rs does not match the well-known testnet passphrase"
+        );
+    }
+
+    /// Regression test for #1025: same check for mainnet.
+    #[test]
+    fn compute_network_id_matches_known_mainnet_hash() {
+        let expected = sha256_hash(b"Public Global Stellar Network ; November 2015");
+        let actual = compute_network_id(crate::network_config::MAINNET_PASSPHRASE);
+        assert_eq!(
+            actual, expected,
+            "MAINNET_PASSPHRASE in network_config.rs does not match the well-known mainnet passphrase"
+        );
     }
 }

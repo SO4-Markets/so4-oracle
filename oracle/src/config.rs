@@ -13,6 +13,12 @@ pub const DEFAULT_TESTNET_HORIZON_URL: &str = "https://horizon-testnet.stellar.o
 pub const DEFAULT_MAINNET_HORIZON_URL: &str = "https://horizon.stellar.org";
 pub const DEFAULT_PRICE_LOOP_MS: u64 = 1_000;
 pub const DEFAULT_KEEPER_LOOP_MS: u64 = 1_500;
+/// Default inclusion fee (stroops) for `set_prices` transactions.
+pub const DEFAULT_SET_PRICES_TX_FEE: u32 = 1_000_000;
+/// Default inclusion fee (stroops) for keeper handler transactions.
+pub const DEFAULT_KEEPER_TX_FEE: u32 = 2_000_000;
+/// Default timeout in seconds for graceful shutdown of background tasks.
+pub const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
 /// Oracle-specific view of a token feed config.
 /// Re-exports fields from `TokenConfig` for backward compatibility with
@@ -60,26 +66,56 @@ impl fmt::Debug for SecretString {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Address and port the HTTP server binds to. Env: `BIND_ADDR`, default `0.0.0.0:8080`.
     pub bind_addr: SocketAddr,
+    /// Stellar network to connect to. Env: `STELLAR_NETWORK`, default `testnet`.
     pub network: Network,
+    /// Stellar network passphrase for transaction signing.
     pub network_passphrase: String,
+    /// Stellar RPC node URL. Env: `STELLAR_RPC_URL` (defaults to public testnet RPC).
     pub stellar_rpc_url: String,
+    /// Horizon server URL for account queries. Env: `HORIZON_URL`.
     pub horizon_url: String,
+    /// On-chain oracle contract address. Env: `ORACLE_CONTRACT_ID`.
     pub oracle_contract_id: String,
+    /// On-chain role-store contract address. Env: `ROLE_STORE`.
     pub role_store_contract_id: String,
+    /// On-chain data-store contract address. Env: `DATA_STORE`.
     pub data_store_contract_id: String,
+    /// On-chain order-handler contract address. Env: `ORDER_HANDLER`.
     pub order_handler_contract_id: String,
+    /// On-chain deposit-handler contract address. Env: `DEPOSIT_HANDLER`.
     pub deposit_handler_contract_id: String,
+    /// On-chain withdrawal-handler contract address. Env: `WITHDRAWAL_HANDLER`.
     pub withdrawal_handler_contract_id: String,
+    /// On-chain reader contract address. Env: `READER`.
     pub reader_contract_id: String,
+    /// Keeper ed25519 private key (hex-encoded 32 bytes). Env: `KEEPER_PRIVATE_KEY`.
     pub keeper_private_key: SecretString,
+    /// Keeper Stellar strkey secret seed (S-prefixed). Env: `KEEPER_SECRET_KEY`.
     pub keeper_secret_key: SecretString,
+    /// Keeper Stellar account ID (G-prefixed strkey). Env: `KEEPER_ACCOUNT_ID`.
     pub keeper_account_id: String,
+    /// Index of this keeper instance, used only to label which keeper signed a
+    /// given price submission. Has no work-partitioning behavior — every
+    /// instance processes the full pending-work set regardless of index.
+    /// Env: `KEEPER_INDEX`, default `0`.
     pub keeper_index: u32,
+    /// Optional bearer token for admin API endpoints. Env: `ADMIN_API_TOKEN`.
     pub admin_api_token: Option<SecretString>,
+    /// API key used to authenticate requests to the production Hermes endpoint.
+    pub pyth_api_key: Option<SecretString>,
+    /// Minimum keeper XLM balance before halting (in XLM, not stroops). Env: `MIN_KEEPER_BALANCE_XLM`.
     pub min_keeper_balance_xlm: f64,
+    /// Inclusion fee (stroops) for oracle `set_prices` transactions.
+    pub set_prices_tx_fee: u32,
+    /// Inclusion fee (stroops) for keeper handler execute/freeze transactions.
+    pub keeper_tx_fee: u32,
+    /// Interval between price-feed refresh cycles. Env: `PRICE_LOOP_MS`, default 1000ms.
     pub price_loop_interval: Duration,
+    /// Interval between keeper execution cycles. Env: `KEEPER_LOOP_MS`, default 1500ms.
     pub keeper_loop_interval: Duration,
+    /// Token feed configuration (symbols, sources, addresses).
     pub price_feed: PriceFeedConfig,
 }
 
@@ -87,7 +123,7 @@ pub struct Config {
 pub enum EnvError {
     MissingVar(&'static str),
     InvalidVar { var: &'static str, reason: String },
-    TokenConfig(String),
+    TokenConfig(ConfigError),
 }
 
 impl fmt::Display for EnvError {
@@ -95,7 +131,7 @@ impl fmt::Display for EnvError {
         match self {
             EnvError::MissingVar(var) => write!(f, "required env var '{var}' is not set"),
             EnvError::InvalidVar { var, reason } => write!(f, "invalid env var '{var}': {reason}"),
-            EnvError::TokenConfig(reason) => write!(f, "invalid PRICE_FEED_CONFIG: {reason}"),
+            EnvError::TokenConfig(error) => write!(f, "invalid PRICE_FEED_CONFIG: {error}"),
         }
     }
 }
@@ -104,29 +140,69 @@ impl std::error::Error for EnvError {}
 
 impl From<ConfigError> for EnvError {
     fn from(value: ConfigError) -> Self {
-        EnvError::TokenConfig(value.to_string())
+        EnvError::TokenConfig(value)
     }
 }
 
+/// A collection of one or more environment-variable configuration errors.
+///
+/// Returned by [`Config::from_env`] when multiple fields are invalid or
+/// missing, allowing the caller to report every problem in a single pass
+/// rather than failing on the first one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvErrors(pub Vec<EnvError>);
+
+impl fmt::Display for EnvErrors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, err) in self.0.iter().enumerate() {
+            if i > 0 {
+                writeln!(f)?;
+            }
+            write!(f, "{err}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for EnvErrors {}
+
 impl Config {
-    pub fn from_env() -> Result<Self, EnvError> {
+    pub fn from_env() -> Result<Self, EnvErrors> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
 
-    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, EnvError> {
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, EnvErrors> {
+        let mut errors: Vec<EnvError> = Vec::new();
+
+        macro_rules! collect_or_default {
+            ($expr:expr, $default:expr) => {
+                match $expr {
+                    Ok(val) => val,
+                    Err(e) => {
+                        errors.push(e.into());
+                        $default
+                    }
+                }
+            };
+        }
+
         let network_raw = lookup("STELLAR_NETWORK").unwrap_or_else(|| "testnet".to_string());
         let network = match network_raw.as_str() {
             "testnet" => Network::Testnet,
             "mainnet" => Network::Mainnet,
             other => {
-                return Err(EnvError::InvalidVar {
+                errors.push(EnvError::InvalidVar {
                     var: "STELLAR_NETWORK",
                     reason: format!("unknown network '{other}'; expected 'testnet' or 'mainnet'"),
-                })
+                });
+                Network::Testnet
             }
         };
 
-        let bind_addr = parse_or_default(&mut lookup, "BIND_ADDR", DEFAULT_BIND_ADDR)?;
+        let bind_addr = collect_or_default!(
+            parse_or_default(&mut lookup, "BIND_ADDR", DEFAULT_BIND_ADDR),
+            DEFAULT_BIND_ADDR.parse().unwrap()
+        );
         let (network_passphrase, stellar_rpc_url, horizon_url) = match network {
             Network::Testnet => (
                 TESTNET_PASSPHRASE.to_string(),
@@ -135,86 +211,158 @@ impl Config {
             ),
             Network::Mainnet => (
                 MAINNET_PASSPHRASE.to_string(),
-                required(&mut lookup, "STELLAR_RPC_URL")?,
+                collect_or_default!(required(&mut lookup, "STELLAR_RPC_URL"), String::new()),
                 lookup("HORIZON_URL").unwrap_or_else(|| DEFAULT_MAINNET_HORIZON_URL.to_string()),
             ),
         };
 
         let oracle_contract_id = match network {
-            Network::Mainnet => required(&mut lookup, "ORACLE_CONTRACT_ID")?,
-            Network::Testnet => required_any(&mut lookup, "ORACLE_CONTRACT_ID", "ORACLE")?,
+            Network::Mainnet => {
+                collect_or_default!(required(&mut lookup, "ORACLE_CONTRACT_ID"), String::new())
+            }
+            Network::Testnet => collect_or_default!(
+                required_any(&mut lookup, "ORACLE_CONTRACT_ID", "ORACLE"),
+                String::new()
+            ),
         };
 
-        let price_feed = load_price_feed_config(lookup("PRICE_FEED_CONFIG").as_deref())?;
+        let price_feed = collect_or_default!(
+            load_price_feed_config(lookup(ENV_KEY).as_deref()).map_err(EnvError::from),
+            PriceFeedConfig { tokens: vec![] }
+        );
 
-        Ok(Self {
-            bind_addr,
-            network,
-            network_passphrase,
-            stellar_rpc_url,
-            horizon_url,
-            oracle_contract_id,
-            role_store_contract_id: required(&mut lookup, "ROLE_STORE")?,
-            data_store_contract_id: required(&mut lookup, "DATA_STORE")?,
-            order_handler_contract_id: required(&mut lookup, "ORDER_HANDLER")?,
-            deposit_handler_contract_id: required(&mut lookup, "DEPOSIT_HANDLER")?,
-            withdrawal_handler_contract_id: required(&mut lookup, "WITHDRAWAL_HANDLER")?,
-            reader_contract_id: required(&mut lookup, "READER")?,
-            keeper_private_key: SecretString::new(validate_hex_key(
-                "KEEPER_PRIVATE_KEY",
-                required(&mut lookup, "KEEPER_PRIVATE_KEY")?,
-                32,
-            )?),
-            keeper_secret_key: SecretString::new(validate_strkey(
-                "KEEPER_SECRET_KEY",
-                required(&mut lookup, "KEEPER_SECRET_KEY")?,
-                'S',
-            )?),
-            keeper_account_id: validate_strkey(
-                "KEEPER_ACCOUNT_ID",
-                required(&mut lookup, "KEEPER_ACCOUNT_ID")?,
-                'G',
-            )?,
-            keeper_index: parse_or_default(&mut lookup, "KEEPER_INDEX", "0")?,
-            // Optional: when unset, admin-only endpoints reject with 503 rather
-            // than refusing to boot. Keeps the foundation runnable without secrets.
-            admin_api_token: lookup("ADMIN_API_TOKEN")
-                .filter(|value| !value.trim().is_empty())
-                .map(SecretString::new),
-            min_keeper_balance_xlm: {
+        let role_store_contract_id =
+            collect_or_default!(required(&mut lookup, "ROLE_STORE"), String::new());
+        let data_store_contract_id =
+            collect_or_default!(required(&mut lookup, "DATA_STORE"), String::new());
+        let order_handler_contract_id =
+            collect_or_default!(required(&mut lookup, "ORDER_HANDLER"), String::new());
+        let deposit_handler_contract_id =
+            collect_or_default!(required(&mut lookup, "DEPOSIT_HANDLER"), String::new());
+        let withdrawal_handler_contract_id =
+            collect_or_default!(required(&mut lookup, "WITHDRAWAL_HANDLER"), String::new());
+        let reader_contract_id =
+            collect_or_default!(required(&mut lookup, "READER"), String::new());
+
+        let keeper_private_key_raw =
+            collect_or_default!(required(&mut lookup, "KEEPER_PRIVATE_KEY"), String::new());
+        let keeper_private_key = if !keeper_private_key_raw.is_empty() {
+            collect_or_default!(
+                validate_hex_key("KEEPER_PRIVATE_KEY", keeper_private_key_raw, 32)
+                    .map(SecretString::new),
+                SecretString::new(String::new())
+            )
+        } else {
+            SecretString::new(String::new())
+        };
+
+        let keeper_secret_key_raw =
+            collect_or_default!(required(&mut lookup, "KEEPER_SECRET_KEY"), String::new());
+        let keeper_secret_key = if !keeper_secret_key_raw.is_empty() {
+            collect_or_default!(
+                validate_strkey("KEEPER_SECRET_KEY", keeper_secret_key_raw, 'S')
+                    .map(SecretString::new),
+                SecretString::new(String::new())
+            )
+        } else {
+            SecretString::new(String::new())
+        };
+
+        let keeper_account_id_raw =
+            collect_or_default!(required(&mut lookup, "KEEPER_ACCOUNT_ID"), String::new());
+        let keeper_account_id = if !keeper_account_id_raw.is_empty() {
+            collect_or_default!(
+                validate_strkey("KEEPER_ACCOUNT_ID", keeper_account_id_raw, 'G'),
+                String::new()
+            )
+        } else {
+            String::new()
+        };
+
+        let keeper_index =
+            collect_or_default!(parse_or_default(&mut lookup, "KEEPER_INDEX", "0"), 0u32);
+
+        let admin_api_token = lookup("ADMIN_API_TOKEN")
+            .filter(|value| !value.trim().is_empty())
+            .map(SecretString::new);
+        let pyth_api_key = lookup("PYTH_API_KEY")
+            .filter(|value| !value.trim().is_empty())
+            .map(SecretString::new);
+
+        let min_keeper_balance_xlm: f64 = collect_or_default!(
+            (|| {
                 let value: f64 = parse_or_default(
                     &mut lookup,
                     "MIN_KEEPER_BALANCE_XLM",
                     &DEFAULT_MIN_KEEPER_BALANCE_XLM.to_string(),
                 )?;
-                // Issue #564: reject non-finite/negative values — a NaN threshold
-                // silently disables the low-balance check (NaN comparisons are
-                // always false); an infinite threshold makes the keeper consider
-                // itself perpetually below minimum.
                 if !value.is_finite() || value < 0.0 {
                     return Err(EnvError::InvalidVar {
                         var: "MIN_KEEPER_BALANCE_XLM",
                         reason: format!("must be a finite, non-negative number, got {value}"),
                     });
                 }
-                value
-            },
-            price_loop_interval: {
+                Ok(value)
+            })(),
+            DEFAULT_MIN_KEEPER_BALANCE_XLM
+        );
+
+        let set_prices_tx_fee: u32 = collect_or_default!(
+            (|| {
+                let fee: u32 = parse_or_default(
+                    &mut lookup,
+                    "SET_PRICES_TX_FEE",
+                    &DEFAULT_SET_PRICES_TX_FEE.to_string(),
+                )?;
+                if fee == 0 {
+                    return Err(EnvError::InvalidVar {
+                        var: "SET_PRICES_TX_FEE",
+                        reason: "must be greater than 0".to_string(),
+                    });
+                }
+                Ok(fee)
+            })(),
+            DEFAULT_SET_PRICES_TX_FEE
+        );
+
+        let keeper_tx_fee: u32 = collect_or_default!(
+            (|| {
+                let fee: u32 = parse_or_default(
+                    &mut lookup,
+                    "KEEPER_TX_FEE",
+                    &DEFAULT_KEEPER_TX_FEE.to_string(),
+                )?;
+                if fee == 0 {
+                    return Err(EnvError::InvalidVar {
+                        var: "KEEPER_TX_FEE",
+                        reason: "must be greater than 0".to_string(),
+                    });
+                }
+                Ok(fee)
+            })(),
+            DEFAULT_KEEPER_TX_FEE
+        );
+
+        let price_loop_interval = collect_or_default!(
+            (|| {
                 let ms: u64 = parse_or_default(
                     &mut lookup,
                     "PRICE_LOOP_MS",
                     &DEFAULT_PRICE_LOOP_MS.to_string(),
                 )?;
-                // Issue #563: tokio::time::interval() panics on a zero period.
                 if ms == 0 {
                     return Err(EnvError::InvalidVar {
                         var: "PRICE_LOOP_MS",
                         reason: "must be greater than 0".to_string(),
                     });
                 }
-                Duration::from_millis(ms)
-            },
-            keeper_loop_interval: {
+                Ok(Duration::from_millis(ms))
+            })(),
+            Duration::from_millis(DEFAULT_PRICE_LOOP_MS)
+        );
+
+        let keeper_loop_interval = collect_or_default!(
+            (|| {
                 let ms: u64 = parse_or_default(
                     &mut lookup,
                     "KEEPER_LOOP_MS",
@@ -226,8 +374,39 @@ impl Config {
                         reason: "must be greater than 0".to_string(),
                     });
                 }
-                Duration::from_millis(ms)
-            },
+                Ok(Duration::from_millis(ms))
+            })(),
+            Duration::from_millis(DEFAULT_KEEPER_LOOP_MS)
+        );
+
+        if !errors.is_empty() {
+            return Err(EnvErrors(errors));
+        }
+
+        Ok(Self {
+            bind_addr,
+            network,
+            network_passphrase,
+            stellar_rpc_url,
+            horizon_url,
+            oracle_contract_id,
+            role_store_contract_id,
+            data_store_contract_id,
+            order_handler_contract_id,
+            deposit_handler_contract_id,
+            withdrawal_handler_contract_id,
+            reader_contract_id,
+            keeper_private_key,
+            keeper_secret_key,
+            keeper_account_id,
+            keeper_index,
+            admin_api_token,
+            pyth_api_key,
+            min_keeper_balance_xlm,
+            set_prices_tx_fee,
+            keeper_tx_fee,
+            price_loop_interval,
+            keeper_loop_interval,
             price_feed,
         })
     }
@@ -250,7 +429,9 @@ fn required_any(
     lookup(primary)
         .filter(|value| !value.trim().is_empty())
         .or_else(|| lookup(fallback).filter(|value| !value.trim().is_empty()))
-        .ok_or(EnvError::MissingVar(primary))
+        .ok_or(EnvError::MissingVar(
+            "ORACLE_CONTRACT_ID' (or fallback alias 'ORACLE')",
+        ))
 }
 
 fn parse_or_default<T>(
@@ -262,7 +443,14 @@ where
     T: std::str::FromStr,
     T::Err: fmt::Display,
 {
-    let raw = lookup(var).unwrap_or_else(|| default.to_string());
+    // Treat a set-but-empty (or whitespace-only) value the same as absent,
+    // consistent with required() and required_any(). This prevents a
+    // config-management tool that renders unset template variables as KEY=
+    // from producing a confusing parse error instead of falling back to
+    // the default.
+    let raw = lookup(var)
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| default.to_string());
     raw.parse::<T>().map_err(|err| EnvError::InvalidVar {
         var,
         reason: err.to_string(),
@@ -358,13 +546,13 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
                         reason: "coinbase_symbol is required for coinbase source".to_string(),
                     });
                 }
-                "pyth" if token.pyth_feed_id.is_none() => {
+                "pyth" if token.pyth_feed_id.as_deref().unwrap_or("").is_empty() => {
                     return Err(ConfigError::InvalidToken {
                         symbol: token.symbol.clone(),
                         reason: "pyth_feed_id is required for pyth source".to_string(),
                     });
                 }
-                "fixed" if token.fixed_price.is_none() => {
+                "fixed" if token.fixed_price.as_deref().unwrap_or("").is_empty() => {
                     return Err(ConfigError::InvalidToken {
                         symbol: token.symbol.clone(),
                         reason: "fixed_price is required for fixed source".to_string(),
@@ -385,9 +573,65 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
                 reason: "min_sources must be greater than zero".to_string(),
             });
         }
+        if token.min_sources > token.sources.len() {
+            return Err(ConfigError::InvalidToken {
+                symbol: token.symbol.clone(),
+                reason: format!(
+                    "min_sources ({}) exceeds number of configured sources ({})",
+                    token.min_sources,
+                    token.sources.len()
+                ),
+            });
+        }
+        // Warn when min_sources is too low to enable meaningful cross-source
+        // deviation checks: a single responding source passes any price through
+        // with no outlier protection (#503).
+        if token.sources.len() >= 2 && token.min_sources * 2 <= token.sources.len() {
+            tracing::warn!(
+                symbol = %token.symbol,
+                min_sources = token.min_sources,
+                sources = token.sources.len(),
+                "min_sources is less than half the configured sources — \
+                 a single source can push a price without cross-source validation"
+            );
+        }
     }
 
     Ok(PriceFeedConfig { tokens })
+}
+
+#[cfg(test)]
+impl Config {
+    /// Minimal Config with dummy values — for unit tests that need an AppState
+    /// but don't exercise any network or crypto paths.
+    pub fn default_for_tests() -> Self {
+        Self {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            network: Network::Testnet,
+            network_passphrase: "Test SDF Network ; September 2015".to_string(),
+            stellar_rpc_url: "http://localhost:8000".to_string(),
+            horizon_url: "http://localhost:8001".to_string(),
+            oracle_contract_id: String::new(),
+            role_store_contract_id: String::new(),
+            data_store_contract_id: String::new(),
+            order_handler_contract_id: String::new(),
+            deposit_handler_contract_id: String::new(),
+            withdrawal_handler_contract_id: String::new(),
+            reader_contract_id: String::new(),
+            keeper_private_key: SecretString::new(String::new()),
+            keeper_secret_key: SecretString::new(String::new()),
+            keeper_account_id: String::new(),
+            keeper_index: 0,
+            admin_api_token: None,
+            pyth_api_key: None,
+            min_keeper_balance_xlm: 1.0,
+            set_prices_tx_fee: DEFAULT_SET_PRICES_TX_FEE,
+            keeper_tx_fee: DEFAULT_KEEPER_TX_FEE,
+            price_loop_interval: std::time::Duration::from_secs(10),
+            keeper_loop_interval: std::time::Duration::from_secs(10),
+            price_feed: PriceFeedConfig { tokens: vec![] },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -398,8 +642,14 @@ mod tests {
 
     const VALID_JSON: &str = r#"[
         {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance","coinbase"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC"},
-        {"symbol":"ETH","stellar_address":"CETHADDR","sources":["binance"],"binance_symbol":"ETHUSDT"}
+        {"symbol":"ETH","stellar_address":"CETHADDR","sources":["binance"],"binance_symbol":"ETHUSDT","min_sources":1}
     ]"#;
+
+    #[test]
+    fn network_as_str_returns_expected_wire_values() {
+        assert_eq!(Network::Testnet.as_str(), "testnet");
+        assert_eq!(Network::Mainnet.as_str(), "mainnet");
+    }
 
     #[test]
     fn parse_or_default_uses_value_when_set() {
@@ -433,6 +683,27 @@ mod tests {
         ));
     }
 
+    /// Closes #562: empty-string env var should fall back to default,
+    /// consistent with required()/required_any() treating empty as unset.
+    #[test]
+    fn parse_or_default_uses_default_when_empty_string() {
+        let mut env = HashMap::new();
+        env.insert("TEST_VAR".to_string(), "".to_string());
+        let result =
+            parse_or_default::<u64>(&mut |key| env.get(key).cloned(), "TEST_VAR", "10").unwrap();
+        assert_eq!(result, 10);
+    }
+
+    /// Closes #562: whitespace-only env var should also fall back to default.
+    #[test]
+    fn parse_or_default_uses_default_when_whitespace_only() {
+        let mut env = HashMap::new();
+        env.insert("TEST_VAR".to_string(), "   ".to_string());
+        let result =
+            parse_or_default::<u64>(&mut |key| env.get(key).cloned(), "TEST_VAR", "10").unwrap();
+        assert_eq!(result, 10);
+    }
+
     #[test]
     fn parse_or_default_parses_socket_addr() {
         let mut env = HashMap::new();
@@ -444,6 +715,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.port(), 3000);
+    }
+
+    #[test]
+    fn config_from_lookup_uses_default_bind_addr_when_unset() {
+        let env = valid_env();
+        assert!(!env.contains_key("BIND_ADDR"));
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(
+            cfg.bind_addr,
+            DEFAULT_BIND_ADDR.parse::<std::net::SocketAddr>().unwrap()
+        );
     }
 
     #[test]
@@ -498,8 +782,8 @@ mod tests {
     #[test]
     fn per_token_source_list_preserved() {
         let json = r#"[
-            {"symbol":"BTC","stellar_address":"CBADDR","sources":["binance"],"binance_symbol":"BTCUSDT"},
-            {"symbol":"ETH","stellar_address":"CEADDR","sources":["coinbase"],"coinbase_symbol":"ETH"}
+            {"symbol":"BTC","stellar_address":"CBADDR","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1},
+            {"symbol":"ETH","stellar_address":"CEADDR","sources":["coinbase"],"coinbase_symbol":"ETH","min_sources":1}
         ]"#;
         let cfg = parse_price_feed_config(json).unwrap();
         assert_eq!(cfg.tokens[0].sources, vec!["binance"]);
@@ -512,7 +796,7 @@ mod tests {
     #[test]
     fn parse_token_configs_empty_array_returns_empty_token_list() {
         let err = parse_price_feed_config("[]").unwrap_err();
-        assert_eq!(err, ConfigError::EmptyTokenList);
+        assert!(matches!(err, ConfigError::EmptyTokenList));
     }
 
     /// #324 — entry with empty symbol → InvalidToken.
@@ -535,9 +819,7 @@ mod tests {
     fn parse_token_configs_missing_stellar_address_returns_invalid_token() {
         let json = r#"[{"symbol":"BTC","stellar_address":"","sources":["binance"]}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
-        assert!(
-            matches!(err, ConfigError::InvalidToken { ref symbol, .. } if symbol == "BTC")
-        );
+        assert!(matches!(err, ConfigError::InvalidToken { ref symbol, .. } if symbol == "BTC"));
     }
 
     #[test]
@@ -555,8 +837,22 @@ mod tests {
     }
 
     #[test]
+    fn reject_empty_pyth_feed_id() {
+        let json = r#"[{"symbol":"TWBTC","stellar_address":"CADDR","sources":["pyth"],"pyth_feed_id":""}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }));
+    }
+
+    #[test]
     fn reject_missing_fixed_price() {
         let json = r#"[{"symbol":"TUSDC","stellar_address":"CADDR","sources":["fixed"]}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidToken { .. }));
+    }
+
+    #[test]
+    fn reject_empty_fixed_price() {
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CADDR","sources":["fixed"],"fixed_price":""}]"#;
         let err = parse_price_feed_config(json).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidToken { .. }));
     }
@@ -576,6 +872,39 @@ mod tests {
     }
 
     #[test]
+    fn reject_min_sources_exceeds_sources_length() {
+        let json = r#"[
+            {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":2}
+        ]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidToken { ref symbol, ref reason, .. }
+                if symbol == "BTC" && reason.contains("min_sources")
+        ));
+    }
+
+    #[test]
+    fn accept_min_sources_equal_to_sources_length() {
+        let json = r#"[
+            {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1}
+        ]"#;
+        let cfg = parse_price_feed_config(json).unwrap();
+        assert_eq!(cfg.tokens.len(), 1);
+        assert_eq!(cfg.tokens[0].min_sources, 1);
+    }
+
+    #[test]
+    fn accept_min_sources_less_than_sources_length() {
+        let json = r#"[
+            {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance","coinbase"],"binance_symbol":"BTCUSDT","coinbase_symbol":"BTC","min_sources":1}
+        ]"#;
+        let cfg = parse_price_feed_config(json).unwrap();
+        assert_eq!(cfg.tokens.len(), 1);
+        assert_eq!(cfg.tokens[0].min_sources, 1);
+    }
+
+    #[test]
     fn parse_current_testnet_shape() {
         let json = r#"[
             {"symbol":"TUSDC","display_symbol":"USDC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["fixed"],"fixed_price":"1000000000000000000000000000000","min_sources":1},
@@ -588,7 +917,7 @@ mod tests {
 
     #[test]
     fn load_price_feed_config_uses_env_when_set() {
-        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":["binance"],"binance_symbol":"BTCUSDT"}]"#;
+        let json = r#"[{"symbol":"BTC","stellar_address":"CADDR","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1}]"#;
         let cfg = load_price_feed_config(Some(json)).unwrap();
         assert_eq!(cfg.tokens.len(), 1);
         assert_eq!(cfg.tokens[0].symbol, "BTC");
@@ -668,7 +997,7 @@ mod tests {
         env.remove("KEEPER_PRIVATE_KEY");
 
         let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
-        assert_eq!(err, EnvError::MissingVar("KEEPER_PRIVATE_KEY"));
+        assert_eq!(err.0[0], EnvError::MissingVar("KEEPER_PRIVATE_KEY"));
         assert!(err.to_string().contains("KEEPER_PRIVATE_KEY"));
     }
 
@@ -746,7 +1075,7 @@ mod tests {
         let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
 
         assert!(matches!(
-            err,
+            &err.0[0],
             EnvError::InvalidVar {
                 var: "KEEPER_ACCOUNT_ID",
                 ..
@@ -765,7 +1094,7 @@ mod tests {
         let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
 
         assert!(matches!(
-            err,
+            &err.0[0],
             EnvError::InvalidVar {
                 var: "KEEPER_ACCOUNT_ID",
                 ..
@@ -785,7 +1114,7 @@ mod tests {
         let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
 
         assert!(matches!(
-            err,
+            &err.0[0],
             EnvError::InvalidVar {
                 var: "KEEPER_SECRET_KEY",
                 ..
@@ -822,7 +1151,7 @@ mod tests {
 
         let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
 
-        assert_eq!(err, EnvError::MissingVar("STELLAR_RPC_URL"));
+        assert_eq!(err.0[0], EnvError::MissingVar("STELLAR_RPC_URL"));
     }
 
     #[test]
@@ -865,7 +1194,75 @@ mod tests {
             }
         }
 
-        assert_eq!(err, EnvError::MissingVar("KEEPER_PRIVATE_KEY"));
+        assert!(err
+            .0
+            .iter()
+            .any(|e| matches!(e, EnvError::MissingVar("KEEPER_PRIVATE_KEY"))));
+    }
 
+    #[test]
+    fn config_from_lookup_rejects_invalid_stellar_network() {
+        let mut env = valid_env();
+        env.insert("STELLAR_NETWORK", "staging".to_string());
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        match &err.0[0] {
+            EnvError::InvalidVar { var, reason } => {
+                assert_eq!(*var, "STELLAR_NETWORK");
+                assert!(
+                    reason.contains("unknown network"),
+                    "error should mention unknown network, got: {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("staging"),
+                    "error should mention the invalid value 'staging'"
+                );
+            }
+            other => panic!("expected InvalidVar error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn config_from_lookup_reports_multiple_missing_vars() {
+        let mut env = valid_env();
+        env.remove("ROLE_STORE");
+        env.remove("DATA_STORE");
+        env.remove("ORDER_HANDLER");
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        assert!(
+            err.0.len() >= 3,
+            "expected at least 3 errors, got {}",
+            err.0.len()
+        );
+        let vars: Vec<&str> = err
+            .0
+            .iter()
+            .filter_map(|e| match e {
+                EnvError::MissingVar(var) => Some(*var),
+                _ => None,
+            })
+            .collect();
+        assert!(vars.contains(&"ROLE_STORE"), "missing ROLE_STORE");
+        assert!(vars.contains(&"DATA_STORE"), "missing DATA_STORE");
+        assert!(vars.contains(&"ORDER_HANDLER"), "missing ORDER_HANDLER");
+    }
+
+    #[test]
+    fn config_from_lookup_reports_multiple_invalid_vars() {
+        let mut env = valid_env();
+        env.insert("KEEPER_PRIVATE_KEY", "not-hex".to_string());
+        env.insert("KEEPER_ACCOUNT_ID", "not-a-strkey".to_string());
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        assert!(
+            err.0.len() >= 2,
+            "expected at least 2 errors, got {}",
+            err.0.len()
+        );
     }
 }

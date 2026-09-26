@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use crate::stellar_rpc::{get_account_balance_stroops, RpcError};
 
 /// 1 XLM expressed in stroops.
@@ -15,30 +18,57 @@ pub struct KeeperBalanceConfig {
 
 /// Check the keeper balance.  Returns the current balance in stroops.
 ///
-/// Logs a critical warning and optionally returns the balance even when below
-/// threshold so the caller can decide whether to skip submission.
-pub async fn check_keeper_balance(cfg: &KeeperBalanceConfig) -> Result<i64, RpcError> {
+/// Logs `error!` only on the transition into the low-balance state (and
+/// `info!` on recovery). Subsequent checks while the balance remains low
+/// use `debug!` so readiness probes do not flood logs.
+///
+/// The `below_min` flag is scoped to the application instance rather than
+/// a bare process-global, so concurrent callers (e.g. /ready and
+/// /keeper/balance) share well-defined state (#737).
+pub async fn check_keeper_balance(
+    cfg: &KeeperBalanceConfig,
+    below_min: &Arc<AtomicBool>,
+) -> Result<i64, RpcError> {
     let stroops = get_account_balance_stroops(&cfg.horizon_url, &cfg.account_id).await?;
 
     let xlm = stroops as f64 / XLM_IN_STROOPS as f64;
     if xlm < cfg.min_balance_xlm {
-        tracing::error!(
-            balance_xlm = xlm,
-            min_balance_xlm = cfg.min_balance_xlm,
-            account_id = cfg.account_id,
-            "keeper balance below minimum"
-        );
+        let was_below = below_min.swap(true, Ordering::Relaxed);
+        if was_below {
+            tracing::debug!(
+                balance_xlm = xlm,
+                min_balance_xlm = cfg.min_balance_xlm,
+                account_id = cfg.account_id,
+                "keeper balance still below minimum"
+            );
+        } else {
+            tracing::error!(
+                balance_xlm = xlm,
+                min_balance_xlm = cfg.min_balance_xlm,
+                account_id = cfg.account_id,
+                "keeper balance below minimum"
+            );
+        }
         return Err(RpcError::BalanceBelowMinimum {
+            balance_stroops: stroops,
             balance_xlm: xlm,
             min_xlm: cfg.min_balance_xlm,
         });
     }
 
-    tracing::info!(
-        balance_xlm = xlm,
-        min_balance_xlm = cfg.min_balance_xlm,
-        "keeper balance ok"
-    );
+    if below_min.swap(false, Ordering::Relaxed) {
+        tracing::info!(
+            balance_xlm = xlm,
+            min_balance_xlm = cfg.min_balance_xlm,
+            "keeper balance recovered above minimum"
+        );
+    } else {
+        tracing::debug!(
+            balance_xlm = xlm,
+            min_balance_xlm = cfg.min_balance_xlm,
+            "keeper balance ok"
+        );
+    }
 
     Ok(stroops)
 }
@@ -62,40 +92,6 @@ pub fn build_balance_response(cfg: &KeeperBalanceConfig, stroops: i64) -> Balanc
         below_minimum: xlm < cfg.min_balance_xlm,
         min_balance_xlm: cfg.min_balance_xlm,
     }
-}
-
-/// Testnet Friendbot URL base (Issue #120).
-pub const FRIENDBOT_URL: &str = "https://friendbot.stellar.org";
-
-/// Call the Stellar testnet Friendbot to fund `account_id`.
-pub async fn fund_keeper_via_friendbot(account_id: &str) -> Result<(), String> {
-    fund_keeper_at(FRIENDBOT_URL, account_id).await
-}
-
-async fn fund_keeper_at(base_url: &str, account_id: &str) -> Result<(), String> {
-    let url = format!("{base_url}?addr={account_id}");
-    tracing::info!(account_id, "calling Friendbot");
-
-    let response = crate::http::client()
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("Friendbot fetch failed: {e}"))?;
-
-    let status = response.status().as_u16();
-    // 200 = funded; 400 = account already exists (idempotent — treat as success)
-    if status == 200 || status == 400 {
-        tracing::info!(account_id, status, "Friendbot response accepted");
-        return Ok(());
-    }
-
-    let body = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "(unreadable body)".to_string());
-    Err(format!(
-        "Friendbot returned {status} for {account_id}: {body}"
-    ))
 }
 
 #[cfg(test)]
@@ -166,7 +162,8 @@ mod tests {
             min_balance_xlm: 10.0,
         };
 
-        let stroops = check_keeper_balance(&cfg).await.unwrap();
+        let below_min = Arc::new(AtomicBool::new(false));
+        let stroops = check_keeper_balance(&cfg, &below_min).await.unwrap();
         assert_eq!(stroops, 200_000_000); // 20 XLM in stroops
     }
 
@@ -187,7 +184,8 @@ mod tests {
             min_balance_xlm: 10.0,
         };
 
-        let err = check_keeper_balance(&cfg).await.unwrap_err();
+        let below_min = Arc::new(AtomicBool::new(false));
+        let err = check_keeper_balance(&cfg, &below_min).await.unwrap_err();
         assert!(matches!(err, RpcError::BalanceBelowMinimum { .. }));
     }
 
@@ -200,43 +198,8 @@ mod tests {
             min_balance_xlm: 10.0,
         };
 
-        let err = check_keeper_balance(&cfg).await.unwrap_err();
+        let below_min = Arc::new(AtomicBool::new(false));
+        let err = check_keeper_balance(&cfg, &below_min).await.unwrap_err();
         assert!(matches!(err, RpcError::NetworkError(_)));
-    }
-
-    // ── fund_keeper_via_friendbot — HTTP-level tests ─────────────────────────
-
-    /// Verifies that a 400 response from Friendbot (account already funded) is
-    /// treated as success — the operation is idempotent.
-    #[tokio::test]
-    async fn fund_keeper_via_friendbot_already_funded_400_returns_ok() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(400).set_body_string(
-                    r#"{"detail":"createAccountAlreadyExist","status":400,"title":"Transaction Failed"}"#,
-                ),
-            )
-            .mount(&server)
-            .await;
-
-        let result = super::fund_keeper_at(&server.uri(), "GNEWACCOUNT").await;
-        assert!(result.is_ok());
-    }
-
-    /// Verifies that a 200 response from Friendbot (new account funded) returns Ok.
-    #[tokio::test]
-    async fn fund_keeper_via_friendbot_new_account_200_returns_ok() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(r#"{"hash":"abc123","ledger":12345}"#),
-            )
-            .mount(&server)
-            .await;
-
-        let result = super::fund_keeper_at(&server.uri(), "GNEWACCOUNT").await;
-        assert!(result.is_ok());
     }
 }

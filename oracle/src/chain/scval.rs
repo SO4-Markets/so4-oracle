@@ -18,7 +18,7 @@ pub fn encode_signed_price(price: &CachedPrice) -> Result<ScVal, String> {
     let max_parts = i128_to_int128_parts(price.max);
 
     let entries = vec![
-        sc_map_entry("keeper_index", ScVal::U32(0)),
+        sc_map_entry("keeper_index", ScVal::U32(price.keeper_index)),
         sc_map_entry("ledger_seq", ScVal::U32(price.ledger_seq)),
         sc_map_entry("max_price", ScVal::I128(max_parts)),
         sc_map_entry("min_price", ScVal::I128(min_parts)),
@@ -142,12 +142,60 @@ mod tests {
         assert!(matches!(sc_addr, stellar_xdr::ScAddress::Account(_)));
     }
 
+    // #1031 — Contract branch (C... strkey) and unsupported-strkey error branch
+
+    #[test]
+    fn test_strkey_to_sc_address_contract() {
+        // CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY is a valid C... contract strkey
+        let addr = "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY";
+        let sc_addr = strkey_to_sc_address(addr).unwrap();
+        match sc_addr {
+            stellar_xdr::ScAddress::Contract(contract_id) => {
+                // Round-trip: convert the Hash bytes back to a contract strkey
+                let roundtrip = stellar_strkey::contract::ContractId(contract_id.0).to_string();
+                assert_eq!(roundtrip, addr);
+            }
+            other => panic!("expected ScAddress::Contract, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_strkey_to_sc_address_rejects_unsupported_strkey_type() {
+        // Create a muxed strkey (M... type) which is unsupported
+        let pk = stellar_strkey::ed25519::PublicKey::from_string(
+            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+        )
+        .unwrap();
+        let muxed_strkey = stellar_strkey::ed25519::MuxedAccount {
+            ed25519: pk.0,
+            id: 1,
+        }
+        .to_string();
+        let err = strkey_to_sc_address(&muxed_strkey).unwrap_err();
+        assert!(
+            err.contains("unsupported strkey type"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_strkey_to_sc_address_rejects_secret_seed() {
+        // S... secret seed is unsupported
+        let err = strkey_to_sc_address("SCZANGBA5YHTNYVVV2M3SFZJ5B5Z2B6XR57DGZNH5QTW3JJDEYTHKQZV")
+            .unwrap_err();
+        assert!(
+            err.contains("unsupported strkey type"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn test_encode_signed_price_produces_sorted_map() {
         let price = CachedPrice {
             token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
+            keeper_index: 0,
             min: 1_000_000_000_000_000_000_000_000_000_000,
             max: 1_000_000_000_000_000_000_000_000_000_000,
             median: 1_000_000_000_000_000_000_000_000_000_000,
@@ -177,12 +225,112 @@ mod tests {
         }
     }
 
+    // #522 — account_strkey_to_muxed direct coverage, including error branch
+
+    #[test]
+    fn test_account_strkey_to_muxed_valid_account() {
+        let addr = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let muxed = account_strkey_to_muxed(addr).unwrap();
+        match muxed {
+            stellar_xdr::MuxedAccount::Ed25519(stellar_xdr::Uint256(bytes)) => {
+                // Round-trip the key bytes back to a strkey to prove the
+                // MuxedAccount carries the same underlying public key.
+                let roundtrip = stellar_strkey::ed25519::PublicKey(bytes).to_string();
+                assert_eq!(roundtrip, addr);
+            }
+            other => panic!("expected MuxedAccount::Ed25519, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_account_strkey_to_muxed_rejects_contract_strkey() {
+        let contract = "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY";
+        let err = account_strkey_to_muxed(contract).unwrap_err();
+        assert!(
+            err.starts_with("expected G... account strkey"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_account_strkey_to_muxed_rejects_muxed_strkey() {
+        let pk = stellar_strkey::ed25519::PublicKey::from_string(
+            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+        )
+        .unwrap();
+        let muxed_strkey = stellar_strkey::ed25519::MuxedAccount {
+            ed25519: pk.0,
+            id: 1,
+        }
+        .to_string();
+        let err = account_strkey_to_muxed(&muxed_strkey).unwrap_err();
+        assert!(
+            err.starts_with("expected G... account strkey"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_account_strkey_to_muxed_rejects_malformed_strkey() {
+        let err = account_strkey_to_muxed("GAUHMCMUP5FZO5675").unwrap_err();
+        assert!(err.starts_with("invalid strkey"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_encode_signed_price_non_hex_signature() {
+        let price = CachedPrice {
+            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            symbol: "TUSDC".to_string(),
+            display_symbol: "USDC".to_string(),
+            keeper_index: 0,
+            min: 1_000_000_000_000_000_000_000_000_000_000,
+            max: 1_000_000_000_000_000_000_000_000_000_000,
+            median: 1_000_000_000_000_000_000_000_000_000_000,
+            timestamp: 1718400000,
+            ledger_seq: 12345,
+            sources_used: vec!["fixed".to_string()],
+            signature: "not-valid-hex!!!".to_string(),
+        };
+
+        let err = encode_signed_price(&price).unwrap_err();
+        assert!(
+            err.contains("invalid signature hex"),
+            "expected hex decode error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_encode_signed_price_wrong_length_signature() {
+        let price = CachedPrice {
+            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            symbol: "TUSDC".to_string(),
+            display_symbol: "USDC".to_string(),
+            keeper_index: 0,
+            min: 1_000_000_000_000_000_000_000_000_000_000,
+            max: 1_000_000_000_000_000_000_000_000_000_000,
+            median: 1_000_000_000_000_000_000_000_000_000_000,
+            timestamp: 1718400000,
+            ledger_seq: 12345,
+            sources_used: vec!["fixed".to_string()],
+            // valid hex but only 32 bytes (64 hex chars), needs 128 hex chars
+            signature: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+        };
+
+        let err = encode_signed_price(&price).unwrap_err();
+        assert!(
+            err.contains("signature must be 64 bytes"),
+            "expected length error, got: {err}"
+        );
+    }
+
     #[test]
     fn test_encode_prices_vec() {
         let price = CachedPrice {
             token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
+            keeper_index: 0,
             min: 1_000_000_000_000_000_000_000_000_000_000,
             max: 1_000_000_000_000_000_000_000_000_000_000,
             median: 1_000_000_000_000_000_000_000_000_000_000,
@@ -198,6 +346,39 @@ mod tests {
                 assert_eq!(vec.0.len(), 1);
             }
             _ => panic!("expected ScVal::Vec"),
+        }
+    }
+
+    #[test]
+    fn test_encode_signed_price_uses_configured_keeper_index() {
+        let price = CachedPrice {
+            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            symbol: "TUSDC".to_string(),
+            display_symbol: "USDC".to_string(),
+            keeper_index: 7,
+            min: 1_000_000_000_000_000_000_000_000_000_000,
+            max: 1_000_000_000_000_000_000_000_000_000_000,
+            median: 1_000_000_000_000_000_000_000_000_000_000,
+            timestamp: 1718400000,
+            ledger_seq: 12345,
+            sources_used: vec!["fixed".to_string()],
+            signature: "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        };
+
+        let scval = encode_signed_price(&price).unwrap();
+        match scval {
+            ScVal::Map(Some(map)) => {
+                let keeper_index_entry = map
+                    .0
+                    .iter()
+                    .find(|e| match &e.key {
+                        ScVal::Symbol(s) => String::from_utf8_lossy(s.as_ref()) == "keeper_index",
+                        _ => false,
+                    })
+                    .expect("keeper_index entry present");
+                assert_eq!(keeper_index_entry.val, ScVal::U32(7));
+            }
+            _ => panic!("expected ScVal::Map"),
         }
     }
 }

@@ -23,9 +23,10 @@ use shared_config::TokenConfig;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use oracle::config::{Config, Network, PriceFeedConfig, SecretString};
+mod common;
+
+use common::{bad_token, fixed_token, test_state};
 use oracle::price_loop::run_price_cycle;
-use oracle::state::AppState;
 
 const USDC_ADDR: &str = "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES";
 const XLM_ADDR: &str = "CXLM11111111111111111111111111111111111111111111111111111111";
@@ -46,75 +47,6 @@ fn ledger_fail() -> serde_json::Value {
         "id": 1,
         "error": { "code": -32000, "message": "node unavailable" }
     })
-}
-
-fn fixed_token(symbol: &str, address: &str) -> TokenConfig {
-    TokenConfig {
-        symbol: symbol.to_string(),
-        display_symbol: Some(symbol.to_string()),
-        stellar_address: address.to_string(),
-        sources: vec!["fixed".to_string()],
-        fixed_price: Some("1000000000000000000000000000000".to_string()),
-        binance_symbol: None,
-        coinbase_symbol: None,
-        pyth_feed_id: None,
-        min_sources: 1,
-        max_deviation_bps: 100,
-        stale_after_seconds: 60,
-        submit_threshold_bps: 10,
-        min: 0.0,
-        max: 0.0,
-        sources_used: vec![],
-    }
-}
-
-fn bad_token(symbol: &str, address: &str) -> TokenConfig {
-    TokenConfig {
-        symbol: symbol.to_string(),
-        display_symbol: Some(symbol.to_string()),
-        stellar_address: address.to_string(),
-        sources: vec!["unsupported_source".to_string()],
-        fixed_price: None,
-        binance_symbol: None,
-        coinbase_symbol: None,
-        pyth_feed_id: None,
-        min_sources: 1,
-        max_deviation_bps: 100,
-        stale_after_seconds: 60,
-        submit_threshold_bps: 10,
-        min: 0.0,
-        max: 0.0,
-        sources_used: vec![],
-    }
-}
-
-fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
-    let config = Arc::new(Config {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        network: Network::Testnet,
-        network_passphrase: "Test SDF Network ; September 2015".to_string(),
-        stellar_rpc_url: rpc_url.to_string(),
-        horizon_url: "http://localhost:0".to_string(),
-        oracle_contract_id: "CORACLE".to_string(),
-        role_store_contract_id: "CROLE".to_string(),
-        data_store_contract_id: "CDATA".to_string(),
-        order_handler_contract_id: "CORDER".to_string(),
-        deposit_handler_contract_id: "CDEPOSIT".to_string(),
-        withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
-        reader_contract_id: "CREADER".to_string(),
-        keeper_private_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_secret_key: SecretString::new("SSECRET".to_string()),
-        keeper_account_id: "GACCOUNT".to_string(),
-        keeper_index: 0,
-        admin_api_token: None,
-        min_keeper_balance_xlm: 0.0,
-        price_loop_interval: Duration::from_millis(1000),
-        keeper_loop_interval: Duration::from_millis(1000),
-        price_feed: PriceFeedConfig { tokens },
-    });
-    Arc::new(AppState::new(config))
 }
 
 #[tokio::test]
@@ -215,7 +147,7 @@ async fn last_updated_is_recent_after_successful_cycle() {
 }
 
 #[tokio::test]
-async fn last_updated_unchanged_when_second_cycle_all_fail() {
+async fn last_updated_cleared_after_previously_successful_cycle_then_all_fail() {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
@@ -223,19 +155,30 @@ async fn last_updated_unchanged_when_second_cycle_all_fail() {
         .await;
 
     // Cycle 1: USDC succeeds → last_updated set.
-    let state = test_state(&mock.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
-    run_price_cycle(Arc::clone(&state)).await;
+    let state_success = test_state(&mock.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
+    run_price_cycle(Arc::clone(&state_success)).await;
 
-    let after_first = state.price_cache.read().await.last_updated;
-    assert!(after_first.is_some());
+    let after_first = state_success.price_cache.read().await.last_updated;
+    assert!(
+        after_first.is_some(),
+        "first successful cycle must set last_updated"
+    );
 
-    // Simulate a second cycle: forcibly change the token list isn't possible at runtime,
-    // but we can verify the timestamp was set correctly after the first good cycle.
-    // The conditional guard `if tokens_ok > 0` protects it.
-    let after_second = state.price_cache.read().await.last_updated;
-    assert_eq!(
-        after_first, after_second,
-        "last_updated must not change between reads when no new cycle ran"
+    // Cycle 2: all tokens fail. Carry forward the previous timestamp into a fresh
+    // state to verify that a total-failure cycle clears it — a stale last_updated
+    // paired with an emptied price cache would misreport freshness (#530).
+    let state_fail = test_state(&mock.uri(), vec![bad_token("FAILONLY", FAIL1_ADDR)]);
+    {
+        let mut cache = state_fail.price_cache.write().await;
+        cache.last_updated = after_first;
+    }
+
+    run_price_cycle(Arc::clone(&state_fail)).await;
+
+    let after_second = state_fail.price_cache.read().await.last_updated;
+    assert!(
+        after_second.is_none(),
+        "last_updated must be cleared after a cycle where all tokens fail, even if it was previously set"
     );
 }
 
@@ -289,18 +232,29 @@ async fn two_consecutive_good_cycles_both_update_last_updated() {
     let state = test_state(&mock.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
 
     run_price_cycle(Arc::clone(&state)).await;
-    let first = state.price_cache.read().await.last_updated;
+    let first = state
+        .price_cache
+        .read()
+        .await
+        .last_updated
+        .expect("first timestamp must be set");
 
-    // Small yield so SystemTime::now() can advance.
+    // We cannot mock SystemTime::now() without changing AppState to take an injected Clock trait.
+    // Instead of refactoring the whole app to support clock injection just for this assertion,
+    // we do a short sleep to ensure the wall clock advances between cycles.
     tokio::time::sleep(Duration::from_millis(5)).await;
 
     run_price_cycle(Arc::clone(&state)).await;
-    let second = state.price_cache.read().await.last_updated;
+    let second = state
+        .price_cache
+        .read()
+        .await
+        .last_updated
+        .expect("second timestamp must be set");
 
-    assert!(first.is_some() && second.is_some());
     assert!(
-        second >= first,
-        "last_updated from the second cycle must be >= the first"
+        second > first,
+        "last_updated from the second cycle must be strictly greater than the first"
     );
 }
 

@@ -8,7 +8,6 @@ pub enum SigningError {
     InvalidKeyLength,
 }
 
-
 impl std::fmt::Display for SigningError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -22,10 +21,17 @@ impl std::fmt::Display for SigningError {
     }
 }
 
-/// Construct the price message byte payload.
-/// Build the raw byte payload that is signed for a price update.
+impl std::error::Error for SigningError {}
+
+/// Layout: `network_passphrase || ledger_seq || token_strkey || min || max || timestamp`
 ///
-/// Layout: `network_passphrase ‖ ledger_seq (BE u32) ‖ token_strkey ‖ min (BE i128) ‖ max (BE i128) ‖ timestamp (BE u64)`
+/// Data types:
+/// - `network_passphrase`: UTF-8 bytes
+/// - `ledger_seq`: u32 Big-Endian
+/// - `token_strkey`: UTF-8 bytes
+/// - `min`: i128 Big-Endian
+/// - `max`: i128 Big-Endian
+/// - `timestamp`: u64 Big-Endian
 pub fn build_price_message(
     network_passphrase: &str,
     ledger_seq: u32,
@@ -80,8 +86,6 @@ pub fn sign_price(
     Ok(signature)
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,8 +116,14 @@ mod tests {
         )
         .expect("signing failed");
 
-        let expected_payload =
-            build_price_message(network_passphrase, ledger_seq, token_strkey, min, max, timestamp);
+        let expected_payload = build_price_message(
+            network_passphrase,
+            ledger_seq,
+            token_strkey,
+            min,
+            max,
+            timestamp,
+        );
 
         assert!(
             public_key.verify(&expected_payload, &signature).is_ok(),
@@ -196,10 +206,16 @@ mod tests {
         assert_eq!(&payload[offset..offset + 8], b"CBTCADDR");
 
         let offset = offset + 8;
-        assert_eq!(&payload[offset..offset + 16], &45000_0000000i128.to_be_bytes());
+        assert_eq!(
+            &payload[offset..offset + 16],
+            &45000_0000000i128.to_be_bytes()
+        );
 
         let offset = offset + 16;
-        assert_eq!(&payload[offset..offset + 16], &46000_0000000i128.to_be_bytes());
+        assert_eq!(
+            &payload[offset..offset + 16],
+            &46000_0000000i128.to_be_bytes()
+        );
 
         let offset = offset + 16;
         assert_eq!(&payload[offset..offset + 8], &1690000000u64.to_be_bytes());

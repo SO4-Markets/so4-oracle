@@ -2,8 +2,39 @@
 members = ["oracle", "shared/config"]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/SO4-Markets/so4-oracle"
+homepage = "https://so4.market"
+description = "Production Axum service for the SO4.market Soroban oracle and keeper"
+authors = ["SO4 Markets"]
+
 [workspace.lints.rust]
+unsafe_code = "forbid"
+# Allow during the Rust 2024 migration while dependencies and generated code settle on one lifetime spelling.
 mismatched_lifetime_syntaxes = "allow"
 
+# Aligned with railway.json healthcheck: setting healthcheckPath to /ready
+# ensures the probe reflects real liveness (/ready inspects state.cycle_status).
+# Setting panic = "abort" ensures any unexpected panic crashes the process,
+# allowing the ON_FAILURE restart policy to detect and restart it.
+#
+# NOTE: With panic = "abort", the panic-recovery code in main.rs's
+# tokio::select! (the price_loop/keeper_loop JoinHandle match arms) is
+# unreachable in release builds — a panic anywhere aborts the entire process
+# before JoinHandle::Err can be observed. That code only executes under
+# panic = "unwind" (debug builds, cargo test). Cross-reference: main.rs.
 [profile.release]
 overflow-checks = true
+panic = "abort"
+
+# Force all transitive stellar-strkey versions to converge on 0.0.18 (#1007).
+# stellar-xdr v27 pins stellar-strkey 0.0.13 transitively; the direct
+# dependency in oracle/Cargo.toml is 0.0.18. Pre-1.0 semver cannot unify
+# these, so three copies were being compiled. This patch collapses them.
+[patch.crates-io]
+stellar-strkey = { version = "0.0.18" }
+

@@ -22,15 +22,14 @@
 /// - `finish_cycle` (and thus the log) fires on ALL exit paths including abort
 /// - `cycle_status.last_price_cycle_at` is set before the log event fires
 use std::sync::Arc;
-use std::time::Duration;
 
-use shared_config::TokenConfig;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use oracle::config::{Config, Network, PriceFeedConfig, SecretString};
+mod common;
+
+use common::{bad_token, fixed_token, test_state};
 use oracle::price_loop::run_price_cycle;
-use oracle::state::AppState;
 
 const USDC_ADDR: &str = "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES";
 const XLM_ADDR: &str = "CXLM11111111111111111111111111111111111111111111111111111111";
@@ -53,75 +52,6 @@ fn ledger_fail() -> serde_json::Value {
         "id": 1,
         "error": { "code": -32000, "message": "node unavailable" }
     })
-}
-
-fn fixed_token(symbol: &str, address: &str) -> TokenConfig {
-    TokenConfig {
-        symbol: symbol.to_string(),
-        display_symbol: Some(symbol.to_string()),
-        stellar_address: address.to_string(),
-        sources: vec!["fixed".to_string()],
-        fixed_price: Some("1000000000000000000000000000000".to_string()),
-        binance_symbol: None,
-        coinbase_symbol: None,
-        pyth_feed_id: None,
-        min_sources: 1,
-        max_deviation_bps: 100,
-        stale_after_seconds: 60,
-        submit_threshold_bps: 10,
-        min: 0.0,
-        max: 0.0,
-        sources_used: vec![],
-    }
-}
-
-fn bad_token(symbol: &str, address: &str) -> TokenConfig {
-    TokenConfig {
-        symbol: symbol.to_string(),
-        display_symbol: Some(symbol.to_string()),
-        stellar_address: address.to_string(),
-        sources: vec!["unsupported_source".to_string()],
-        fixed_price: None,
-        binance_symbol: None,
-        coinbase_symbol: None,
-        pyth_feed_id: None,
-        min_sources: 1,
-        max_deviation_bps: 100,
-        stale_after_seconds: 60,
-        submit_threshold_bps: 10,
-        min: 0.0,
-        max: 0.0,
-        sources_used: vec![],
-    }
-}
-
-fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
-    let config = Arc::new(Config {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        network: Network::Testnet,
-        network_passphrase: "Test SDF Network ; September 2015".to_string(),
-        stellar_rpc_url: rpc_url.to_string(),
-        horizon_url: "http://localhost:0".to_string(),
-        oracle_contract_id: "CORACLE".to_string(),
-        role_store_contract_id: "CROLE".to_string(),
-        data_store_contract_id: "CDATA".to_string(),
-        order_handler_contract_id: "CORDER".to_string(),
-        deposit_handler_contract_id: "CDEPOSIT".to_string(),
-        withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
-        reader_contract_id: "CREADER".to_string(),
-        keeper_private_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_secret_key: SecretString::new("SSECRET".to_string()),
-        keeper_account_id: "GACCOUNT".to_string(),
-        keeper_index: 0,
-        admin_api_token: None,
-        min_keeper_balance_xlm: 0.0,
-        price_loop_interval: Duration::from_millis(1000),
-        keeper_loop_interval: Duration::from_millis(1000),
-        price_feed: PriceFeedConfig { tokens },
-    });
-    Arc::new(AppState::new(config))
 }
 
 #[tokio::test]
@@ -493,34 +423,41 @@ async fn accumulated_cycle_count_matches_invocations() {
 
 #[tokio::test]
 async fn mixed_ledger_fail_and_ok_both_logged_in_metrics() {
-    // Cycle 1: ledger fails — finish_cycle still runs, logs latency_ms.
-    let mock_fail = MockServer::start().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
-        .mount(&mock_fail)
-        .await;
-    let state = test_state(&mock_fail.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
-    run_price_cycle(Arc::clone(&state)).await;
+    // One mock server, one AppState: swap the ledger response between the two
+    // cycles (via scoped mocks) so a genuine fail-then-ok sequence runs against
+    // the *same* state and `price_cycle_count` is asserted to accumulate to 2 —
+    // rather than checking two independent states that each trivially reach 1
+    // (#787).
+    let mock = MockServer::start().await;
+    let state = test_state(&mock.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
 
+    // Cycle 1: ledger fails — finish_cycle still runs and logs latency_ms.
+    {
+        let _guard = Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
+            .mount_as_scoped(&mock)
+            .await;
+        run_price_cycle(Arc::clone(&state)).await;
+    }
     assert_eq!(
         state.metrics.to_response().price_cycle_count,
         1,
         "failed ledger cycle must also log latency_ms"
     );
 
-    // Cycle 2: ledger succeeds — a second log event.
-    let mock_ok = MockServer::start().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
-        .mount(&mock_ok)
-        .await;
-    let state2 = test_state(&mock_ok.uri(), vec![fixed_token("USDC", USDC_ADDR)]);
-    run_price_cycle(Arc::clone(&state2)).await;
+    // Cycle 2: ledger succeeds — a second cycle_complete event on the same state.
+    {
+        let _guard = Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
+            .mount_as_scoped(&mock)
+            .await;
+        run_price_cycle(Arc::clone(&state)).await;
+    }
 
     assert_eq!(
-        state2.metrics.to_response().price_cycle_count,
-        1,
-        "successful cycle also logs latency_ms"
+        state.metrics.to_response().price_cycle_count,
+        2,
+        "price_cycle_count must accumulate to 2 across a fail-then-ok sequence on one state"
     );
 }
 

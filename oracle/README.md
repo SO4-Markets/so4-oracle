@@ -28,6 +28,7 @@ Optional defaults:
 - `ADMIN_API_TOKEN` — when unset, admin-only endpoints (e.g.
   `/oracle/failed-submissions`) respond `503`; when set, they require
   `Authorization: Bearer <token>`
+- `PYTH_API_KEY` — optional API key for Pyth price feeds
 
 - `BIND_ADDR=0.0.0.0:8080`
 - `STELLAR_NETWORK=testnet`
@@ -37,6 +38,8 @@ Optional defaults:
 - `KEEPER_LOOP_MS=1500`
 - `KEEPER_INDEX=0`
 - `MIN_KEEPER_BALANCE_XLM=10`
+- `SET_PRICES_TX_FEE=1000000` — inclusion fee (stroops) for set_prices transactions
+- `KEEPER_TX_FEE=2000000` — inclusion fee (stroops) for keeper execution transactions
 - `PRICE_FEED_CONFIG`, otherwise `config/tokens.json` is embedded
 
 For mainnet, `STELLAR_RPC_URL` and `ORACLE_CONTRACT_ID` must be explicit.
