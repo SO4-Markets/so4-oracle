@@ -55,15 +55,16 @@ async fn main() {
     let server_future =
         axum::serve(listener, app).with_graceful_shutdown(shutdown_signal(shutdown_token.clone()));
 
-    // How long to wait for the background loops to finish their in-progress
-    // cycle once shutdown has been signalled. A keeper cycle can legitimately
-    // run for KEEPER_CYCLE_TIMEOUT_SECS (50s) and a price cycle longer, so
-    // without a bound `tokio::join!` below can block well past the
-    // orchestrator's SIGTERM grace period (Docker 10s, Kubernetes 30s) — the
-    // process then gets SIGKILLed mid-loop, which is exactly what the bounded
-    // server shutdown above exists to prevent (#552, #807).
+    // Split the DEFAULT_SHUTDOWN_TIMEOUT_SECS budget between HTTP drain and
+    // background-loop drain so the *total* worst-case shutdown stays within
+    // the orchestrator's grace period (Docker 10s, Kubernetes 30s). The two
+    // timeouts are sequential: the server drains first, then the loops drain
+    // afterward. Without splitting, a slow HTTP drain (15s) + a slow keeper
+    // cycle (15s) = 30s total, which still fits. If each stage took the full
+    // DEFAULT_SHUTDOWN_TIMEOUT_SECS (30s), the process could run 60s and get
+    // SIGKILLed mid-loop, defeating the bounded shutdown (#552, #807, #870).
     let drain_timeout =
-        std::time::Duration::from_secs(oracle::config::DEFAULT_SHUTDOWN_TIMEOUT_SECS);
+        std::time::Duration::from_secs(oracle::config::DEFAULT_SHUTDOWN_TIMEOUT_SECS / 2);
 
     // If either background task panics or returns unexpectedly while the
     // server is still running, trigger a full shutdown so an external
