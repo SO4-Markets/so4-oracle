@@ -72,9 +72,14 @@ impl std::error::Error for PythPriceError {}
 impl crate::retry::Retryable for PythPriceError {
     fn is_retryable(&self) -> bool {
         match self {
-            // Network errors and 5xx HTTP errors are transient
+            // Network errors, 5xx HTTP errors, and 429 rate limits are
+            // transient. Hermes answers an over-rate-limited client with 429,
+            // which is < 500 and would otherwise be classified as a permanent
+            // failure — dropping the Pyth source for the rest of the cycle
+            // instead of backing off (#708). Matches RpcError's
+            // classification in stellar_rpc.rs.
             Self::NetworkError(_) => true,
-            Self::HttpError { status, .. } => *status >= 500,
+            Self::HttpError { status, .. } => *status >= 500 || *status == 429,
             // Stale prices might become fresh on retry
             Self::StalePrice { .. } => true,
             // Parse/JSON/config/validation errors are permanent failures
@@ -316,6 +321,46 @@ pub async fn fetch_pyth_prices(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::retry::Retryable;
+
+    // #708 — a 429 from Hermes means "slow down", not "give up". It must be
+    // retried with backoff instead of being classified as a permanent failure.
+    #[test]
+    fn http_error_429_is_retryable() {
+        let err = PythPriceError::HttpError {
+            status: 429,
+            body: "too many requests".to_string(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn http_error_5xx_is_retryable_and_4xx_is_not() {
+        for status in [500, 502, 503] {
+            let err = PythPriceError::HttpError {
+                status,
+                body: String::new(),
+            };
+            assert!(err.is_retryable(), "status {status} should be retryable");
+        }
+        for status in [400, 401, 404] {
+            let err = PythPriceError::HttpError {
+                status,
+                body: String::new(),
+            };
+            assert!(
+                !err.is_retryable(),
+                "status {status} should not be retryable"
+            );
+        }
+    }
+
+    // A price parse error is permanent: a malformed `conf` will not become
+    // numeric on a retry, so the source must not be retried.
+    #[test]
+    fn price_parse_error_is_not_retryable() {
+        assert!(!PythPriceError::PriceParseError("invalid price".to_string()).is_retryable());
+    }
 
     #[test]
     fn normalize_pyth_price_positive_exponent() {
@@ -411,6 +456,25 @@ mod tests {
         };
         let err = validate_pyth_price(&data, 1_010, 60, 50).unwrap_err();
         assert!(matches!(err, PythPriceError::PriceParseError(_)));
+    }
+
+    #[test]
+    fn validate_pyth_price_rejects_malformed_conf() {
+        // #712 — every other test feeds `conf` a numeric string, leaving the
+        // parse-failure branch of the `if let Some(conf)` block unexercised. A
+        // non-numeric `conf` (malformed Hermes response) must surface as
+        // PriceParseError rather than being silently ignored or panicking.
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: Some("not-a-number".to_string()),
+            expo: -8,
+            publish_time: Some(1_000),
+        };
+        let err = validate_pyth_price(&data, 1_010, 60, 50).unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::PriceParseError(_)),
+            "expected PriceParseError for malformed conf, got {err:?}"
+        );
     }
 
     // #603 — a feed that omits `conf` skips the confidence check; it must not

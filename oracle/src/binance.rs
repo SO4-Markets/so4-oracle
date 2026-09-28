@@ -36,9 +36,15 @@ impl std::error::Error for BinancePriceError {}
 impl crate::retry::Retryable for BinancePriceError {
     fn is_retryable(&self) -> bool {
         match self {
-            // Network errors and 5xx HTTP errors are transient
+            // Network errors, 5xx HTTP errors, and 429 rate limits are
+            // transient. Binance answers an over-rate-limited client with
+            // 429, which is < 500 and would otherwise be treated as a
+            // permanent failure — abandoning the source for the rest of the
+            // cycle instead of backing off, the opposite of the right
+            // response (#708). Matches RpcError's classification in
+            // stellar_rpc.rs.
             Self::NetworkError(_) => true,
-            Self::HttpError { status, .. } => *status >= 500,
+            Self::HttpError { status, .. } => *status >= 500 || *status == 429,
             // Parse/JSON errors are permanent failures
             Self::JsonError(_) | Self::PriceParseError(_) => false,
         }
@@ -235,6 +241,39 @@ mod tests {
         parse_ticker_http_result, parse_ticker_response_body, BinancePriceError,
         BINANCE_TICKER_PRICE_URL, FLOAT_PRECISION,
     };
+    use crate::retry::Retryable;
+
+    // #708 — a 429 from Binance means "slow down", not "give up". It must be
+    // retried with backoff instead of being classified as a permanent failure.
+    #[test]
+    fn http_error_429_is_retryable() {
+        let err = BinancePriceError::HttpError {
+            status: 429,
+            body: "too many requests".to_string(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn http_error_5xx_is_retryable_and_4xx_is_not() {
+        for status in [500, 502, 503] {
+            let err = BinancePriceError::HttpError {
+                status,
+                body: String::new(),
+            };
+            assert!(err.is_retryable(), "status {status} should be retryable");
+        }
+        for status in [400, 401, 404, 451] {
+            let err = BinancePriceError::HttpError {
+                status,
+                body: String::new(),
+            };
+            assert!(
+                !err.is_retryable(),
+                "status {status} should not be retryable"
+            );
+        }
+    }
 
     #[test]
     fn parse_price_integer() {

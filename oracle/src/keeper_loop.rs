@@ -647,6 +647,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             Err(ref error) if error.may_still_confirm() => {
                 warn!(key = %deposit_key, %error, "deposit_poll_timeout_key_remains_in_flight");
                 summary.errors += 1;
+                let tx_hash = poll_timeout_hash(error);
                 record_error(
                     &state,
                     &format!("execute_deposit:{}", deposit_key),
@@ -658,7 +659,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     &state,
                     "execute_deposit",
                     deposit_key,
-                    None,
+                    tx_hash,
                     false,
                     Some(error.to_string()),
                 )
@@ -732,6 +733,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             Err(ref error) if error.may_still_confirm() => {
                 warn!(key = %withdrawal_key, %error, "withdrawal_poll_timeout_key_remains_in_flight");
                 summary.errors += 1;
+                let tx_hash = poll_timeout_hash(error);
                 record_error(
                     &state,
                     &format!("execute_withdrawal:{}", withdrawal_key),
@@ -743,7 +745,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     &state,
                     "execute_withdrawal",
                     withdrawal_key,
-                    None,
+                    tx_hash,
                     false,
                     Some(error.to_string()),
                 )
@@ -851,6 +853,28 @@ impl From<String> for HandlerError {
 impl From<HandlerError> for String {
     fn from(error: HandlerError) -> Self {
         error.message
+    }
+}
+
+/// Recover the transaction hash from a poll-timeout error message (#721).
+///
+/// `SubmitError::PollTimeout`'s `Display` impl embeds the hash as
+/// `(hash: {hash})` inside a longer sentence, and `execute_handler` prefixes
+/// the whole message with `{method} submit failed: ` before downcasting it to
+/// the `String` that reaches the `is_poll_timeout` guard. Rather than
+/// reconstructing that exact wording, scan for the marker: the hash is always
+/// the first `)`-delimited token after it, whatever prefixes are attached.
+///
+/// Returns `None` for any other error shape, so callers can pass the result
+/// through unconditionally.
+fn poll_timeout_hash(error: &str) -> Option<String> {
+    const MARKER: &str = "(hash: ";
+    let rest = error.split_once(MARKER)?.1;
+    let hash = rest.split_once(')')?.0.trim();
+    if hash.is_empty() {
+        None
+    } else {
+        Some(hash.to_string())
     }
 }
 
@@ -1387,7 +1411,7 @@ async fn record_error(
     state: &Arc<AppState>,
     operation: &str,
     error: &str,
-    _tx_hash: Option<String>,
+    tx_hash: Option<String>,
 ) {
     state.failures.lock().await.push(FailedSubmission {
         at: SystemTime::now(),
@@ -1397,7 +1421,12 @@ async fn record_error(
         symbol: String::new(),
         min: 0,
         max: 0,
-        tx_hash: None,
+        // Carry the hash whenever the failure happened *after* submission
+        // (a poll timeout), so `/oracle/failed-submissions` hands an operator
+        // something to look up on a block explorer for exactly the ambiguous
+        // outcomes that need manual verification (#721). `None` stays
+        // correct for pre-submission failures, which have no hash yet.
+        tx_hash,
         error: error.to_string(),
         timestamp: crate::current_timestamp_secs(),
         // Unlike price_loop.rs, this loop never fetches a Soroban ledger
@@ -1558,6 +1587,59 @@ mod tests {
         assert_eq!(parse_u32_from_result(r#"{"u32": 42}"#).unwrap(), 42);
     }
 
+    // ── #721: poll-timeout hash recovery ────────────────────────────────────
+
+    #[test]
+    fn poll_timeout_hash_extracts_hash_from_submit_error_message() {
+        // Exactly what `SubmitError::PollTimeout`'s Display impl renders.
+        let hash = "a".repeat(64);
+        let error = format!(
+            "transaction not confirmed after 10 attempts (hash: {hash}); check status on next cycle"
+        );
+        assert_eq!(poll_timeout_hash(&error), Some(hash));
+    }
+
+    #[test]
+    fn poll_timeout_hash_survives_execute_handler_prefix() {
+        // `execute_handler` re-wraps the SubmitError message as a String, so
+        // the marker never sits at the start of the string the keeper sees.
+        let hash = "b".repeat(64);
+        let error = format!(
+            "execute_order submit failed: transaction not confirmed after 10 attempts \
+             (hash: {hash}); check status on next cycle"
+        );
+        assert!(is_poll_timeout(&error));
+        assert_eq!(poll_timeout_hash(&error), Some(hash));
+    }
+
+    #[test]
+    fn poll_timeout_hash_is_none_for_non_poll_timeout_errors() {
+        for error in [
+            "execute_order submit failed: transaction rejected: txFAILED",
+            "keeper cycle exceeded 30s budget",
+            "transaction failed on-chain; diagnostic events: []",
+            "",
+        ] {
+            assert_eq!(
+                poll_timeout_hash(error),
+                None,
+                "unexpected hash for error {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn poll_timeout_hash_ignores_empty_hash() {
+        assert_eq!(
+            poll_timeout_hash("not confirmed after 10 attempts (hash: )"),
+            None
+        );
+        assert_eq!(
+            poll_timeout_hash("not confirmed after 10 attempts (hash:"),
+            None
+        );
+    }
+
     // ── #512: run_keeper_loop shutdown coverage ───────────────────────────────
 
     use crate::config::{Config, Network, PriceFeedConfig, SecretString};
@@ -1597,6 +1679,51 @@ mod tests {
             price_feed: PriceFeedConfig { tokens: vec![] },
         };
         Arc::new(AppState::new(Arc::new(config)))
+    }
+
+    #[tokio::test]
+    async fn record_error_stores_post_submission_tx_hash() {
+        // #721 — a poll timeout means the transaction was submitted, so the
+        // hash must survive into FailedSubmission for the admin endpoint.
+        let state = shutdown_test_state();
+        let hash = "c".repeat(64);
+        let error = format!(
+            "execute_deposit:abcd submit failed: transaction not confirmed after 10 attempts \
+             (hash: {hash}); check status on next cycle"
+        );
+        assert!(is_poll_timeout(&error));
+
+        record_error(
+            &state,
+            "execute_deposit:abcd",
+            &error,
+            poll_timeout_hash(&error),
+        )
+        .await;
+
+        let failures = state.failures.lock().await;
+        let recorded: Vec<_> = failures.iter().collect();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].tx_hash.as_deref(), Some(hash.as_str()));
+        assert_eq!(recorded[0].operation, "execute_deposit:abcd");
+    }
+
+    #[tokio::test]
+    async fn record_error_leaves_tx_hash_none_for_pre_submission_failures() {
+        let state = shutdown_test_state();
+
+        record_error(
+            &state,
+            "keeper_cycle",
+            "keeper cycle exceeded 30s budget",
+            None,
+        )
+        .await;
+
+        let failures = state.failures.lock().await;
+        let recorded: Vec<_> = failures.iter().collect();
+        assert_eq!(recorded.len(), 1);
+        assert!(recorded[0].tx_hash.is_none());
     }
 
     #[tokio::test]
