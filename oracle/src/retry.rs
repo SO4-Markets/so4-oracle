@@ -12,12 +12,16 @@ pub fn jitter(delay_ms: u64) -> u64 {
     ((delay_ms as f64) * factor) as u64
 }
 
+/// Maximum backoff delay cap in milliseconds (30 seconds).
+/// Used across all retry_with_backoff call sites to ensure a consistent cap.
+pub const MAX_BACKOFF_DELAY_MS: u64 = 30_000;
+
 /// Retry an async fallible closure with exponential backoff (resolves #356, #585).
 ///
 /// Doubles the delay after every failure, starting at `base_delay_ms`, and
 /// caps the delay at `max_delay_ms` so that runaway growth is impossible
 /// regardless of how many attempts the caller configures.  Mirrors the
-/// explicit `(backoff_ms * 2).min(30_000)` cap already present in
+/// explicit `(backoff_ms * 2).min(MAX_BACKOFF_DELAY_MS)` cap already present in
 /// `poll_until_confirmed` in `submit.rs`. Each sleep is jittered (#583) so
 /// concurrent callers don't retry in lockstep.
 ///
@@ -136,7 +140,7 @@ mod tests {
                 },
                 3,
                 0,
-                30_000,
+                MAX_BACKOFF_DELAY_MS,
             )
             .await
         });
@@ -161,7 +165,7 @@ mod tests {
                 },
                 3,
                 0,
-                30_000,
+                MAX_BACKOFF_DELAY_MS,
             )
             .await
         });
@@ -174,7 +178,13 @@ mod tests {
     fn panics_when_max_attempts_is_zero() {
         let result = std::panic::catch_unwind(|| {
             block_on(async {
-                retry_with_backoff(|| async { Ok::<u32, &'static str>(1) }, 0, 100, 30_000).await
+                retry_with_backoff(
+                    || async { Ok::<u32, &'static str>(1) },
+                    0,
+                    100,
+                    MAX_BACKOFF_DELAY_MS,
+                )
+                .await
             })
         });
         assert!(result.is_err());
@@ -196,7 +206,7 @@ mod tests {
                 },
                 3,
                 0,
-                30_000,
+                MAX_BACKOFF_DELAY_MS,
             )
             .await
         });

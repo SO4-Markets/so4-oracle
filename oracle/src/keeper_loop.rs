@@ -335,10 +335,15 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     // price — flowing.
     if !prices_stale {
         let now = crate::current_timestamp_secs();
-        let is_heartbeat = is_heartbeat_due(&state, now);
-        let submit_prices = filter_prices_by_threshold(&state, &prices, now, is_heartbeat);
+        let is_heartbeat = is_heartbeat_due(&state, now).await;
+        let submit_prices =
+            filter_prices_by_threshold(&state, &fresh_prices, now, is_heartbeat).await;
         if !submit_prices.is_empty() || is_heartbeat {
-            let prices_to_submit = if is_heartbeat { prices.clone() } else { submit_prices };
+            let prices_to_submit = if is_heartbeat {
+                fresh_prices.clone()
+            } else {
+                submit_prices
+            };
             let tx_hash = set_prices_on_chain(&state, &prices_to_submit).await?;
             info!(hash = %tx_hash, "set_prices_confirmed");
             update_submitted_prices(&state, &prices_to_submit, now, is_heartbeat).await;
@@ -604,6 +609,19 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     }
 
     for deposit_key in &deposit_keys {
+        // Skip permanently blacklisted deposits — retrying burns fee attempts (#892).
+        {
+            let blacklist = state.frozen_order_blacklist.lock().await;
+            if blacklist.contains_key(deposit_key.as_str()) {
+                error!(
+                    key = %deposit_key,
+                    "deposit_key permanently blacklisted after repeated failures; \
+                     manual intervention required to clear"
+                );
+                summary.errors += 1;
+                continue;
+            }
+        }
         {
             let mut in_flight = state.in_flight_keys.lock().await;
             if let Some(inserted_at) = in_flight.get(deposit_key) {
@@ -634,6 +652,12 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             Ok(tx_hash) => {
                 state.in_flight_keys.lock().await.remove(deposit_key);
                 summary.deposits_executed += 1;
+                // Clear any accumulated failure counts on success.
+                state
+                    .execution_failure_counts
+                    .lock()
+                    .await
+                    .remove(deposit_key.as_str());
                 record_execution(
                     &state,
                     "execute_deposit",
@@ -647,7 +671,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             Err(ref error) if error.may_still_confirm() => {
                 warn!(key = %deposit_key, %error, "deposit_poll_timeout_key_remains_in_flight");
                 summary.errors += 1;
-                let tx_hash = poll_timeout_hash(error);
+                let tx_hash = poll_timeout_hash(&error.message);
                 record_error(
                     &state,
                     &format!("execute_deposit:{}", deposit_key),
@@ -669,6 +693,70 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 state.in_flight_keys.lock().await.remove(deposit_key);
                 summary.errors += 1;
                 warn!(key = %deposit_key, %error, "deposit_execution_failed");
+
+                // Generalized consecutive-failure guard (#892). Track consecutive
+                // execute_deposit failures of any kind and abandon the key once
+                // it's clearly permanently broken.
+                let consecutive_exec_failures = {
+                    let mut counts = state.execution_failure_counts.lock().await;
+                    let count = counts.entry(deposit_key.clone()).or_insert(0);
+                    *count += 1;
+                    *count
+                };
+                if consecutive_exec_failures >= MAX_CONSECUTIVE_EXECUTION_FAILURES {
+                    let already_blacklisted = state
+                        .frozen_order_blacklist
+                        .lock()
+                        .await
+                        .contains_key(deposit_key.as_str());
+                    if !already_blacklisted {
+                        // Best-effort freeze so the contract also stops
+                        // returning the key as pending; blacklist regardless
+                        // of the outcome so the keeper stops re-submitting it.
+                        match execute_handler(
+                            &state,
+                            &state.config.deposit_handler_contract_id,
+                            "freeze_deposit",
+                            deposit_key,
+                            &mut sequence_cache,
+                        )
+                        .await
+                        {
+                            Ok(_) => info!(
+                                key = %deposit_key,
+                                "deposit_frozen_after_repeated_execution_failures"
+                            ),
+                            Err(freeze_error) => {
+                                warn!(
+                                    key = %deposit_key,
+                                    %freeze_error,
+                                    "freeze_deposit_failed_while_abandoning_broken_deposit"
+                                );
+                                record_error(&state, "freeze_deposit", &freeze_error.message, None)
+                                    .await;
+                            }
+                        }
+                        state
+                            .frozen_order_blacklist
+                            .lock()
+                            .await
+                            .insert(deposit_key.clone(), consecutive_exec_failures);
+                        state
+                            .execution_failure_counts
+                            .lock()
+                            .await
+                            .remove(deposit_key.as_str());
+                        error!(
+                            key = %deposit_key,
+                            consecutive_failures = consecutive_exec_failures,
+                            max = MAX_CONSECUTIVE_EXECUTION_FAILURES,
+                            "ALERT: deposit_key blacklisted after {} consecutive execute_deposit \
+                             failures — manual intervention required to clear",
+                            MAX_CONSECUTIVE_EXECUTION_FAILURES
+                        );
+                    }
+                }
+
                 record_error(
                     &state,
                     &format!("execute_deposit:{}", deposit_key),
@@ -690,6 +778,19 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     }
 
     for withdrawal_key in &withdrawal_keys {
+        // Skip permanently blacklisted withdrawals — retrying burns fee attempts (#892).
+        {
+            let blacklist = state.frozen_order_blacklist.lock().await;
+            if blacklist.contains_key(withdrawal_key.as_str()) {
+                error!(
+                    key = %withdrawal_key,
+                    "withdrawal_key permanently blacklisted after repeated failures; \
+                     manual intervention required to clear"
+                );
+                summary.errors += 1;
+                continue;
+            }
+        }
         {
             let mut in_flight = state.in_flight_keys.lock().await;
             if let Some(inserted_at) = in_flight.get(withdrawal_key) {
@@ -720,6 +821,12 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             Ok(tx_hash) => {
                 state.in_flight_keys.lock().await.remove(withdrawal_key);
                 summary.withdrawals_executed += 1;
+                // Clear any accumulated failure counts on success.
+                state
+                    .execution_failure_counts
+                    .lock()
+                    .await
+                    .remove(withdrawal_key.as_str());
                 record_execution(
                     &state,
                     "execute_withdrawal",
@@ -733,7 +840,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             Err(ref error) if error.may_still_confirm() => {
                 warn!(key = %withdrawal_key, %error, "withdrawal_poll_timeout_key_remains_in_flight");
                 summary.errors += 1;
-                let tx_hash = poll_timeout_hash(error);
+                let tx_hash = poll_timeout_hash(&error.message);
                 record_error(
                     &state,
                     &format!("execute_withdrawal:{}", withdrawal_key),
@@ -755,6 +862,75 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                 state.in_flight_keys.lock().await.remove(withdrawal_key);
                 summary.errors += 1;
                 warn!(key = %withdrawal_key, %error, "withdrawal_execution_failed");
+
+                // Generalized consecutive-failure guard (#892). Track consecutive
+                // execute_withdrawal failures of any kind and abandon the key once
+                // it's clearly permanently broken.
+                let consecutive_exec_failures = {
+                    let mut counts = state.execution_failure_counts.lock().await;
+                    let count = counts.entry(withdrawal_key.clone()).or_insert(0);
+                    *count += 1;
+                    *count
+                };
+                if consecutive_exec_failures >= MAX_CONSECUTIVE_EXECUTION_FAILURES {
+                    let already_blacklisted = state
+                        .frozen_order_blacklist
+                        .lock()
+                        .await
+                        .contains_key(withdrawal_key.as_str());
+                    if !already_blacklisted {
+                        // Best-effort freeze so the contract also stops
+                        // returning the key as pending; blacklist regardless
+                        // of the outcome so the keeper stops re-submitting it.
+                        match execute_handler(
+                            &state,
+                            &state.config.withdrawal_handler_contract_id,
+                            "freeze_withdrawal",
+                            withdrawal_key,
+                            &mut sequence_cache,
+                        )
+                        .await
+                        {
+                            Ok(_) => info!(
+                                key = %withdrawal_key,
+                                "withdrawal_frozen_after_repeated_execution_failures"
+                            ),
+                            Err(freeze_error) => {
+                                warn!(
+                                    key = %withdrawal_key,
+                                    %freeze_error,
+                                    "freeze_withdrawal_failed_while_abandoning_broken_withdrawal"
+                                );
+                                record_error(
+                                    &state,
+                                    "freeze_withdrawal",
+                                    &freeze_error.message,
+                                    None,
+                                )
+                                .await;
+                            }
+                        }
+                        state
+                            .frozen_order_blacklist
+                            .lock()
+                            .await
+                            .insert(withdrawal_key.clone(), consecutive_exec_failures);
+                        state
+                            .execution_failure_counts
+                            .lock()
+                            .await
+                            .remove(withdrawal_key.as_str());
+                        error!(
+                            key = %withdrawal_key,
+                            consecutive_failures = consecutive_exec_failures,
+                            max = MAX_CONSECUTIVE_EXECUTION_FAILURES,
+                            "ALERT: withdrawal_key blacklisted after {} consecutive execute_withdrawal \
+                             failures — manual intervention required to clear",
+                            MAX_CONSECUTIVE_EXECUTION_FAILURES
+                        );
+                    }
+                }
+
                 record_error(
                     &state,
                     &format!("execute_withdrawal:{}", withdrawal_key),
@@ -876,6 +1052,12 @@ fn poll_timeout_hash(error: &str) -> Option<String> {
     } else {
         Some(hash.to_string())
     }
+}
+
+/// Check if an error message indicates a poll timeout.
+#[allow(dead_code)]
+fn is_poll_timeout(error: &str) -> bool {
+    error.contains("(hash: ")
 }
 
 /// Detect whether a `SubmitError::TransactionFailed` was caused by a Soroban
@@ -1031,7 +1213,10 @@ async fn is_heartbeat_due(state: &Arc<AppState>, now: u64) -> bool {
     let cache = state.price_cache.read().await;
     match cache.last_full_submission {
         Some(last) => {
-            let elapsed = now.saturating_sub(last.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs()));
+            let elapsed = now.saturating_sub(
+                last.duration_since(SystemTime::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs()),
+            );
             elapsed >= PRICE_HEARTBEAT_INTERVAL_SECS
         }
         None => true,
@@ -1041,11 +1226,11 @@ async fn is_heartbeat_due(state: &Arc<AppState>, now: u64) -> bool {
 async fn filter_prices_by_threshold(
     state: &Arc<AppState>,
     prices: &BTreeMap<String, CachedPrice>,
-    now: u64,
+    _now: u64,
     is_heartbeat: bool,
 ) -> BTreeMap<String, CachedPrice> {
     let cache = state.price_cache.read().await;
-    let last_submitted = cache.last_submitted_medians.as_ref();
+    let last_submitted = cache.last_submitted_medians.clone();
     drop(cache);
 
     let token_thresholds: std::collections::HashMap<String, u32> = state
@@ -1062,10 +1247,13 @@ async fn filter_prices_by_threshold(
             if is_heartbeat {
                 return true;
             }
-            let threshold = token_thresholds.get(symbol).copied().unwrap_or(0);
-            let last_median = last_submitted.and_then(|m| m.get(*symbol)).copied();
+            let threshold = token_thresholds.get(symbol.as_str()).copied().unwrap_or(0);
+            let last_median = last_submitted
+                .as_ref()
+                .and_then(|m| m.get(symbol.as_str()))
+                .copied();
             match (last_median, threshold) {
-                (Some(last), 0) => true,
+                (Some(_last), 0) => true,
                 (Some(last), thresh) => {
                     let change = (price.median - last).abs();
                     change > (thresh as i128)
@@ -1077,16 +1265,22 @@ async fn filter_prices_by_threshold(
         .collect()
 }
 
-async fn update_submitted_prices(state: &Arc<AppState>, prices: &BTreeMap<String, CachedPrice>, now: u64, is_heartbeat: bool) {
+async fn update_submitted_prices(
+    state: &Arc<AppState>,
+    prices: &BTreeMap<String, CachedPrice>,
+    now: u64,
+    is_heartbeat: bool,
+) {
     let mut cache = state.price_cache.write().await;
     let now_time = SystemTime::UNIX_EPOCH + Duration::from_secs(now);
     if is_heartbeat {
         cache.last_full_submission = Some(now_time);
-        cache.last_submitted_medians = Some(
-            prices.iter().map(|(s, p)| (s.clone(), p.median)).collect()
-        );
+        cache.last_submitted_medians =
+            Some(prices.iter().map(|(s, p)| (s.clone(), p.median)).collect());
     } else {
-        let submitted = cache.last_submitted_medians.get_or_insert_with(BTreeMap::new);
+        let submitted = cache
+            .last_submitted_medians
+            .get_or_insert_with(BTreeMap::new);
         for (s, p) in prices {
             submitted.insert(s.clone(), p.median);
         }
@@ -1211,7 +1405,7 @@ async fn get_account_sequence(state: &Arc<AppState>) -> Result<u64, SequenceFetc
         || async { get_account_sequence_once(state).await },
         ACCOUNT_SEQUENCE_RETRY_ATTEMPTS,
         ACCOUNT_SEQUENCE_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await
 }
@@ -1275,7 +1469,7 @@ async fn simulate_contract_call(
         || async { simulate_contract_call_once(state, contract_id, method, args).await },
         SIMULATE_RETRY_ATTEMPTS,
         SIMULATE_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await
 }

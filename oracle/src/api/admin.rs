@@ -87,7 +87,7 @@ pub async fn oracle_status(
         || crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min),
         KEEPER_BALANCE_RETRY_ATTEMPTS,
         KEEPER_BALANCE_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await
     .ok()
@@ -209,7 +209,7 @@ pub async fn keeper_balance(
         || crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min),
         KEEPER_BALANCE_RETRY_ATTEMPTS,
         KEEPER_BALANCE_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await;
 

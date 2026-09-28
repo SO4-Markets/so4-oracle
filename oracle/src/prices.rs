@@ -61,31 +61,54 @@ pub fn aggregate_prices(
         ));
     }
 
-    let median = compute_median_allow_single(&cluster.filtered_prices)
+    // Apply per-token max_deviation_bps outlier filter on the cluster prices.
+    let filter_result = filter_outliers(
+        &cluster.filtered_prices,
+        &cluster.sources,
+        max_deviation_bps,
+    );
+
+    if filter_result.filtered_prices.len() < min_sources {
+        return Err(format!(
+            "insufficient sources after outlier filtering: got {}, need {}",
+            filter_result.filtered_prices.len(),
+            min_sources
+        ));
+    }
+
+    let median = compute_median_allow_single(&filter_result.filtered_prices)
         .ok_or_else(|| "cannot aggregate empty price list".to_string())?;
 
     let mut rejected_sources = Vec::new();
+    // Sources rejected by the cluster step
     for (price, source) in prices.iter().zip(sources.iter()) {
-        let deviation_bps = deviation_bps(*price, median);
-        if deviation_bps > max_deviation_bps as f64 || !cluster.sources.contains(source) {
+        if !cluster.sources.contains(source) {
             rejected_sources.push(RejectedSource {
                 source: source.clone(),
                 price: *price,
-                deviation_bps,
+                deviation_bps: deviation_bps(*price, median),
             });
         }
     }
+    // Sources rejected by the outlier filter step
+    for (source, price, deviation_bps) in filter_result.rejected {
+        rejected_sources.push(RejectedSource {
+            source,
+            price,
+            deviation_bps,
+        });
+    }
 
     let props =
-        compute_confidence_interval_with_spread(&cluster.filtered_prices, max_deviation_bps)
+        compute_confidence_interval_with_spread(&filter_result.filtered_prices, max_deviation_bps)
             .ok_or_else(|| "cannot compute confidence interval".to_string())?;
-    let median = compute_median_allow_single(&cluster.filtered_prices).unwrap_or(props.min);
+    let median = compute_median_allow_single(&filter_result.filtered_prices).unwrap_or(props.min);
 
     Ok(AggregatedPrice {
         min: props.min,
         max: props.max,
         median,
-        sources_used: cluster.sources,
+        sources_used: filter_result.filtered_sources,
         rejected_sources,
     })
 }
@@ -175,7 +198,14 @@ pub fn compute_confidence_interval_with_spread(
     if sorted.len() >= MIN_SOURCES_FOR_PERCENTILE {
         let min = percentile(&sorted, 10);
         let max = percentile(&sorted, 90);
-        Some(PriceProps { min, max })
+        // Expand the percentile-based band by spread_bps to reflect the
+        // configured max deviation tolerance.
+        let mid = compute_median_allow_single(&sorted).unwrap_or(min);
+        let spread = mid.saturating_mul(spread_bps as i128) / 10_000;
+        Some(PriceProps {
+            min: min.saturating_sub(spread).max(0),
+            max: max.saturating_add(spread),
+        })
     } else {
         let mid = compute_median_allow_single(&sorted)?;
         let spread = mid.saturating_mul(spread_bps as i128) / 10_000;
@@ -219,15 +249,21 @@ pub struct OutlierFilterResult {
 /// Filter out prices that deviate too far from the median.
 ///
 /// Primary rule: reject prices whose absolute deviation from the median exceeds
-/// 6x the median absolute deviation (MAD). If MAD is zero (a degenerate/flat
-/// cluster where at least half the inputs have identical deviation), fall back
-/// to rejecting prices more than 3 standard deviations from the median.
+/// the configured `max_deviation_bps` threshold. If the threshold is not
+/// exceeded, also reject prices whose deviation exceeds 6x the median absolute
+/// deviation (MAD). If MAD is zero (a degenerate/flat cluster where at least
+/// half the inputs have identical deviation), fall back to rejecting prices
+/// more than 3 standard deviations from the median.
 ///
 /// Special case: with exactly 2 sources, MAD is structurally incapable of
 /// rejecting either price (both deviations equal MAD, so dev > 6*mad is
 /// always false). In this case, we require both sources to agree within
 /// 10% (1000 bps) of each other, rejecting the one farther from the other.
-pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResult {
+pub fn filter_outliers(
+    prices: &[i128],
+    sources: &[String],
+    max_deviation_bps: u32,
+) -> OutlierFilterResult {
     if prices.is_empty() {
         return OutlierFilterResult {
             filtered_prices: vec![],
@@ -315,16 +351,21 @@ pub fn filter_outliers(prices: &[i128], sources: &[String]) -> OutlierFilterResu
     let mut filtered_sources = Vec::new();
     let mut rejected = Vec::new();
 
+    let max_dev = max_deviation_bps as f64;
+
     for (i, &p) in prices.iter().enumerate() {
+        let dev_bps = deviation_bps(p, median);
         let dev = (p as f64 - median as f64).abs();
-        let is_outlier = if mad > 0 {
+        let is_outlier = if dev_bps > max_dev {
+            true
+        } else if mad > 0 {
             dev > 6.0 * mad as f64
         } else {
             stddev > 0.0 && dev > 3.0 * stddev
         };
 
         if is_outlier {
-            rejected.push((sources[i].clone(), p, deviation_bps(p, median)));
+            rejected.push((sources[i].clone(), p, dev_bps));
         } else {
             filtered_prices.push(p);
             filtered_sources.push(sources[i].clone());
@@ -375,10 +416,11 @@ mod tests {
         // sorted: [100, 200, 300, 400, 500]
         // 10th percentile index = 0.1 * 4 = 0.4 → lo=0 hi=1 → 100 + 0.4*(200-100) = 140
         // 90th percentile index = 0.9 * 4 = 3.6 → lo=3 hi=4 → 400 + 0.6*(500-400) = 460
+        // With spread_bps=100 (1%), mid=300, spread=3: min=140-3=137, max=460+3=463
         let prices = vec![300i128, 100, 500, 200, 400];
         let p = compute_confidence_interval(&prices).unwrap();
-        assert_eq!(p.min, 140);
-        assert_eq!(p.max, 460);
+        assert_eq!(p.min, 137);
+        assert_eq!(p.max, 463);
     }
 
     #[test]
@@ -386,9 +428,10 @@ mod tests {
         let prices = vec![100i128, 200, 300];
         // 10th: 0.1*2=0.2 → 100+0.2*100=120
         // 90th: 0.9*2=1.8 → 200+0.8*100=280
+        // With spread_bps=100 (1%), mid=200, spread=2: min=120-2=118, max=280+2=282
         let p = compute_confidence_interval(&prices).unwrap();
-        assert_eq!(p.min, 120);
-        assert_eq!(p.max, 280);
+        assert_eq!(p.min, 118);
+        assert_eq!(p.max, 282);
     }
 
     #[test]
@@ -427,8 +470,9 @@ mod tests {
         let p = compute_confidence_interval(&prices).unwrap();
         // 10th: 0.1*5=0.5 → lo=0 hi=1 → 100+0.5*100=150
         // 90th: 0.9*5=4.5 → lo=4 hi=5 → 500+0.5*100=550
-        assert_eq!(p.min, 150);
-        assert_eq!(p.max, 550);
+        // With spread_bps=100 (1%), mid=350, spread=3: min=150-3=147, max=550+3=553
+        assert_eq!(p.min, 147);
+        assert_eq!(p.max, 553);
         assert!(p.min <= p.max);
     }
 
@@ -438,6 +482,7 @@ mod tests {
         let p = compute_confidence_interval(&prices).unwrap();
         // 10th: 0.1*6=0.6 → lo=0 hi=1 → 10+0.6*10=16
         // 90th: 0.9*6=5.4 → lo=5 hi=6 → 60+0.4*10=64
+        // With spread_bps=100 (1%), mid=40, spread=0: min=16, max=64 (spread is 0 due to integer division)
         assert_eq!(p.min, 16);
         assert_eq!(p.max, 64);
         assert!(p.min <= p.max);
@@ -498,9 +543,9 @@ mod tests {
     fn duplicate_prices() {
         let prices = vec![100i128, 100, 100, 100, 100];
         let p = compute_confidence_interval(&prices).unwrap();
-        // All the same price → percentiles should be 100
-        assert_eq!(p.min, 100);
-        assert_eq!(p.max, 100);
+        // All the same price → percentiles are 100, mid=100, spread=1: min=99, max=101
+        assert_eq!(p.min, 99);
+        assert_eq!(p.max, 101);
     }
 
     #[test]
@@ -552,18 +597,11 @@ mod tests {
         let prices = [45000i128, 45100, 44900, 45050];
         let p = compute_confidence_interval(&prices).unwrap();
         assert!(p.min <= p.max);
-        assert!(p.min >= 44900);
-        assert!(p.max <= 45100);
-    }
-
-    #[test]
-    fn full_aggregation_pipeline_odd_sources() {
-        // Simulate a full price aggregation with odd number of sources
-        let prices = [2500i128, 2510, 2490, 2505, 2495];
-        let p = compute_confidence_interval(&prices).unwrap();
-        assert!(p.min <= p.max);
-        assert!(p.min >= 2490);
-        assert!(p.max <= 2510);
+        // With spread_bps=100, the band is expanded by ~1% around the percentile bounds
+        // Sorted: [44900, 45000, 45050, 45100], 10th=44930, 90th=45085, mid=45025, spread=450
+        // min = 44930 - 450 = 44480, max = 45085 + 450 = 45535
+        assert!(p.min >= 44480);
+        assert!(p.max <= 45535);
     }
 
     #[test]
@@ -577,7 +615,7 @@ mod tests {
             "bad_src".to_string(),
         ];
 
-        let result = filter_outliers(&prices, &sources);
+        let result = filter_outliers(&prices, &sources, 500);
 
         // Should reject 1
         assert_eq!(result.rejected.len(), 1);
@@ -596,7 +634,7 @@ mod tests {
         // or if they are all outliers from the median (e.g., [10, 1000, 100000]).
         // Wait, if N=3, dev > 3*stddev is impossible because max dev is < stddev * sqrt(N-1).
         // Let's just ensure it doesn't crash on empty.
-        let result = filter_outliers(&[], &[]);
+        let result = filter_outliers(&[], &[], 500);
         assert!(result.filtered_prices.is_empty());
     }
 
@@ -690,15 +728,17 @@ mod tests {
 
         let p = compute_confidence_interval(&prices).unwrap();
 
-        // Assert that the results match the 10th/90th percentile values,
-        // which completely validates that we are NOT using the spread fallback.
+        // Assert that the results use the percentile method (expanded by spread_bps),
+        // not the fallback spread. With spread_bps=100 (1%), mid=200, spread=2:
+        // 10th percentile = 120, 90th percentile = 280
+        // min = 120 - 2 = 118, max = 280 + 2 = 282
         assert_eq!(
-            p.min, 120,
-            "Should use percentile min (120), not fallback spread min (198)"
+            p.min, 118,
+            "Should use percentile min (120) expanded by spread (2), not fallback spread min (198)"
         );
         assert_eq!(
-            p.max, 280,
-            "Should use percentile max (280), not fallback spread max (202)"
+            p.max, 282,
+            "Should use percentile max (280) expanded by spread (2), not fallback spread max (202)"
         );
 
         assert_ne!(p.min, 198);

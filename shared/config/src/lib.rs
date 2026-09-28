@@ -45,6 +45,9 @@ pub struct TokenConfig {
     /// Minimum source count required after source fetches and outlier filtering.
     pub min_sources: usize,
     /// Maximum allowed source deviation from the median in basis points.
+    /// Used for both outlier rejection during price aggregation and to
+    /// widen the returned price band (min/max) around the percentile-based
+    /// or median-based center.
     pub max_deviation_bps: u32,
     /// Source freshness limit.
     pub stale_after_seconds: u64,

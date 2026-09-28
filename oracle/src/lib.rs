@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod binance;
 pub mod chain;
 pub mod coinbase;
