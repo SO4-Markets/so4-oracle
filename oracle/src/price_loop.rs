@@ -5,6 +5,7 @@ use shared_config::TokenConfig;
 use tokio::time::{interval, timeout, MissedTickBehavior};
 
 use crate::prices::AggregatedPrice;
+use crate::retry::MAX_BACKOFF_DELAY_MS;
 use crate::state::{AppState, CachedPrice, FailedSubmission};
 
 const SOURCE_RETRY_ATTEMPTS: u32 = 3;
@@ -148,7 +149,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
             },
             LEDGER_SEQUENCE_RETRY_ATTEMPTS,
             LEDGER_SEQUENCE_RETRY_BASE_DELAY_MS,
-            30_000,
+            MAX_BACKOFF_DELAY_MS,
         ),
         crate::pyth::fetch_pyth_prices(
             &pyth_feed_ids,
@@ -461,7 +462,7 @@ async fn fetch_source_with_retry(
         },
         SOURCE_RETRY_ATTEMPTS,
         SOURCE_RETRY_BASE_DELAY_MS,
-        30_000,
+        MAX_BACKOFF_DELAY_MS,
     )
     .await
 }
