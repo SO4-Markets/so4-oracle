@@ -57,11 +57,22 @@ fn mock_rpc_integration_with_mocked_source_prices() {
     // Simulate fetching prices from multiple sources and computing confidence interval
     let prices = [45000i128, 45100, 44900];
 
-    // Verify we have at least 3 sources for percentile calculation
-    assert!(prices.len() >= 3);
-    assert_eq!(prices[0], 45000);
-    assert_eq!(prices[1], 45100);
-    assert_eq!(prices[2], 44900);
+    // Actually call aggregate_prices to compute confidence interval from multiple sources
+    let result =
+        oracle::prices::aggregate_prices(&prices, &["binance", "coinbase", "pyth"], 2, 1000);
+
+    assert!(
+        result.is_ok(),
+        "aggregate_prices should succeed with valid inputs"
+    );
+    let aggregated = result.unwrap();
+
+    // Verify the aggregated price contains all input sources
+    assert_eq!(aggregated.used_sources.len(), 3);
+
+    // Verify confidence interval was computed (min <= median <= max)
+    assert!(aggregated.price_props.min <= aggregated.price_props.median);
+    assert!(aggregated.price_props.median <= aggregated.price_props.max);
 }
 
 #[test]
@@ -144,25 +155,48 @@ fn mock_rpc_integration_transaction_failure_detection() {
 
 #[test]
 fn mock_rpc_integration_verified_signature_keypair() {
-    // Verify that transaction data contains the expected fields
-    let tx_response = r#"{
-        "jsonrpc":"2.0","id":1,
-        "result":{
-            "status":"SUCCESS",
-            "ledger":50100,
-            "diagnosticEventsXdr":[]
-        }
-    }"#;
+    // Actually exercise signing and verification against a keypair
+    use ed25519_dalek::{Signature, Verifier};
 
-    let result = parse_get_transaction_response(tx_response).unwrap();
+    let private_key_hex = "1111111111111111111111111111111111111111111111111111111111111111";
+    let network_passphrase = "Test SDF Network ; September 2015";
+    let ledger_seq = 50100u32;
+    let token_strkey = "CBTCADDR";
+    let min = 45000i128;
+    let max = 46000i128;
+    let timestamp = 1690000000u64;
 
-    // Verify the result is well-formed
-    assert_eq!(result.status, "SUCCESS");
-    assert!(result.ledger.is_some());
-    assert!(result.diagnostic_events_xdr.is_some());
+    // Sign the price using the keeper private key
+    let signature = oracle::signing::sign_price(
+        private_key_hex,
+        network_passphrase,
+        ledger_seq,
+        token_strkey,
+        min,
+        max,
+        timestamp,
+    )
+    .expect("sign_price should succeed");
 
-    let ledger = result.ledger.unwrap();
-    assert!(ledger > 0);
+    // Verify the signature using the public key derived from the same private key
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(
+        &hex::decode(private_key_hex).unwrap().try_into().unwrap(),
+    );
+    let public_key = signing_key.verifying_key();
+
+    let message = oracle::signing::build_price_message(
+        network_passphrase,
+        ledger_seq,
+        token_strkey,
+        min,
+        max,
+        timestamp,
+    );
+
+    assert!(
+        public_key.verify(&message, &signature).is_ok(),
+        "Signature verification should succeed with correct keypair"
+    );
 }
 
 #[test]
