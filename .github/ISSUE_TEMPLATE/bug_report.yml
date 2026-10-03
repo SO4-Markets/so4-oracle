@@ -1,0 +1,41 @@
+name: Bug Report
+description: Create a bug report for so4-oracle
+title: "fix(scope): "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please fill out the sections below.
+  - type: input
+    id: files
+    attributes:
+      label: File(s) / Component
+      description: Affected file paths or system components (e.g., `oracle/src/keeper_loop.rs`).
+      placeholder: "e.g. oracle/src/keeper_loop.rs"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem & Impact
+      description: Describe the bug, current behavior, and why it is incorrect.
+      placeholder: "Explain what happens and why it is a bug..."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps or commands to reproduce the issue.
+      placeholder: "1. Run cargo run...\n2. Observe log..."
+    validations:
+      required: false
+  - type: textarea
+    id: fix
+    attributes:
+      label: Suggested Fix
+      description: If you have an idea for how to fix this, detail it here.
+      placeholder: "Proposed code change or approach..."
+    validations:
+      required: false
