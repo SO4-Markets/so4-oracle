@@ -212,3 +212,10 @@ Scopes: `oracle`, `shared`, `config`, `workspace`
 ## Questions
 
 Open a discussion on GitHub or drop a message in the team channel. Don't open an issue just to ask a question.
+
+---
+
+## Security Reports
+
+Do **NOT** open public issues for security vulnerabilities. Please review our [SECURITY.md](SECURITY.md) policy for instructions on private vulnerability reporting.
+
