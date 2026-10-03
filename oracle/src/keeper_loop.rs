@@ -23,6 +23,8 @@ const SIMULATE_RETRY_ATTEMPTS: u32 = 3;
 const SIMULATE_RETRY_BASE_DELAY_MS: u64 = 100;
 /// Hard cap on a single keeper cycle — closes #490.
 const KEEPER_CYCLE_TIMEOUT_SECS: u64 = 50;
+/// Delay (ms) to allow ledger close and price propagation after on-chain set_prices confirmation (#956).
+const POST_SET_PRICES_LEDGER_CLOSE_DELAY_MS: u64 = 5000;
 /// Diagnostic-event substring Soroban embeds in budget-exceeded errors.
 const BUDGET_EXCEEDED_PATTERN: &str = "Budget, ExceededLimit";
 /// Maximum character length of raw RPC error JSON embedded in log fields (#1005).
@@ -347,8 +349,9 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             let tx_hash = set_prices_on_chain(&state, &prices_to_submit).await?;
             info!(hash = %tx_hash, "set_prices_confirmed");
             update_submitted_prices(&state, &prices_to_submit, now, is_heartbeat).await;
+            // #956: Wait for ledger close so just-submitted prices are visible to subsequent simulate calls
+            tokio::time::sleep(Duration::from_millis(POST_SET_PRICES_LEDGER_CLOSE_DELAY_MS)).await;
         }
-        tokio::time::sleep(Duration::from_millis(5000)).await;
 
         for order_key in &order_keys {
             // Skip permanently blacklisted orders — retrying burns fee attempts (#498).
