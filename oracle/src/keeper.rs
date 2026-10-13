@@ -94,6 +94,126 @@ pub fn build_balance_response(cfg: &KeeperBalanceConfig, stroops: i64) -> Balanc
     }
 }
 
+/// Testnet Friendbot URL base (Issue #120, #1172).
+pub const FRIENDBOT_URL: &str = "https://friendbot.stellar.org";
+
+/// Call the Stellar testnet Friendbot to fund `account_id`.
+pub async fn fund_keeper_via_friendbot(account_id: &str) -> Result<(), String> {
+    fund_keeper_at(FRIENDBOT_URL, account_id).await
+}
+
+/// Call Friendbot at `base_url` to fund `account_id`.
+pub async fn fund_keeper_at(base_url: &str, account_id: &str) -> Result<(), String> {
+    let url = format!("{base_url}?addr={account_id}");
+    tracing::info!(account_id, "calling Friendbot");
+
+    let response = crate::http::client()
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Friendbot fetch failed: {e}"))?;
+
+    let status = response.status().as_u16();
+    if status == 200 {
+        tracing::info!(
+            account_id,
+            status,
+            "Friendbot response accepted (newly funded)"
+        );
+        return Ok(());
+    }
+
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "(unreadable body)".to_string());
+
+    if status == 400 && body.contains("createAccountAlreadyExist") {
+        tracing::info!(
+            account_id,
+            status,
+            "Friendbot response accepted (already funded)"
+        );
+        return Ok(());
+    }
+
+    Err(format!(
+        "Friendbot returned {status} for {account_id}: {body}"
+    ))
+}
+
+/// Checks keeper balance on testnet startup and auto-funds via Friendbot
+/// if the balance is below the configured minimum (#1172).
+pub async fn fund_keeper_on_testnet_startup_with_url(
+    cfg: &KeeperBalanceConfig,
+    is_testnet: bool,
+    below_min: &Arc<AtomicBool>,
+    friendbot_url: &str,
+) -> Result<bool, String> {
+    if !is_testnet {
+        return Ok(false);
+    }
+
+    match check_keeper_balance(cfg, below_min).await {
+        Ok(_) => {
+            tracing::info!(
+                account_id = cfg.account_id,
+                "testnet keeper balance is above minimum"
+            );
+            Ok(false)
+        }
+        Err(RpcError::BalanceBelowMinimum {
+            balance_xlm,
+            min_xlm,
+            ..
+        }) => {
+            tracing::warn!(
+                account_id = cfg.account_id,
+                balance_xlm,
+                min_balance_xlm = min_xlm,
+                "testnet keeper balance below minimum at startup; attempting Friendbot auto-funding"
+            );
+            fund_keeper_at(friendbot_url, &cfg.account_id).await?;
+            if let Ok(new_stroops) = check_keeper_balance(cfg, below_min).await {
+                let new_xlm = new_stroops as f64 / XLM_IN_STROOPS as f64;
+                tracing::info!(
+                    account_id = cfg.account_id,
+                    balance_xlm = new_xlm,
+                    "testnet keeper balance recovered after Friendbot funding"
+                );
+            }
+            Ok(true)
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                account_id = cfg.account_id,
+                "unable to check testnet keeper balance at startup; proceeding"
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// Check keeper balance at testnet startup and auto-fund via default Friendbot
+/// if below minimum (#1172).
+pub async fn fund_keeper_on_testnet_startup(
+    cfg: &KeeperBalanceConfig,
+    is_testnet: bool,
+    below_min: &Arc<AtomicBool>,
+) -> Result<bool, String> {
+    fund_keeper_on_testnet_startup_with_url(cfg, is_testnet, below_min, FRIENDBOT_URL).await
+}
+
+/// Alias for [`fund_keeper_on_testnet_startup`] (#1172).
+pub async fn auto_fund_testnet_keeper_at_startup(
+    cfg: &KeeperBalanceConfig,
+    is_testnet: bool,
+    below_min: &Arc<AtomicBool>,
+) -> Result<bool, String> {
+    fund_keeper_on_testnet_startup(cfg, is_testnet, below_min).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +321,224 @@ mod tests {
         let below_min = Arc::new(AtomicBool::new(false));
         let err = check_keeper_balance(&cfg, &below_min).await.unwrap_err();
         assert!(matches!(err, RpcError::NetworkError(_)));
+    }
+
+    // ── fund_keeper_via_friendbot — HTTP-level tests ─────────────────────────
+
+    /// Verifies that a 400 response from Friendbot (account already funded) is
+    /// treated as success — the operation is idempotent.
+    #[tokio::test]
+    async fn fund_keeper_via_friendbot_already_funded_400_returns_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_string(
+                    r#"{"detail":"createAccountAlreadyExist","status":400,"title":"Transaction Failed"}"#,
+                ),
+            )
+            .mount(&server)
+            .await;
+
+        let result = super::fund_keeper_at(&server.uri(), "GNEWACCOUNT").await;
+        assert!(result.is_ok());
+    }
+
+    /// Verifies that a 200 response from Friendbot (new account funded) returns Ok.
+    #[tokio::test]
+    async fn fund_keeper_via_friendbot_new_account_200_returns_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"hash":"abc123","ledger":12345}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let result = super::fund_keeper_at(&server.uri(), "GNEWACCOUNT").await;
+        assert!(result.is_ok());
+    }
+
+    /// Verifies that an unrelated 400 response from Friendbot is treated as an error.
+    #[tokio::test]
+    async fn fund_keeper_via_friendbot_unrelated_400_returns_err() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"detail":"invalid_field","status":400,"title":"Transaction Failed"}"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let result = super::fund_keeper_at(&server.uri(), "GNEWACCOUNT").await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("Friendbot returned 400"));
+        assert!(err_msg.contains("invalid_field"));
+    }
+
+    /// Verifies that a non-200/400 response (e.g. 500) returns an error
+    /// containing both the status code and the response body.
+    /// Closes #526.
+    #[tokio::test]
+    async fn fund_keeper_via_friendbot_500_returns_error_with_status_and_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_string(r#"{"detail":"internal server error"}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let err = super::fund_keeper_at(&server.uri(), "GKEEPER")
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.contains("500"),
+            "error should contain status code, got: {err}"
+        );
+        assert!(
+            err.contains("internal server error"),
+            "error should contain response body, got: {err}"
+        );
+    }
+
+    /// Verifies that a 429 (rate-limited) response surfaces the body for debugging.
+    /// Closes #526.
+    #[tokio::test]
+    async fn fund_keeper_via_friendbot_429_returns_error_with_status_and_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429).set_body_string(r#"{"error":"rate limited"}"#))
+            .mount(&server)
+            .await;
+
+        let err = super::fund_keeper_at(&server.uri(), "GKEEPER")
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.contains("429"),
+            "error should contain status code, got: {err}"
+        );
+        assert!(
+            err.contains("rate limited"),
+            "error should contain response body, got: {err}"
+        );
+    }
+
+    // ── fund_keeper_on_testnet_startup tests (#1172) ───────────────────
+
+    #[tokio::test]
+    async fn fund_keeper_on_testnet_startup_skips_when_not_testnet() {
+        let cfg = KeeperBalanceConfig {
+            horizon_url: "http://127.0.0.1:19999".to_string(),
+            account_id: "GKEEPER".to_string(),
+            min_balance_xlm: 10.0,
+        };
+        let below_min = Arc::new(AtomicBool::new(false));
+        let funded = super::fund_keeper_on_testnet_startup_with_url(
+            &cfg,
+            false,
+            &below_min,
+            "http://127.0.0.1:19999",
+        )
+        .await
+        .unwrap();
+
+        assert!(!funded);
+    }
+
+    #[tokio::test]
+    async fn fund_keeper_on_testnet_startup_skips_when_balance_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "balances": [{"asset_type": "native", "balance": "20.0000000"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let cfg = KeeperBalanceConfig {
+            horizon_url: server.uri(),
+            account_id: "GKEEPER".to_string(),
+            min_balance_xlm: 10.0,
+        };
+        let below_min = Arc::new(AtomicBool::new(false));
+        let funded =
+            super::fund_keeper_on_testnet_startup_with_url(&cfg, true, &below_min, &server.uri())
+                .await
+                .unwrap();
+
+        assert!(!funded);
+        assert!(!below_min.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn fund_keeper_on_testnet_startup_funds_when_below_minimum() {
+        use wiremock::matchers::query_param;
+
+        let server = MockServer::start().await;
+        // First Horizon balance check returns 3 XLM (below min)
+        // Second Horizon balance check (after funding) returns 20 XLM (above min)
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/accounts/GKEEPER"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "balances": [{"asset_type": "native", "balance": "3.0000000"}]
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/accounts/GKEEPER"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "balances": [{"asset_type": "native", "balance": "20.0000000"}]
+            })))
+            .mount(&server)
+            .await;
+
+        // Friendbot endpoint
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/friendbot"))
+            .and(query_param("addr", "GKEEPER"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"hash":"123"}"#))
+            .mount(&server)
+            .await;
+
+        let cfg = KeeperBalanceConfig {
+            horizon_url: server.uri(),
+            account_id: "GKEEPER".to_string(),
+            min_balance_xlm: 10.0,
+        };
+        let below_min = Arc::new(AtomicBool::new(false));
+        let friendbot_url = format!("{}/friendbot", server.uri());
+        let funded =
+            super::fund_keeper_on_testnet_startup_with_url(&cfg, true, &below_min, &friendbot_url)
+                .await
+                .unwrap();
+
+        assert!(funded);
+        assert!(!below_min.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn fund_keeper_on_testnet_startup_handles_horizon_error_gracefully() {
+        let cfg = KeeperBalanceConfig {
+            horizon_url: "http://127.0.0.1:19999".to_string(), // unreachable
+            account_id: "GKEEPER".to_string(),
+            min_balance_xlm: 10.0,
+        };
+        let below_min = Arc::new(AtomicBool::new(false));
+        let funded = super::fund_keeper_on_testnet_startup_with_url(
+            &cfg,
+            true,
+            &below_min,
+            "http://127.0.0.1:19999",
+        )
+        .await
+        .unwrap();
+
+        assert!(!funded);
     }
 }
