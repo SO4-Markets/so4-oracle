@@ -179,6 +179,7 @@ fn cluster_spread(prices: &[i128]) -> i128 {
     sorted.last().unwrap() - sorted.first().unwrap()
 }
 
+#[cfg(test)]
 pub fn compute_confidence_interval(prices: &[i128]) -> Option<PriceProps> {
     compute_confidence_interval_with_spread(prices, 100)
 }
@@ -216,7 +217,7 @@ pub fn compute_confidence_interval_with_spread(
     }
 }
 
-/// Interpolating percentile (nearest-rank method).
+/// Computes the p-th percentile of a sorted slice using linear interpolation.
 pub fn percentile(sorted: &[i128], p: u8) -> i128 {
     debug_assert!(!sorted.is_empty());
     if sorted.len() == 1 || p == 0 {
@@ -379,7 +380,8 @@ pub fn filter_outliers(
     }
 }
 
-/// Compute the median of a slice of prices safely.
+/// Compute the median of a slice of prices safely (requires at least 2 prices).
+#[cfg(test)]
 pub fn compute_median(prices: &[i128]) -> Option<i128> {
     if prices.len() < 2 {
         return None;
