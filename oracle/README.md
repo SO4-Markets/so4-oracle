@@ -32,7 +32,7 @@ Optional defaults:
 
 - `BIND_ADDR=0.0.0.0:8080`
 - `STELLAR_NETWORK=testnet`
-- `STELLAR_RPC_URL=https://soroban-testnet.stellar.org` on testnet
+- `STELLAR_RPC_URL=https://stellar.org` on testnet (configured via `TESTNET_RPC_URL` default)
 - `HORIZON_URL=https://horizon-testnet.stellar.org` on testnet
 - `PRICE_LOOP_MS=1000`
 - `KEEPER_LOOP_MS=1500`
@@ -54,5 +54,13 @@ curl http://127.0.0.1:8080/health
 Expected health response:
 
 ```json
-{"status":"ok"}
+{
+  "status": "ok",
+  "last_price_cycle_secs_ago": null,
+  "last_keeper_cycle_secs_ago": null,
+  "price_cycle_count": 0,
+  "keeper_cycle_count": 0,
+  "token_fetch_failures": 0,
+  "submit_failures": 0
+}
 ```
