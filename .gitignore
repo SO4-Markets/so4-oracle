@@ -1,27 +1,11 @@
 # ── Rust build artifacts ──────────────────────────────────────────────────────
 target/
 
-# ── Cloudflare Worker compiled output ─────────────────────────────────────────
-oracle/build/
-
-# ── Wrangler local state ──────────────────────────────────────────────────────
-.wrangler/
-
 # ── Secrets / local env — NEVER commit ───────────────────────────────────────
-.dev.vars
-*.dev.vars
-oracle_vars.md
-
-# ── Generic env files ─────────────────────────────────────────────────────────
 .env
 .env.*
 !.env.example
-
-# ── Frontend dependencies & build output ──────────────────────────────────────
-node_modules/
-dist/
-.next/
-out/
+oracle_vars.md
 
 # ── OS / editor clutter ───────────────────────────────────────────────────────
 .DS_Store
