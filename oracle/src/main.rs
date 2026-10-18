@@ -34,6 +34,28 @@ async fn main() {
     let state = Arc::new(AppState::new(Arc::clone(&config)));
     let app = api::build_router(Arc::clone(&state));
 
+    // Wire Friendbot auto-funding into testnet startup when keeper balance is below minimum (#1172).
+    if config.network == oracle::config::Network::Testnet {
+        let keeper_cfg = oracle::keeper::KeeperBalanceConfig {
+            horizon_url: config.horizon_url.clone(),
+            account_id: config.keeper_account_id.clone(),
+            min_balance_xlm: config.min_keeper_balance_xlm,
+        };
+        if let Err(error) = oracle::keeper::fund_keeper_on_testnet_startup(
+            &keeper_cfg,
+            true,
+            &state.keeper_balance_below_min,
+        )
+        .await
+        {
+            tracing::warn!(
+                %error,
+                account_id = %config.keeper_account_id,
+                "Friendbot auto-funding failed at startup"
+            );
+        }
+    }
+
     let listener = match TcpListener::bind(bind_addr).await {
         Ok(listener) => listener,
         Err(error) => {
