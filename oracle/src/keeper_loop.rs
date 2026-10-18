@@ -1162,6 +1162,8 @@ async fn sweep_expired_in_flight_keys(state: &Arc<AppState>) {
     });
 }
 
+const PENDING_KEYS_CHUNK_SIZE: u32 = 50;
+
 async fn get_pending_keys(
     state: &Arc<AppState>,
     count_method: &str,
@@ -1180,35 +1182,40 @@ async fn get_pending_keys(
         return Ok(Vec::new());
     }
 
-    let keys_result = simulate_contract_call(
-        state,
-        &state.config.reader_contract_id,
-        keys_method,
-        &[
-            &state.config.data_store_contract_id,
-            "0",
-            &count.to_string(),
-        ],
-    )
-    .await?;
+    let mut all_keys = Vec::with_capacity(count as usize);
+    let mut start = 0u32;
+    while start < count {
+        let end = (start + PENDING_KEYS_CHUNK_SIZE).min(count);
+        let start_str = start.to_string();
+        let end_str = end.to_string();
+        let keys_result = simulate_contract_call(
+            state,
+            &state.config.reader_contract_id,
+            keys_method,
+            &[&state.config.data_store_contract_id, &start_str, &end_str],
+        )
+        .await?;
 
-    let keys = parse_bytes_vec_from_result(&keys_result)?;
+        let chunk = parse_bytes_vec_from_result(&keys_result)?;
+        all_keys.extend(chunk);
+        start = end;
+    }
 
     // Cross-check parsed length against reported count to detect RPC/ABI drift
-    if keys.len() != count as usize {
+    if all_keys.len() != count as usize {
         tracing::warn!(
             expected = count,
-            actual = keys.len(),
+            actual = all_keys.len(),
             method = keys_method,
             "parsed key count mismatch — RPC/ABI drift or malformed response"
         );
         return Err(format!(
             "expected {count} keys from {keys_method}, got {}",
-            keys.len()
+            all_keys.len()
         ));
     }
 
-    Ok(keys)
+    Ok(all_keys)
 }
 
 async fn set_prices_on_chain(
