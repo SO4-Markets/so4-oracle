@@ -680,6 +680,21 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
                  a single source can push a price without cross-source validation"
             );
         }
+
+        // A spread at or above half the price can drive the aggregated band
+        // minimum to zero (`p10 - spread <= 0`), which the oracle contract
+        // rejects (`InvalidPrice`), and one rejected entry reverts the whole
+        // `set_prices` batch (#1291). Keep the two-sided spread below the
+        // price itself.
+        if token.max_deviation_bps >= 5_000 {
+            return Err(ConfigError::InvalidToken {
+                symbol: token.symbol.clone(),
+                reason: format!(
+                    "max_deviation_bps ({}) must be below 5000: a spread of half the price or more can make the band minimum non-positive, which the oracle contract rejects",
+                    token.max_deviation_bps
+                ),
+            });
+        }
     }
 
     Ok(PriceFeedConfig { tokens })
@@ -1013,6 +1028,26 @@ mod tests {
             ConfigError::InvalidToken { ref symbol, ref reason, .. }
                 if symbol == "BTC" && reason.contains("min_sources")
         ));
+    }
+
+    #[test]
+    fn reject_max_deviation_bps_at_half_price() {
+        // #1291: at 5000 bps the spread can reach the price itself, driving
+        // the band minimum to zero, which the contract rejects.
+        let json = r#"[{"symbol":"BTC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1,"max_deviation_bps":5000}]"#;
+        let err = parse_price_feed_config(json).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidToken { ref symbol, ref reason, .. }
+                if symbol == "BTC" && reason.contains("max_deviation_bps")
+        ));
+    }
+
+    #[test]
+    fn accept_max_deviation_bps_below_half_price() {
+        let json = r#"[{"symbol":"BTC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["binance"],"binance_symbol":"BTCUSDT","min_sources":1,"max_deviation_bps":4999}]"#;
+        let cfg = parse_price_feed_config(json).unwrap();
+        assert_eq!(cfg.tokens[0].max_deviation_bps, 4999);
     }
 
     #[test]

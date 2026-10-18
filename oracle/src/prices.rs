@@ -111,6 +111,18 @@ pub fn aggregate_prices(
     let props =
         compute_confidence_interval_with_spread(&filter_result.filtered_prices, max_deviation_bps)
             .ok_or_else(|| "cannot compute confidence interval".to_string())?;
+    // The oracle contract rejects a band whose minimum is not positive
+    // (`Error::InvalidPrice`), and one rejected entry reverts the entire
+    // `set_prices` batch, so an invalid band here would block every token
+    // (#1291). Fail this token's cycle instead of building a price the
+    // contract cannot accept; `max_deviation_bps` is additionally capped
+    // below 5000 at config load.
+    if props.min <= 0 {
+        return Err(format!(
+            "aggregated band min {} is not positive; refusing to submit a price the contract rejects",
+            props.min
+        ));
+    }
     let median = compute_median_allow_single(&filter_result.filtered_prices).unwrap_or(props.min);
 
     Ok(AggregatedPrice {
@@ -691,6 +703,17 @@ mod tests {
         assert_eq!(err, "no consistent price cluster found");
     }
 
+    #[test]
+    fn aggregate_prices_rejects_non_positive_band_min() {
+        // #1291: a spread at the price level clamps the band minimum to zero,
+        // which the contract rejects (`InvalidPrice`); the aggregator must
+        // fail this token's cycle instead of returning an unusable band.
+        let prices = vec![10_i128];
+        let sources = vec!["fixed".to_string()];
+        let err = aggregate_prices(&prices, &sources, 1, 10_000).unwrap_err();
+        assert!(err.contains("not positive"), "unexpected error: {err}");
+    }
+
     // #510's third scenario ("construct two sources both outside
     // max_deviation_bps of the median with min_sources=0" to make
     // filter_outliers reject every source, reaching "cannot compute
@@ -868,7 +891,10 @@ mod tests {
             vec![1000, 1001, 1002, 1003, 1004],
             vec![100, 101, 99, 5000],
         ] {
-            let result = aggregate_prices(&prices, &names(prices.len()), 1, 10_000).unwrap();
+            // 500 bps is a legal deviation under the #1291 cap; at 10_000 the
+            // spread could drive the band minimum to zero, which aggregation
+            // now rejects.
+            let result = aggregate_prices(&prices, &names(prices.len()), 1, 500).unwrap();
             assert!(
                 result.min <= result.median && result.median <= result.max,
                 "min {} <= median {} <= max {} violated for {prices:?}",
@@ -900,7 +926,9 @@ mod tests {
             vec![1000i128, 1001, 1002, 1003],
             vec![100i128, 101, 99, 5000],
         ] {
-            let result = aggregate_prices(&prices, &names(prices.len()), 1, 10_000).unwrap();
+            // 500 bps is a legal deviation under the #1291 cap (see the
+            // min/median/max property test above).
+            let result = aggregate_prices(&prices, &names(prices.len()), 1, 500).unwrap();
             assert_eq!(
                 result.sources_used.len() + result.rejected_sources.len(),
                 prices.len(),
