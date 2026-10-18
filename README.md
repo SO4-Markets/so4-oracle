@@ -88,7 +88,7 @@ PRICE_LOOP_MS=1000
 KEEPER_LOOP_MS=1500
 
 # Price feed configuration (optional; falls back to embedded config/tokens.json)
-PRICE_FEED_CONFIG=/path/to/tokens.json
+PRICE_FEED_CONFIG='[{"symbol":"XLM","sources":["coinbase"]}]'  # inline JSON array; or PRICE_FEED_CONFIG="$(cat tokens.json)"
 
 # Pyth authentication (optional now, mandatory once Pyth enforces auth)
 # PYTH_API_KEY=<your-pyth-api-key>
