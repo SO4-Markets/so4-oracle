@@ -142,6 +142,7 @@ fn validate_admin_api_token(token: &str) -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvError {
     MissingVar(&'static str),
+    MissingAnyVar { primary: &'static str, fallback: &'static str },
     InvalidVar { var: &'static str, reason: String },
     TokenConfig(ConfigError),
 }
@@ -150,6 +151,9 @@ impl fmt::Display for EnvError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EnvError::MissingVar(var) => write!(f, "required env var '{var}' is not set"),
+            EnvError::MissingAnyVar { primary, fallback } => {
+                write!(f, "required env var '{primary}' (or fallback alias '{fallback}') is not set")
+            }
             EnvError::InvalidVar { var, reason } => write!(f, "invalid env var '{var}': {reason}"),
             EnvError::TokenConfig(error) => write!(f, "invalid PRICE_FEED_CONFIG: {error}"),
         }
@@ -501,9 +505,7 @@ fn required_any(
     lookup(primary)
         .filter(|value| !value.trim().is_empty())
         .or_else(|| lookup(fallback).filter(|value| !value.trim().is_empty()))
-        .ok_or(EnvError::MissingVar(
-            "ORACLE_CONTRACT_ID' (or fallback alias 'ORACLE')",
-        ))
+        .ok_or(EnvError::MissingAnyVar { primary, fallback })
 }
 
 fn parse_or_default<T>(
