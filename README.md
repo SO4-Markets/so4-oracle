@@ -88,7 +88,7 @@ PRICE_LOOP_MS=1000
 KEEPER_LOOP_MS=1500
 
 # Price feed configuration (optional; falls back to embedded config/tokens.json)
-PRICE_FEED_CONFIG=/path/to/tokens.json
+PRICE_FEED_CONFIG='[{"symbol":"XLM","sources":["coinbase"]}]'  # inline JSON array; or PRICE_FEED_CONFIG="$(cat tokens.json)"
 
 # Pyth authentication (optional now, mandatory once Pyth enforces auth)
 # PYTH_API_KEY=<your-pyth-api-key>
@@ -192,12 +192,12 @@ sudo systemctl start oracle
 ### Fly.io
 
 ```bash
-# Deploy to Fly.io
-fly deploy
-
-# Set secrets (never in fly.toml: its [env] block is committed and shown by `fly config show`)
+# Set secrets first (never in fly.toml: its [env] block is committed and shown by `fly config show`)
 fly secrets set KEEPER_PRIVATE_KEY=<hex> KEEPER_SECRET_KEY=<S...> ADMIN_API_TOKEN=<token>
 fly secrets set PYTH_API_KEY=<key>   # optional
+
+# Deploy to Fly.io (after secrets are in place)
+fly deploy --ha=false
 ```
 
 Non-secret settings (network, contract IDs, `KEEPER_ACCOUNT_ID`, loop
