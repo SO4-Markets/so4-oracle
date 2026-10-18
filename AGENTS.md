@@ -35,11 +35,11 @@ If the `Dockerfile` or dependencies changed, you must also run:
 - **Environment Variables**: Read verbatim by `Config::from_env()`. A near-miss like `ORDER_HANDLER_CONTRACT_ID` is silently ignored and the process exits.
 - **Tokens Config**: `config/tokens.json` is embedded via `include_str!` at compile time and must exist in the Docker builder stage before `cargo build`.
 - **Panics**: `[profile.release]` sets `panic = "abort"`. The keeper loop must never panic—errors are recorded and the loop continues.
-- **MSRV**: The Dockerfile base image encodes the real MSRV. Do not bump dependencies without checking it.
+- **MSRV**: The workspace declares the MSRV via `rust-version = "1.95"` in root `Cargo.toml` and CI enforces it via `env.MSRV`. The Dockerfile consumes this version. Do not bump dependencies past it.
 - **Admin Routes**: Admin endpoints authenticate via the `AdminAuth` extractor (`oracle/src/api/mod.rs`). New admin routes must take it.
 - **Single Instance Only**: Double-submission prevention and failure/blacklist counters (`oracle/src/state.rs`) are plain in-process `Mutex`-guarded maps, not shared across processes. This service must never be scaled to 2+ replicas — a second instance races the first on the same pending work with no coordination. See the "Deployment" section of README.md.
 
 ## 5. Secrets and Safety
-- **Never** commit `.dev.vars`, keeper secret keys, or admin tokens.
+- **Never** commit `.env` or other local environment/secret files, keeper secret keys, or admin tokens.
 - `SecretString` exists so keys do not land in logs—never `Debug`-print a config value that holds one.
 - **Never** point tests or examples at mainnet RPC.
