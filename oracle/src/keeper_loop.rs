@@ -13,7 +13,7 @@ use crate::state::{
     AppState, CachedPrice, FailedSubmission, KeeperExecution, IN_FLIGHT_EXPIRY,
     MAX_CONSECUTIVE_EXECUTION_FAILURES, MAX_CONSECUTIVE_FREEZE_FAILURES,
 };
-use crate::submit::SubmitError;
+use crate::submit::{ConfirmedTransaction, SubmitError};
 
 const ACCOUNT_SEQUENCE_RETRY_ATTEMPTS: u32 = 3;
 const ACCOUNT_SEQUENCE_RETRY_BASE_DELAY_MS: u64 = 100;
@@ -365,8 +365,12 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             } else {
                 submit_prices
             };
-            let tx_hash = set_prices_on_chain(&state, &prices_to_submit).await?;
-            info!(hash = %tx_hash, "set_prices_confirmed");
+            let confirmed = set_prices_on_chain(&state, &prices_to_submit).await?;
+            info!(
+                hash = %confirmed.hash,
+                ledger = confirmed.ledger,
+                "set_prices_confirmed"
+            );
             update_submitted_prices(&state, &prices_to_submit, now, is_heartbeat).await;
             tokio::time::sleep(Duration::from_millis(POST_SET_PRICES_SETTLE_MS)).await;
         }
@@ -415,7 +419,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             )
             .await
             {
-                Ok(tx_hash) => {
+                Ok(confirmed) => {
                     state.in_flight_keys.lock().await.remove(order_key);
                     summary.orders_executed += 1;
                     // Clear any accumulated failure counts on success.
@@ -433,7 +437,8 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                         &state,
                         "execute_order",
                         order_key,
-                        Some(tx_hash),
+                        Some(confirmed.hash),
+                        Some(confirmed.ledger),
                         true,
                         None,
                     )
@@ -454,6 +459,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                         &state,
                         "execute_order",
                         order_key,
+                        None,
                         None,
                         false,
                         Some(error.to_string()),
@@ -617,6 +623,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                         "execute_order",
                         order_key,
                         None,
+                        None,
                         false,
                         Some(match freeze_error_msg {
                             Some(freeze_error) => format!("{error} | freeze_error: {freeze_error}"),
@@ -678,7 +685,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         )
         .await
         {
-            Ok(tx_hash) => {
+            Ok(confirmed) => {
                 state.in_flight_keys.lock().await.remove(deposit_key);
                 summary.deposits_executed += 1;
                 // Clear any accumulated failure counts on success.
@@ -691,7 +698,8 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     &state,
                     "execute_deposit",
                     deposit_key,
-                    Some(tx_hash),
+                    Some(confirmed.hash),
+                    Some(confirmed.ledger),
                     true,
                     None,
                 )
@@ -713,6 +721,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     "execute_deposit",
                     deposit_key,
                     tx_hash,
+                    None,
                     false,
                     Some(error.to_string()),
                 )
@@ -798,6 +807,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     "execute_deposit",
                     deposit_key,
                     None,
+                    None,
                     false,
                     Some(error.to_string()),
                 )
@@ -855,7 +865,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         )
         .await
         {
-            Ok(tx_hash) => {
+            Ok(confirmed) => {
                 state.in_flight_keys.lock().await.remove(withdrawal_key);
                 summary.withdrawals_executed += 1;
                 // Clear any accumulated failure counts on success.
@@ -868,7 +878,8 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     &state,
                     "execute_withdrawal",
                     withdrawal_key,
-                    Some(tx_hash),
+                    Some(confirmed.hash),
+                    Some(confirmed.ledger),
                     true,
                     None,
                 )
@@ -890,6 +901,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     "execute_withdrawal",
                     withdrawal_key,
                     tx_hash,
+                    None,
                     false,
                     Some(error.to_string()),
                 )
@@ -979,6 +991,7 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                     &state,
                     "execute_withdrawal",
                     withdrawal_key,
+                    None,
                     None,
                     false,
                     Some(error.to_string()),
@@ -1214,7 +1227,7 @@ async fn get_pending_keys(
 async fn set_prices_on_chain(
     state: &Arc<AppState>,
     prices: &BTreeMap<String, CachedPrice>,
-) -> Result<String, HandlerError> {
+) -> Result<ConfirmedTransaction, HandlerError> {
     let prices_vec: Vec<&CachedPrice> = prices.values().collect();
     let prices_scval = scval::encode_prices_vec(&prices_vec)?;
 
@@ -1234,12 +1247,16 @@ async fn set_prices_on_chain(
 
     let signed_xdr = sign_keeper_tx(&state, &tx)?;
 
-    let ledger = crate::submit::submit_and_poll(&state.config.stellar_rpc_url, &signed_xdr)
+    let confirmed = crate::submit::submit_and_poll(&state.config.stellar_rpc_url, &signed_xdr)
         .await
         .map_err(|e| HandlerError::submitted("set_prices", e))?;
 
-    info!(ledger, "set_prices confirmed on ledger");
-    Ok(format!("confirmed on ledger {ledger}"))
+    info!(
+        hash = %confirmed.hash,
+        ledger = confirmed.ledger,
+        "set_prices confirmed on ledger"
+    );
+    Ok(confirmed)
 }
 
 async fn is_heartbeat_due(state: &Arc<AppState>, now: u64) -> bool {
@@ -1364,7 +1381,7 @@ async fn execute_handler(
     method: &str,
     key: &str,
     sequence_cache: &mut Option<u64>,
-) -> Result<String, HandlerError> {
+) -> Result<ConfirmedTransaction, HandlerError> {
     let key_bytes =
         hex::decode(key).map_err(|e| HandlerError::local(format!("invalid key hex: {e}")))?;
     let key_scval = stellar_xdr::ScVal::Bytes(stellar_xdr::ScBytes(
@@ -1402,12 +1419,18 @@ async fn execute_handler(
     let signed_xdr = sign_keeper_tx(&state, &tx)?;
 
     match crate::submit::submit_and_poll(&state.config.stellar_rpc_url, &signed_xdr).await {
-        Ok(ledger) => {
+        Ok(confirmed) => {
             // Success consumed `sequence`; the next call in this cycle can
             // use `sequence + 1` without asking the network.
             *sequence_cache = Some(sequence + 1);
-            info!(method, key = %key, ledger, "handler_confirmed");
-            Ok(format!("confirmed on ledger {ledger}"))
+            info!(
+                method,
+                key = %key,
+                hash = %confirmed.hash,
+                ledger = confirmed.ledger,
+                "handler_confirmed"
+            );
+            Ok(confirmed)
         }
         Err(error) => {
             let is_bad_seq = is_bad_sequence_error(&error.to_string())
@@ -1710,6 +1733,7 @@ async fn record_execution(
     operation: impl Into<String>,
     key: impl Into<String>,
     tx_hash: Option<String>,
+    ledger: Option<u32>,
     success: bool,
     error: Option<String>,
 ) {
@@ -1719,6 +1743,7 @@ async fn record_execution(
         operation: operation.into(),
         key: key.into(),
         tx_hash,
+        ledger,
         success,
         error,
     });
@@ -1998,6 +2023,61 @@ mod tests {
         let recorded: Vec<_> = failures.iter().collect();
         assert_eq!(recorded.len(), 1);
         assert!(recorded[0].tx_hash.is_none());
+    }
+
+    // ── #1289: confirmed executions record the real hash and the ledger ──────
+
+    #[tokio::test]
+    async fn record_execution_stores_hash_and_ledger_for_confirmed_submission() {
+        let state = shutdown_test_state();
+        let hash = "d".repeat(64);
+
+        record_execution(
+            &state,
+            "execute_order",
+            "abcd",
+            Some(hash.clone()),
+            Some(51_234),
+            true,
+            None,
+        )
+        .await;
+
+        let keeper_status = state.keeper_status.read().await;
+        let recorded = keeper_status.last_executions.back().unwrap();
+        assert_eq!(recorded.operation, "execute_order");
+        assert_eq!(recorded.tx_hash.as_deref(), Some(hash.as_str()));
+        assert_eq!(
+            recorded.ledger,
+            Some(51_234),
+            "the confirming ledger must be stored in its own field, not inside tx_hash"
+        );
+        assert!(recorded.success);
+    }
+
+    #[tokio::test]
+    async fn record_execution_leaves_ledger_none_for_failed_submission() {
+        let state = shutdown_test_state();
+
+        record_execution(
+            &state,
+            "execute_deposit",
+            "abcd",
+            None,
+            None,
+            false,
+            Some("submit failed".to_string()),
+        )
+        .await;
+
+        let keeper_status = state.keeper_status.read().await;
+        let recorded = keeper_status.last_executions.back().unwrap();
+        assert!(recorded.tx_hash.is_none());
+        assert!(
+            recorded.ledger.is_none(),
+            "a failed submission has no confirming ledger"
+        );
+        assert!(!recorded.success);
     }
 
     #[tokio::test]
