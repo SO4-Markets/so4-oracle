@@ -51,7 +51,7 @@ The full list is defined in `oracle/src/config.rs` (`Config::from_lookup`). The 
 | `KEEPER_INDEX`                     |              | `0`                           | Labels which keeper signed a given price (carries no work-partitioning behavior — see README.md for single-instance constraint) |
 | `ADMIN_API_TOKEN`                  |              |                               | Bearer token for admin routes (`/oracle/status`, `/metrics`, etc.)                                                              |
 | `PYTH_API_KEY`                     |              |                               | API key for the production Hermes (Pyth) endpoint                                                                               |
-| `MIN_KEEPER_BALANCE_XLM`           |              | `1.0`                         | Minimum keeper XLM balance before halting                                                                                       |
+| `MIN_KEEPER_BALANCE_XLM`           |              | `10.0`                        | Minimum keeper XLM balance before halting                                                                                       |
 | `SET_PRICES_TX_FEE`                |              | `1000000`                     | Inclusion fee (stroops) for `set_prices` transactions                                                                           |
 | `KEEPER_TX_FEE`                    |              | `2000000`                     | Inclusion fee (stroops) for keeper handler transactions                                                                         |
 | `PRICE_LOOP_MS`                    |              | `1000`                        | Interval between price-feed refresh cycles (ms)                                                                                 |
@@ -134,7 +134,7 @@ All open issues are tracked on [GitHub Issues](https://github.com/SO4-Markets/so
 | `infrastructure`   | CI, Docker, deploy scripts, tooling                 |
 | `apis`             | HTTP API, REST endpoints, request/response handling |
 | `contracts`        | Soroban smart contract interactions, on-chain calls |
-| `oracle-worker`    | Cloudflare Worker oracle crate                      |
+| `oracle-worker`    | Price/keeper service crate (Axum)                  |
 | `performance`      | Performance improvement                             |
 | `testing`          | Test infrastructure, coverage, flaky tests          |
 | `security`         | Security vulnerability or hardening                 |
