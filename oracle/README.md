@@ -33,9 +33,12 @@ Optional defaults:
 - `PYTH_API_KEY` — optional API key for Pyth price feeds
 
 - `BIND_ADDR=0.0.0.0:8080`
-- `STELLAR_NETWORK=testnet`
+- `STELLAR_NETWORK=testnet`: `testnet`, `mainnet`, or `custom` (local/standalone)
 - `STELLAR_RPC_URL=https://soroban-testnet.stellar.org` on testnet
 - `HORIZON_URL=https://horizon-testnet.stellar.org` on testnet
+- `NETWORK_PASSPHRASE=Standalone Network ; February 2017`: required for
+  `custom` networks (e.g. `stellar/quickstart --local`); not read on
+  testnet/mainnet, where the passphrase is fixed
 - `PRICE_LOOP_MS=1000`
 - `KEEPER_LOOP_MS=1500`
 - `KEEPER_INDEX=0`
@@ -45,6 +48,11 @@ Optional defaults:
 - `PRICE_FEED_CONFIG`, otherwise `config/tokens.json` is embedded
 
 For mainnet, `STELLAR_RPC_URL` and `ORACLE_CONTRACT_ID` must be explicit.
+
+For a local/standalone or private network, set `STELLAR_NETWORK=custom` plus
+`NETWORK_PASSPHRASE` (your network's passphrase) and `STELLAR_RPC_URL` (e.g.
+`http://127.0.0.1:8000/soroban/rpc` for `stellar/quickstart --local`);
+`HORIZON_URL` is optional.
 
 ## Smoke Check
 

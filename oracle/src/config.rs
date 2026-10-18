@@ -34,6 +34,10 @@ pub struct PriceFeedConfig {
 pub enum Network {
     Testnet,
     Mainnet,
+    /// A local/standalone or private network identified by its own network
+    /// passphrase (e.g. `stellar/quickstart --local`). Requires
+    /// `NETWORK_PASSPHRASE` and `STELLAR_RPC_URL` to be set explicitly (#1293).
+    Custom,
 }
 
 impl Network {
@@ -41,6 +45,7 @@ impl Network {
         match self {
             Network::Testnet => "testnet",
             Network::Mainnet => "mainnet",
+            Network::Custom => "custom",
         }
     }
 }
@@ -70,6 +75,8 @@ pub struct Config {
     /// Address and port the HTTP server binds to. Env: `BIND_ADDR`, default `0.0.0.0:8080`.
     pub bind_addr: SocketAddr,
     /// Stellar network to connect to. Env: `STELLAR_NETWORK`, default `testnet`.
+    /// One of `testnet`, `mainnet`, or `custom` (a local/standalone or private
+    /// network identified by `NETWORK_PASSPHRASE`).
     pub network: Network,
     /// Stellar network passphrase for transaction signing.
     pub network_passphrase: String,
@@ -210,10 +217,13 @@ impl Config {
         let network = match network_raw.as_str() {
             "testnet" => Network::Testnet,
             "mainnet" => Network::Mainnet,
+            "custom" => Network::Custom,
             other => {
                 errors.push(EnvError::InvalidVar {
                     var: "STELLAR_NETWORK",
-                    reason: format!("unknown network '{other}'; expected 'testnet' or 'mainnet'"),
+                    reason: format!(
+                        "unknown network '{other}'; expected 'testnet', 'mainnet' or 'custom'"
+                    ),
                 });
                 Network::Testnet
             }
@@ -234,10 +244,21 @@ impl Config {
                 collect_or_default!(required(&mut lookup, "STELLAR_RPC_URL"), String::new()),
                 lookup("HORIZON_URL").unwrap_or_else(|| DEFAULT_MAINNET_HORIZON_URL.to_string()),
             ),
+            // #1293 — a local/standalone or private network has no well-known
+            // passphrase or RPC endpoint, so both must be provided explicitly.
+            // Horizon is optional: a local quickstart deployment does not run
+            // one, and the oracle only needs it for account queries.
+            Network::Custom => (
+                collect_or_default!(required(&mut lookup, "NETWORK_PASSPHRASE"), String::new()),
+                collect_or_default!(required(&mut lookup, "STELLAR_RPC_URL"), String::new()),
+                lookup("HORIZON_URL").unwrap_or_default(),
+            ),
         };
 
         let oracle_contract_id = match network {
-            Network::Mainnet => {
+            // A custom network has no known deployment, so the contract ID is
+            // required explicitly just like mainnet (#1293).
+            Network::Mainnet | Network::Custom => {
                 collect_or_default!(required(&mut lookup, "ORACLE_CONTRACT_ID"), String::new())
             }
             Network::Testnet => collect_or_default!(
@@ -734,6 +755,7 @@ mod tests {
     fn network_as_str_returns_expected_wire_values() {
         assert_eq!(Network::Testnet.as_str(), "testnet");
         assert_eq!(Network::Mainnet.as_str(), "mainnet");
+        assert_eq!(Network::Custom.as_str(), "custom");
     }
 
     #[test]
@@ -1434,6 +1456,70 @@ mod tests {
         let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
 
         assert_eq!(err.0[0], EnvError::MissingVar("STELLAR_RPC_URL"));
+    }
+
+    #[test]
+    fn config_from_lookup_supports_custom_network_with_explicit_passphrase() {
+        let mut env = valid_env();
+        env.insert("STELLAR_NETWORK", "custom".to_string());
+        env.insert(
+            "NETWORK_PASSPHRASE",
+            "Standalone Network ; February 2017".to_string(),
+        );
+        env.insert(
+            "STELLAR_RPC_URL",
+            "http://127.0.0.1:8000/soroban/rpc".to_string(),
+        );
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(cfg.network, Network::Custom);
+        assert_eq!(cfg.network_passphrase, "Standalone Network ; February 2017");
+        assert_eq!(cfg.stellar_rpc_url, "http://127.0.0.1:8000/soroban/rpc");
+        // Horizon is optional for custom networks; quickstart does not run one.
+        assert_eq!(cfg.horizon_url, "");
+    }
+
+    #[test]
+    fn config_from_lookup_custom_network_requires_passphrase() {
+        let mut env = valid_env();
+        env.insert("STELLAR_NETWORK", "custom".to_string());
+        env.insert(
+            "STELLAR_RPC_URL",
+            "http://127.0.0.1:8000/soroban/rpc".to_string(),
+        );
+        env.remove("NETWORK_PASSPHRASE");
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        assert!(
+            err.0
+                .iter()
+                .any(|e| matches!(e, EnvError::MissingVar("NETWORK_PASSPHRASE"))),
+            "expected MissingVar(NETWORK_PASSPHRASE), got: {:?}",
+            err.0
+        );
+    }
+
+    #[test]
+    fn config_from_lookup_custom_network_requires_rpc_url() {
+        let mut env = valid_env();
+        env.insert("STELLAR_NETWORK", "custom".to_string());
+        env.insert(
+            "NETWORK_PASSPHRASE",
+            "Standalone Network ; February 2017".to_string(),
+        );
+        env.remove("STELLAR_RPC_URL");
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        assert!(
+            err.0
+                .iter()
+                .any(|e| matches!(e, EnvError::MissingVar("STELLAR_RPC_URL"))),
+            "expected MissingVar(STELLAR_RPC_URL), got: {:?}",
+            err.0
+        );
     }
 
     #[test]
