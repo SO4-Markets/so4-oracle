@@ -37,6 +37,20 @@ pub const SCALE_DIGITS: u32 = 30;
 /// they go on-chain.
 pub const FLOAT_PRECISION: i128 = 10i128.pow(SCALE_DIGITS);
 
+/// Highest price a single source may report, in [`FLOAT_PRECISION`]-scaled
+/// units.
+///
+/// This is `10_000_000` whole units ($10,000,000 at [`SCALE_DIGITS`]
+/// decimals) — two orders of magnitude above any plausible listed asset —
+/// while staying far enough below `i128::MAX` that aggregation arithmetic on
+/// accepted prices cannot overflow. A source value above this bound is
+/// rejected where the raw string is parsed, before it can reach the
+/// median/mean math, where near-`i128::MAX` inputs used to overflow the
+/// unchecked additions; with `overflow-checks` enabled in the release profile
+/// that panic kills the price loop and main.rs shuts the whole process down,
+/// instead of the quote being rejected as an outlier (#1290).
+pub const MAX_SANE_PRICE: i128 = FLOAT_PRECISION * 10_000_000;
+
 /// Returns the current Unix timestamp in seconds.
 ///
 /// This is a convenience wrapper around `SystemTime::now() - UNIX_EPOCH`

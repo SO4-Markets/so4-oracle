@@ -156,8 +156,8 @@ fn find_largest_consistent_cluster(
             start += 1;
         }
         let (len, best_len) = (end - start, best.1 - best.0);
-        let spread = hi - sorted[start].0;
-        let best_spread = sorted[best.1 - 1].0 - sorted[best.0].0;
+        let spread = hi.saturating_sub(sorted[start].0);
+        let best_spread = sorted[best.1 - 1].0.saturating_sub(sorted[best.0].0);
         if len > best_len || (len == best_len && spread < best_spread) {
             best = (start, end);
         }
@@ -310,24 +310,31 @@ pub fn filter_outliers(
     let mut sorted = prices.to_vec();
     sorted.sort_unstable();
     let median = if sorted.len().is_multiple_of(2) {
-        (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2
+        midpoint(sorted[sorted.len() / 2 - 1], sorted[sorted.len() / 2])
     } else {
         sorted[sorted.len() / 2]
     };
 
     // 2. Prefer median absolute deviation because a single bad source can
     // inflate standard deviation enough to hide itself.
-    let mut deviations: Vec<i128> = prices.iter().map(|&p| (p - median).abs()).collect();
+    let mut deviations: Vec<i128> = prices
+        .iter()
+        .map(|&p| p.saturating_sub(median).saturating_abs())
+        .collect();
     deviations.sort_unstable();
     let mad = if deviations.len().is_multiple_of(2) {
-        (deviations[deviations.len() / 2 - 1] + deviations[deviations.len() / 2]) / 2
+        midpoint(
+            deviations[deviations.len() / 2 - 1],
+            deviations[deviations.len() / 2],
+        )
     } else {
         deviations[deviations.len() / 2]
     };
 
     // 3. Compute mean and standard deviation as a fallback for flat clusters.
-    let sum: i128 = prices.iter().sum();
-    let mean = sum as f64 / prices.len() as f64;
+    // Summing in f64 keeps near-`i128::MAX` inputs from wrapping the integer
+    // sum (#1290); the mean only feeds the stddev fallback below.
+    let mean = prices.iter().map(|&p| p as f64).sum::<f64>() / prices.len() as f64;
     let variance = prices
         .iter()
         .map(|&p| {
@@ -370,6 +377,20 @@ pub fn filter_outliers(
     }
 }
 
+/// `(a + b) / 2` on sorted prices without the intermediate `a + b` overflowing
+/// for near-`i128::MAX` inputs (#1290).
+///
+/// For `a <= b` the difference fits in `i128`, so `a + (b - a) / 2` is exact.
+/// The fallback only runs for inputs that straddle `i128::MIN`/`i128::MAX`
+/// (never prices in this module) and merely keeps the arithmetic panic-free.
+fn midpoint(a: i128, b: i128) -> i128 {
+    debug_assert!(a <= b, "midpoint expects sorted inputs, got {a} > {b}");
+    match b.checked_sub(a) {
+        Some(diff) => a + diff / 2,
+        None => a / 2 + b / 2,
+    }
+}
+
 /// Compute the median of a slice of prices safely.
 pub fn compute_median(prices: &[i128]) -> Option<i128> {
     if prices.len() < 2 {
@@ -385,7 +406,10 @@ pub fn compute_median_allow_single(prices: &[i128]) -> Option<i128> {
     let mut sorted = prices.to_vec();
     sorted.sort_unstable();
     if sorted.len().is_multiple_of(2) {
-        Some((sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2)
+        Some(midpoint(
+            sorted[sorted.len() / 2 - 1],
+            sorted[sorted.len() / 2],
+        ))
     } else {
         Some(sorted[sorted.len() / 2])
     }
@@ -976,5 +1000,51 @@ mod tests {
         let backward = find_largest_consistent_cluster(&rev_p, &rev_s, 500).unwrap();
         assert_eq!(forward.filtered_prices, backward.filtered_prices);
         assert_eq!(forward.sources, backward.sources);
+    }
+
+    // ── #1290: near-i128::MAX inputs must not wrap or panic ─────────────────
+
+    #[test]
+    fn midpoint_does_not_overflow_for_extreme_inputs() {
+        assert_eq!(midpoint(i128::MAX - 1, i128::MAX), i128::MAX - 1);
+        assert_eq!(midpoint(0, i128::MAX), i128::MAX / 2);
+        // Straddles the whole range: `b - a` does not fit, so the fallback
+        // keeps the arithmetic panic-free.
+        assert_eq!(midpoint(i128::MIN, i128::MAX), -1);
+    }
+
+    #[test]
+    fn median_of_two_near_max_prices_does_not_overflow() {
+        // `(i128::MAX - 1 + i128::MAX) / 2` used to overflow the addition.
+        assert_eq!(
+            compute_median_allow_single(&[i128::MAX - 1, i128::MAX]),
+            Some(i128::MAX - 1)
+        );
+    }
+
+    #[test]
+    fn filter_outliers_does_not_overflow_on_near_max_prices() {
+        let prices = vec![i128::MAX - 3, i128::MAX - 2, i128::MAX - 1, i128::MAX];
+        let result = filter_outliers(&prices, &names(4), 500);
+        // All four agree within a hair; the even-length median used to panic.
+        assert_eq!(result.filtered_prices.len(), 4);
+        assert!(result.rejected.is_empty());
+    }
+
+    #[test]
+    fn confidence_interval_does_not_overflow_on_near_max_prices() {
+        let p = compute_confidence_interval(&[i128::MAX - 2, i128::MAX - 1, i128::MAX]).unwrap();
+        assert!(p.min <= p.max);
+        assert!(p.min > 0);
+    }
+
+    #[test]
+    fn aggregate_prices_does_not_overflow_on_near_max_prices() {
+        let prices = [i128::MAX - 2, i128::MAX - 1, i128::MAX];
+        let result = aggregate_prices(&prices, &names(3), 2, 500).unwrap();
+        assert_eq!(result.sources_used.len(), 3);
+        assert!(result.rejected_sources.is_empty());
+        assert!(result.min <= result.median);
+        assert!(result.median <= result.max);
     }
 }
