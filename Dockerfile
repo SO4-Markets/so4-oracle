@@ -1,6 +1,6 @@
 # Build stage
-# Must stay >= the highest MSRV in Cargo.lock — stellar-rpc-client 27 requires
-# Rust 1.93, jsonrpsee 0.26 requires 1.85, axum 0.8 requires 1.80.
+# Builder image must stay >= the workspace MSRV declared in [workspace.package]
+# rust-version in Cargo.toml (and checked by CI). Bump both together.
 # Pinned to digest for reproducibility and supply-chain security (#1218).
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
@@ -46,10 +46,8 @@ USER oracle
 # Expose port
 EXPOSE 8080
 
-# Health check — timeout covers /ready's worst-case (RPC reachability +
-# keeper-balance retries), capped at 15s by READY_CHECK_TIMEOUT_SECS (#1042,
-# #1043). Use /health for pure liveness (always fast, in-memory only).
-HEALTHCHECK --interval=30s --timeout=20s --start-period=10s --retries=3 \
+# Health check — /health is in-memory and instant, so a short timeout suffices.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
 # Run the binary
