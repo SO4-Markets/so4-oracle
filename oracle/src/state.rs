@@ -68,6 +68,9 @@ pub struct KeeperExecution {
     pub operation: String,
     pub key: String,
     pub tx_hash: Option<String>,
+    /// Ledger at which the transaction was confirmed (#1289). `None` for
+    /// failures, and for poll timeouts whose outcome is still undecided.
+    pub ledger: Option<u32>,
     pub success: bool,
     pub error: Option<String>,
 }

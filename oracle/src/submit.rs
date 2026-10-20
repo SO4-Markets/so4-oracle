@@ -341,15 +341,35 @@ async fn sleep_ms(ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
 }
 
+/// A transaction that reached the ledger successfully.
+///
+/// Carries the real transaction hash alongside the ledger that confirmed it,
+/// so callers can both record something an explorer can resolve and report
+/// the confirmation height. Before #1289 `submit_and_poll` returned only the
+/// ledger, and callers rendered `"confirmed on ledger N"` into the `tx_hash`
+/// slot of [`crate::state::KeeperExecution`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedTransaction {
+    /// Hex-encoded transaction hash, exactly as returned by `sendTransaction`.
+    pub hash: String,
+    /// Ledger sequence at which the transaction was confirmed.
+    pub ledger: u32,
+}
+
 /// Submit a signed transaction XDR and poll for the result with exponential backoff.
 ///
-/// Returns the ledger sequence at which the transaction was confirmed.
+/// Returns the transaction hash and the ledger sequence at which the
+/// transaction was confirmed (#1289).
 #[tracing::instrument(skip_all, fields(hash = tracing::field::Empty))]
-pub async fn submit_and_poll(rpc_url: &str, signed_xdr: &str) -> Result<u32, SubmitError> {
+pub async fn submit_and_poll(
+    rpc_url: &str,
+    signed_xdr: &str,
+) -> Result<ConfirmedTransaction, SubmitError> {
     let hash = send_transaction_xdr(rpc_url, signed_xdr).await?;
     tracing::Span::current().record("hash", tracing::field::display(&hash));
     tracing::info!(hash, "transaction submitted");
-    poll_until_confirmed(rpc_url, &hash).await
+    let ledger = poll_until_confirmed(rpc_url, &hash).await?;
+    Ok(ConfirmedTransaction { hash, ledger })
 }
 
 #[cfg(test)]
@@ -607,11 +627,15 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let ledger = submit_and_poll(&mock.uri(), "signed_xdr_base64")
+        let confirmed = submit_and_poll(&mock.uri(), "signed_xdr_base64")
             .await
             .unwrap();
 
-        assert_eq!(ledger, 99);
+        assert_eq!(confirmed.ledger, 99);
+        assert_eq!(
+            confirmed.hash, "abc123def456",
+            "the real transaction hash must be returned (#1289)"
+        );
         // sendTransaction + 3 getTransaction polls
         assert_eq!(mock.received_requests().await.unwrap().len(), 4);
     }
@@ -630,11 +654,12 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let ledger = submit_and_poll(&mock.uri(), "signed_xdr_base64")
+        let confirmed = submit_and_poll(&mock.uri(), "signed_xdr_base64")
             .await
             .unwrap();
 
-        assert_eq!(ledger, 55);
+        assert_eq!(confirmed.ledger, 55);
+        assert_eq!(confirmed.hash, "abc123def456");
         assert_eq!(mock.received_requests().await.unwrap().len(), 3);
     }
 
@@ -678,11 +703,12 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let ledger = submit_and_poll(&mock.uri(), "signed_xdr_base64")
+        let confirmed = submit_and_poll(&mock.uri(), "signed_xdr_base64")
             .await
             .unwrap();
 
-        assert_eq!(ledger, 77);
+        assert_eq!(confirmed.ledger, 77);
+        assert_eq!(confirmed.hash, "abc123def456");
         assert_eq!(mock.received_requests().await.unwrap().len(), 3);
     }
 
@@ -801,7 +827,13 @@ mod tests {
         let result = submit_and_poll(&rpc_url, signed_xdr).await;
 
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-        assert_eq!(result.unwrap(), 12345);
+        assert_eq!(
+            result.unwrap(),
+            ConfirmedTransaction {
+                hash: "abc123def456".to_string(),
+                ledger: 12345,
+            }
+        );
     }
 
     #[tokio::test]
