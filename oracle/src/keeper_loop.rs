@@ -2046,6 +2046,8 @@ mod tests {
             price_loop_interval: Duration::from_millis(50),
             keeper_loop_interval: Duration::from_millis(50),
             price_feed: PriceFeedConfig { tokens: vec![] },
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         Arc::new(AppState::new(Arc::new(config)))
     }
@@ -2201,6 +2203,8 @@ mod tests {
                     },
                 ],
             },
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         let state = Arc::new(AppState::new(Arc::new(config)));
 
