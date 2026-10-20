@@ -1340,6 +1340,18 @@ async fn is_heartbeat_due(state: &Arc<AppState>, now: u64) -> bool {
     }
 }
 
+/// Keep only the prices whose move since the last submission exceeds the
+/// token's `submit_threshold_bps`.
+///
+/// `prices` is keyed by `TokenConfig::lookup_key()` (the lowercased
+/// `stellar_address`), so thresholds are looked up by that same key and the
+/// movement is compared in basis points relative to the last submitted
+/// median (#1242):
+///
+/// `|median - last| / |last| > submit_threshold_bps / 10_000`
+///
+/// Tokens without a configured threshold, or without a previous submission,
+/// are submitted — as is every token on a heartbeat cycle.
 async fn filter_prices_by_threshold(
     state: &Arc<AppState>,
     prices: &BTreeMap<String, CachedPrice>,
@@ -1350,30 +1362,47 @@ async fn filter_prices_by_threshold(
     let last_submitted = cache.last_submitted_medians.clone();
     drop(cache);
 
+    // Key by `lookup_key()`, not `symbol`: the price map (and
+    // `last_submitted_medians`) are keyed by the lowercased address, so a
+    // symbol-keyed map made every lookup miss and silently disabled
+    // `submit_threshold_bps` (#1242).
     let token_thresholds: std::collections::HashMap<String, u32> = state
         .config
         .price_feed
         .tokens
         .iter()
-        .map(|t| (t.symbol.clone(), t.submit_threshold_bps))
+        .map(|t| (t.lookup_key(), t.submit_threshold_bps))
         .collect();
 
     prices
         .iter()
-        .filter(|(symbol, price)| {
+        .filter(|(key, price)| {
             if is_heartbeat {
                 return true;
             }
-            let threshold = token_thresholds.get(symbol.as_str()).copied().unwrap_or(0);
+            let threshold = token_thresholds.get(key.as_str()).copied().unwrap_or(0);
             let last_median = last_submitted
                 .as_ref()
-                .and_then(|m| m.get(symbol.as_str()))
+                .and_then(|m| m.get(key.as_str()))
                 .copied();
             match (last_median, threshold) {
                 (Some(_last), 0) => true,
                 (Some(last), thresh) => {
-                    let change = (price.median - last).abs();
-                    change > (thresh as i128)
+                    // Cross-multiply instead of dividing to keep integer
+                    // precision. The f64 fallback is only reachable when a
+                    // product exceeds i128 (prices near i128::MAX); its ~15
+                    // significant digits are ample relative to a bps
+                    // threshold.
+                    let change = price.median.saturating_sub(last).saturating_abs();
+                    let scaled_change = change.checked_mul(10_000);
+                    let scaled_last = last.saturating_abs().checked_mul(i128::from(thresh));
+                    match (scaled_change, scaled_last) {
+                        (Some(change_scaled), Some(last_scaled)) => change_scaled > last_scaled,
+                        _ => {
+                            (change as f64) * 10_000.0
+                                > (last.saturating_abs() as f64) * f64::from(thresh)
+                        }
+                    }
                 }
                 (None, _) => true,
             }
@@ -2095,6 +2124,152 @@ mod tests {
         let recorded: Vec<_> = failures.iter().collect();
         assert_eq!(recorded.len(), 1);
         assert!(recorded[0].tx_hash.is_none());
+    }
+
+    // ── #1242: submit_threshold_bps must key by address and compare in bps ──
+
+    fn threshold_test_state(submit_threshold_bps: u32) -> Arc<AppState> {
+        let config = Config {
+            bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            network: Network::Testnet,
+            network_passphrase: "Test SDF Network ; September 2015".to_string(),
+            stellar_rpc_url: "http://127.0.0.1:9".to_string(),
+            horizon_url: "http://127.0.0.1:9".to_string(),
+            oracle_contract_id: "CORACLE".to_string(),
+            role_store_contract_id: "CROLE".to_string(),
+            data_store_contract_id: "CDATA".to_string(),
+            order_handler_contract_id: "CORDER".to_string(),
+            deposit_handler_contract_id: "CDEPOSIT".to_string(),
+            withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
+            reader_contract_id: "CREADER".to_string(),
+            keeper_private_key: SecretString::new(
+                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            ),
+            keeper_secret_key: SecretString::new(
+                "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            ),
+            keeper_account_id: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI"
+                .to_string(),
+            keeper_index: 0,
+            admin_api_token: None,
+            pyth_api_key: None,
+            min_keeper_balance_xlm: 0.0,
+            set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
+            keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
+            price_loop_interval: Duration::from_millis(50),
+            keeper_loop_interval: Duration::from_millis(50),
+            price_feed: PriceFeedConfig {
+                tokens: vec![shared_config::TokenConfig {
+                    symbol: "BTC".to_string(),
+                    stellar_address: "CBTcAddress".to_string(),
+                    submit_threshold_bps,
+                    ..Default::default()
+                }],
+            },
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+        };
+        Arc::new(AppState::new(Arc::new(config)))
+    }
+
+    fn cached_price_with_median(median: i128) -> CachedPrice {
+        CachedPrice {
+            token_address: "CBTcAddress".to_string(),
+            symbol: "BTC".to_string(),
+            display_symbol: "BTC".to_string(),
+            keeper_index: 0,
+            min: median,
+            max: median,
+            median,
+            timestamp: 0,
+            ledger_seq: 0,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        }
+    }
+
+    /// The price map is keyed by `lookup_key()` (the lowercased address) while
+    /// the token's `symbol` is "BTC". A 5 bps move must stay below a 10 bps
+    /// threshold: before #1242 the symbol lookup missed the config, the
+    /// threshold fell back to 0, and every price was resubmitted each cycle.
+    #[tokio::test]
+    async fn submit_threshold_skips_move_below_threshold() {
+        let state = threshold_test_state(10);
+        let last = 100 * crate::FLOAT_PRECISION; // $100 at 1e30 precision
+        {
+            let mut cache = state.price_cache.write().await;
+            cache.last_submitted_medians =
+                Some([("cbtcaddress".to_string(), last)].into_iter().collect());
+        }
+
+        let moved = last + 5 * last / 10_000; // 5 bps
+        let mut prices = BTreeMap::new();
+        prices.insert("cbtcaddress".to_string(), cached_price_with_median(moved));
+
+        let filtered = filter_prices_by_threshold(&state, &prices, 0, false).await;
+
+        assert!(
+            filtered.is_empty(),
+            "a 5 bps move must not cross a 10 bps threshold; \
+             the pre-#1242 raw-unit comparison would have submitted it"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_threshold_submits_move_above_threshold() {
+        let state = threshold_test_state(10);
+        let last = 100 * crate::FLOAT_PRECISION;
+        {
+            let mut cache = state.price_cache.write().await;
+            cache.last_submitted_medians =
+                Some([("cbtcaddress".to_string(), last)].into_iter().collect());
+        }
+
+        let moved = last + 20 * last / 10_000; // 20 bps
+        let mut prices = BTreeMap::new();
+        prices.insert("cbtcaddress".to_string(), cached_price_with_median(moved));
+
+        let filtered = filter_prices_by_threshold(&state, &prices, 0, false).await;
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered["cbtcaddress"].median, moved);
+    }
+
+    #[tokio::test]
+    async fn submit_threshold_zero_submits_unchanged_prices() {
+        let state = threshold_test_state(0);
+        let last = 100 * crate::FLOAT_PRECISION;
+        {
+            let mut cache = state.price_cache.write().await;
+            cache.last_submitted_medians =
+                Some([("cbtcaddress".to_string(), last)].into_iter().collect());
+        }
+
+        let mut prices = BTreeMap::new();
+        prices.insert("cbtcaddress".to_string(), cached_price_with_median(last));
+
+        let filtered = filter_prices_by_threshold(&state, &prices, 0, false).await;
+
+        assert_eq!(filtered.len(), 1, "threshold 0 means submit every cycle");
+    }
+
+    #[tokio::test]
+    async fn submit_threshold_heartbeat_submits_every_price() {
+        let state = threshold_test_state(10);
+        let last = 100 * crate::FLOAT_PRECISION;
+        {
+            let mut cache = state.price_cache.write().await;
+            cache.last_submitted_medians =
+                Some([("cbtcaddress".to_string(), last)].into_iter().collect());
+        }
+
+        let moved = last + 5 * last / 10_000; // below the threshold
+        let mut prices = BTreeMap::new();
+        prices.insert("cbtcaddress".to_string(), cached_price_with_median(moved));
+
+        let filtered = filter_prices_by_threshold(&state, &prices, 0, true).await;
+
+        assert_eq!(filtered.len(), 1, "heartbeats ignore the submit threshold");
     }
 
     #[tokio::test]
