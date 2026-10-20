@@ -199,7 +199,12 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
         .collect();
 
     let binance_prices = if !binance_symbols.is_empty() {
-        match crate::binance::fetch_spot_prices_with_url(&state.config.binance_base_url, &binance_symbols).await {
+        match crate::binance::fetch_spot_prices_with_url(
+            &state.config.binance_base_url,
+            &binance_symbols,
+        )
+        .await
+        {
             Ok(results) => {
                 let map: std::collections::HashMap<String, i128> = results.into_iter().collect();
                 Some(map)
@@ -382,6 +387,9 @@ async fn build_cached_price(
 ) -> Result<CachedPrice, String> {
     let mut prices = Vec::new();
     let mut sources = Vec::new();
+    // Observation time per source, used to attest the oldest contributed
+    // observation instead of the signing time (#1258).
+    let mut observations: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
     for source in &token.sources {
         match fetch_source_with_retry(
@@ -395,9 +403,10 @@ async fn build_cached_price(
         )
         .await
         {
-            Ok(price) => {
+            Ok((price, observed_at)) => {
                 prices.push(price);
                 sources.push(source.clone());
+                observations.insert(source.clone(), observed_at);
             }
             Err(error) => {
                 let error_str = error.to_string();
@@ -448,7 +457,15 @@ async fn build_cached_price(
         );
     }
 
-    signed_cached_price(state, token, ledger_seq, aggregate)
+    // Attest the oldest observation among the sources that actually contributed
+    // to the median, not the signing time (#1258).
+    let observed_at = aggregate_observed_at(
+        &aggregate.sources_used,
+        &observations,
+        crate::current_timestamp_secs(),
+    );
+
+    signed_cached_price(state, token, ledger_seq, aggregate, observed_at)
 }
 
 async fn fetch_source_with_retry(
@@ -459,7 +476,7 @@ async fn fetch_source_with_retry(
     pyth_batch_failed: bool,
     binance_prices: Option<&std::collections::HashMap<String, i128>>,
     coinbase_base_url: &str,
-) -> Result<i128, PriceSourceError> {
+) -> Result<(i128, u64), PriceSourceError> {
     crate::retry::retry_with_backoff(
         || async {
             fetch_source_price(
@@ -488,19 +505,19 @@ async fn fetch_source_price(
     pyth_batch_failed: bool,
     binance_prices: Option<&std::collections::HashMap<String, i128>>,
     coinbase_base_url: &str,
-) -> Result<i128, PriceSourceError> {
+) -> Result<(i128, u64), PriceSourceError> {
     match source {
         "binance" => {
             let symbol = token
                 .binance_symbol
                 .as_ref()
                 .ok_or_else(|| PriceSourceError::Config("missing binance_symbol".to_string()))?;
-            if let Some(prices) = binance_prices {
+            let price = if let Some(prices) = binance_prices {
                 prices.get(symbol).copied().ok_or_else(|| {
                     PriceSourceError::Config(format!(
                         "binance symbol not returned in batch: {symbol}"
                     ))
-                })
+                })?
             } else {
                 // Batch request failed or no batch was made — fall back to a
                 // single-symbol request so this token still gets a price.
@@ -513,30 +530,29 @@ async fn fetch_source_price(
                     .map(|(_, price)| price)
                     .ok_or_else(|| {
                         PriceSourceError::Config(format!("binance symbol not returned: {symbol}"))
-                    })
-            }
+                    })?
+            };
+            // Binance has no server-side timestamp: the fetch returning is the
+            // observation (#1258).
+            Ok((price, crate::current_timestamp_secs()))
         }
         "coinbase" => {
             let symbol = token
                 .coinbase_symbol
                 .as_ref()
                 .ok_or_else(|| PriceSourceError::Config("missing coinbase_symbol".to_string()))?;
-            crate::coinbase::fetch_spot_price_with_url(coinbase_base_url, symbol)
+            let price = crate::coinbase::fetch_spot_price_with_url(coinbase_base_url, symbol)
                 .await
-                .map_err(PriceSourceError::Coinbase)
+                .map_err(PriceSourceError::Coinbase)?;
+            Ok((price, crate::current_timestamp_secs()))
         }
         "pyth" => {
             let feed_id = token
                 .pyth_feed_id
                 .as_ref()
                 .ok_or_else(|| PriceSourceError::Config("missing pyth_feed_id".to_string()))?;
-            if let Some(feed) = pyth_prices.get(feed_id) {
-                crate::pyth::validate_pyth_price(
-                    &feed.price,
-                    crate::current_timestamp_secs(),
-                    token.stale_after_seconds,
-                    token.pyth_max_confidence_bps,
-                )
+            let feed = if let Some(feed) = pyth_prices.get(feed_id) {
+                feed.clone()
             } else {
                 // If batch failed, we should not fall back to individual requests
                 // as this would create N requests when Hermes is unstable
@@ -565,31 +581,62 @@ async fn fetch_source_price(
                             crate::pyth::PythPriceError::MissingFeedId(feed_id.clone())
                         })
                     })
-                    .and_then(|feed| {
-                        crate::pyth::validate_pyth_price(
-                            &feed.price,
-                            crate::current_timestamp_secs(),
-                            token.stale_after_seconds,
-                            token.pyth_max_confidence_bps,
-                        )
-                    })
-            }
-            .map_err(PriceSourceError::Pyth)
+                    .map_err(PriceSourceError::Pyth)?
+            };
+            let price = crate::pyth::validate_pyth_price(
+                &feed.price,
+                crate::current_timestamp_secs(),
+                token.stale_after_seconds,
+                token.pyth_max_confidence_bps,
+            )
+            .map_err(PriceSourceError::Pyth)?;
+            // Pyth attests its own `publish_time`, which `validate_pyth_price`
+            // already required to be present and non-negative (#1258). Keep a
+            // fallback so a future validation change degrades to fetch time
+            // instead of panicking.
+            let observed_at = feed
+                .price
+                .publish_time
+                .and_then(|t| u64::try_from(t).ok())
+                .unwrap_or_else(crate::current_timestamp_secs);
+            Ok((price, observed_at))
         }
-        "fixed" => crate::fixed::fixed_price(token).map_err(PriceSourceError::Fixed),
+        "fixed" => {
+            let price = crate::fixed::fixed_price(token).map_err(PriceSourceError::Fixed)?;
+            Ok((price, crate::current_timestamp_secs()))
+        }
         other => Err(PriceSourceError::Unsupported(other.to_string())),
     }
 }
 
+/// The timestamp to attest for an aggregated price: the oldest observation
+/// among the sources that contributed to the median (#1258).
+///
+/// Only `sources_used` counts: a source rejected by the cluster or outlier
+/// filters must not make the attested price look older than the data behind it.
+fn aggregate_observed_at(
+    sources_used: &[String],
+    observations: &std::collections::HashMap<String, u64>,
+    fallback: u64,
+) -> u64 {
+    sources_used
+        .iter()
+        .filter_map(|source| observations.get(source).copied())
+        .min()
+        .unwrap_or(fallback)
+}
+
 /// Signs the aggregated price payload and returns a CachedPrice (Resolves Issue #393).
+/// `timestamp` is the oldest source observation in the aggregate (#1258), so the
+/// signature attests when the price was observed, not when it was signed.
 /// The signature matches the required format and is encoded to a 128 hex character string.
 fn signed_cached_price(
     state: &Arc<AppState>,
     token: &TokenConfig,
     ledger_seq: u32,
     aggregate: AggregatedPrice,
+    timestamp: u64,
 ) -> Result<CachedPrice, String> {
-    let timestamp = crate::current_timestamp_secs();
     // Sign with the key decoded once at startup (#1226); fall back to the
     // string key only so a missing/invalid key still reports its error.
     let signature = match state.price_signing_key.as_deref() {
@@ -714,6 +761,8 @@ mod tests {
             price_feed: PriceFeedConfig {
                 tokens: vec![token],
             },
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         Arc::new(AppState::new(Arc::new(config)))
     }
@@ -748,6 +797,8 @@ mod tests {
             price_loop_interval: Duration::from_millis(50),
             keeper_loop_interval: Duration::from_millis(50),
             price_feed: PriceFeedConfig { tokens: vec![] },
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         Arc::new(AppState::new(Arc::new(config)))
     }
@@ -822,6 +873,83 @@ mod tests {
         assert_eq!(cached.sources_used, vec!["fixed"]);
         assert_eq!(cached.signature.len(), 128);
         assert!(cached.timestamp > 0, "timestamp should be positive");
+    }
+
+    #[tokio::test]
+    async fn signed_timestamp_is_the_oldest_contributing_observation() {
+        // A Pyth feed published 30 s ago combined with a live `fixed` source
+        // must be attested at the Pyth observation time, not the signing time
+        // (#1258).
+        let now = crate::current_timestamp_secs();
+        let published_at = now - 30;
+        let feed_id = "feed-1258";
+        let token = TokenConfig {
+            symbol: "TBTC".to_string(),
+            display_symbol: Some("BTC".to_string()),
+            stellar_address: "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES".to_string(),
+            sources: vec!["pyth".to_string(), "fixed".to_string()],
+            binance_symbol: None,
+            coinbase_symbol: None,
+            pyth_feed_id: Some(feed_id.to_string()),
+            fixed_price: Some("1000000000000000000000000000000".to_string()),
+            min_sources: 2,
+            max_deviation_bps: 100,
+            stale_after_seconds: 60,
+            submit_threshold_bps: 10,
+            pyth_max_confidence_bps: 100,
+        };
+
+        let mut pyth_prices = std::collections::HashMap::new();
+        pyth_prices.insert(
+            feed_id.to_string(),
+            crate::pyth::PythPriceFeed {
+                id: feed_id.to_string(),
+                price: crate::pyth::PythPriceData {
+                    price: "100000000".to_string(),
+                    conf: None,
+                    expo: -8,
+                    publish_time: Some(published_at as i64),
+                },
+            },
+        );
+
+        let state = test_state(token.clone());
+        let cached = build_cached_price(&state, &token, 123, &pyth_prices, false, None)
+            .await
+            .unwrap();
+
+        assert_eq!(cached.timestamp, published_at);
+        assert!(cached.sources_used.contains(&"pyth".to_string()));
+        assert!(cached.sources_used.contains(&"fixed".to_string()));
+    }
+
+    #[test]
+    fn aggregate_observed_at_picks_the_oldest_contributing_source() {
+        let observations = std::collections::HashMap::from([
+            ("pyth".to_string(), 990),
+            ("binance".to_string(), 1_000),
+        ]);
+        let used = vec!["binance".to_string(), "pyth".to_string()];
+        assert_eq!(aggregate_observed_at(&used, &observations, 1_005), 990);
+    }
+
+    #[test]
+    fn aggregate_observed_at_ignores_rejected_sources() {
+        let observations = std::collections::HashMap::from([
+            ("pyth".to_string(), 990),
+            ("binance".to_string(), 1_000),
+            // Fetched, then rejected by the outlier filter: must not count.
+            ("coinbase".to_string(), 100),
+        ]);
+        let used = vec!["pyth".to_string(), "binance".to_string()];
+        assert_eq!(aggregate_observed_at(&used, &observations, 1_005), 990);
+    }
+
+    #[test]
+    fn aggregate_observed_at_falls_back_without_observations() {
+        let used = vec!["pyth".to_string()];
+        let observations = std::collections::HashMap::new();
+        assert_eq!(aggregate_observed_at(&used, &observations, 42), 42);
     }
 
     #[test]
