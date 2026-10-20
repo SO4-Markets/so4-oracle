@@ -488,6 +488,8 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
                 "1000000000000000000000000000000",
             )],
         },
+        coinbase_base_url: oracle::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+        binance_base_url: oracle::binance::BINANCE_TICKER_PRICE_URL.to_string(),
     });
 
     let state = Arc::new(AppState::new(config));

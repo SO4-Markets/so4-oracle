@@ -90,6 +90,62 @@ async fn empty_price_cache_skips_set_prices_but_still_succeeds() {
     );
 }
 
+/// A price built far behind the current ledger would be rejected by the
+/// oracle contract, so the keeper drops it instead of reverting the whole
+/// batch (#1292).
+#[tokio::test]
+async fn price_behind_the_latest_ledger_is_skipped() {
+    let mock_server = MockServer::start().await;
+    let rpc_url = mock_server.uri();
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            match body["method"].as_str().unwrap_or("") {
+                "getLatestLedger" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": {"sequence": 50_000u32, "id": "abc", "protocolVersion": 22}
+                })),
+                _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "result": 0
+                })),
+            }
+        })
+        .mount(&mock_server)
+        .await;
+
+    let config = test_config_with_tokens(&rpc_url, "http://127.0.0.1:9", vec![test_token()]);
+    let state = Arc::new(AppState::new(config));
+    // `fresh_cached_price()` was built at ledger 12345, tens of thousands of
+    // ledgers behind the mocked tip.
+    state
+        .price_cache
+        .write()
+        .await
+        .prices
+        .insert(TUSDC_KEY.to_string(), fresh_cached_price());
+
+    let summary = oracle::keeper_loop::run_keeper_cycle(Arc::clone(&state))
+        .await
+        .expect("ledger-gated prices must not fail the cycle");
+
+    assert!(
+        summary.prices_stale,
+        "a price far behind the latest ledger must be treated as stale"
+    );
+    assert_eq!(summary.errors, 0);
+
+    let requests = mock_server.received_requests().await.unwrap_or_default();
+    let submitted = requests.iter().any(|req| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        body["method"] == "sendTransaction"
+    });
+    assert!(
+        !submitted,
+        "no transaction should be submitted without fresh prices"
+    );
+}
+
 #[tokio::test]
 async fn mock_rpc_empty_cycle_skips_submission() {
     let mock_server = MockServer::start().await;
