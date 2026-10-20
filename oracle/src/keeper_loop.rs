@@ -23,6 +23,10 @@ const SIMULATE_RETRY_ATTEMPTS: u32 = 3;
 const SIMULATE_RETRY_BASE_DELAY_MS: u64 = 100;
 /// Hard cap on a single keeper cycle — closes #490.
 const KEEPER_CYCLE_TIMEOUT_SECS: u64 = 50;
+/// The oracle contract rejects a `SignedPrice` whose `ledger_seq` is more than
+/// 60 ledgers behind the current ledger. Keep a 10-ledger margin so a price
+/// cannot cross the window between the probe and submission (#1292).
+const MAX_PRICE_LEDGER_AGE_LEDGERS: u32 = 50;
 /// Settle delay after a confirmed `set_prices` tx, before simulating
 /// executions against it (#956). Confirmation means the tx is in a closed
 /// ledger, but RPC nodes can lag a ledger behind when serving
@@ -247,6 +251,12 @@ impl CycleSummary {
     }
 }
 
+/// True when `price` was built so long ago that the oracle contract would
+/// reject its `ledger_seq` as too far behind the current ledger (#1292).
+fn price_is_ledger_stale(price: &CachedPrice, latest_ledger: u32) -> bool {
+    latest_ledger.saturating_sub(price.ledger_seq) > MAX_PRICE_LEDGER_AGE_LEDGERS
+}
+
 async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, String> {
     // A cycle-level timeout (KEEPER_CYCLE_TIMEOUT_SECS, in run_keeper_cycle)
     // drops execute_keeper_cycle mid-poll, before the in-flight bookkeeping
@@ -289,6 +299,17 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
 
     // Get fresh (non-stale) prices from cache
     let now = crate::current_timestamp_secs();
+    // #1292: the contract also rejects a SignedPrice whose ledger_seq is more
+    // than 60 ledgers behind, and one rejected entry reverts the whole batch.
+    // Best effort: if the probe fails, fall back to the timestamp check alone.
+    let latest_ledger =
+        match crate::stellar_rpc::get_latest_ledger_sequence(&state.config.stellar_rpc_url).await {
+            Ok(sequence) => Some(sequence),
+            Err(e) => {
+                warn!(%e, "getLatestLedger failed; skipping ledger-age price filter");
+                None
+            }
+        };
     let fresh_prices = {
         let cache = state.price_cache.read().await;
         let tokens = &state.config.price_feed.tokens;
@@ -309,6 +330,16 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
                                 stale_after_seconds = token.stale_after_seconds,
                                 age_seconds = now.saturating_sub(price.timestamp),
                                 "skipping stale price in keeper cycle"
+                            );
+                            None
+                        } else if latest_ledger
+                            .is_some_and(|latest| price_is_ledger_stale(price, latest))
+                        {
+                            tracing::debug!(
+                                symbol = %token.symbol,
+                                token = %token.stellar_address,
+                                cached_ledger_seq = price.ledger_seq,
+                                "skipping price too far behind the latest ledger in keeper cycle"
                             );
                             None
                         } else {
@@ -2256,5 +2287,29 @@ mod tests {
             "keeper cycle should succeed with stale prices filtered: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn price_ledger_age_matches_the_contract_window() {
+        let price = CachedPrice {
+            token_address: "GAFRESH".to_string(),
+            symbol: "FRESH".to_string(),
+            display_symbol: "FRESH".to_string(),
+            keeper_index: 0,
+            min: 1000,
+            max: 1000,
+            median: 1000,
+            timestamp: 1_700_000_000,
+            ledger_seq: 1_000,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        };
+
+        // 50 ledgers behind is still inside the contract's 60-ledger window.
+        assert!(!price_is_ledger_stale(&price, 1_050));
+        // 51 ledgers behind (10-ledger safety margin) is dropped.
+        assert!(price_is_ledger_stale(&price, 1_051));
+        // A probe that lags behind the cached price must not look stale.
+        assert!(!price_is_ledger_stale(&price, 999));
     }
 }

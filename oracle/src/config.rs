@@ -13,6 +13,11 @@ pub const DEFAULT_TESTNET_HORIZON_URL: &str = "https://horizon-testnet.stellar.o
 pub const DEFAULT_MAINNET_HORIZON_URL: &str = "https://horizon.stellar.org";
 pub const DEFAULT_PRICE_LOOP_MS: u64 = 1_000;
 pub const DEFAULT_KEEPER_LOOP_MS: u64 = 1_500;
+/// Longest accepted `stale_after_seconds`. The oracle contract rejects a
+/// `SignedPrice` whose timestamp is more than 300 s old, so a longer window
+/// could never be submitted; keep a 30 s margin for signing/submission latency
+/// (#1292).
+pub const MAX_STALE_AFTER_SECONDS: u64 = 270;
 /// Default inclusion fee (stroops) for `set_prices` transactions.
 pub const DEFAULT_SET_PRICES_TX_FEE: u32 = 1_000_000;
 /// Default inclusion fee (stroops) for keeper handler transactions.
@@ -396,6 +401,14 @@ impl Config {
             Duration::from_millis(DEFAULT_PRICE_LOOP_MS)
         );
 
+        // #1292: cross-check the token freshness windows against the refresh
+        // interval now that both are known.
+        if let Err(error) =
+            validate_staleness_above_loop_interval(&price_feed.tokens, price_loop_interval)
+        {
+            errors.push(EnvError::TokenConfig(error));
+        }
+
         let keeper_loop_interval = collect_or_default!(
             (|| {
                 let ms: u64 = parse_or_default(
@@ -583,6 +596,30 @@ fn load_price_feed_config(raw: Option<&str>) -> Result<PriceFeedConfig, ConfigEr
     parse_price_feed_config(raw)
 }
 
+/// Rejects tokens whose freshness window is not longer than one price-feed
+/// refresh interval: such a price is stale before the next cycle can replace
+/// it, so the keeper would see `prices_stale` permanently (#1292).
+fn validate_staleness_above_loop_interval(
+    tokens: &[TokenConfig],
+    price_loop_interval: Duration,
+) -> Result<(), ConfigError> {
+    let loop_seconds = price_loop_interval.as_millis() / 1_000;
+    for token in tokens {
+        if u128::from(token.stale_after_seconds) <= loop_seconds {
+            return Err(ConfigError::InvalidToken {
+                symbol: token.symbol.clone(),
+                reason: format!(
+                    "stale_after_seconds ({}) must be greater than PRICE_LOOP_MS ({} ms), \
+                     otherwise cached prices go stale before the next refresh",
+                    token.stale_after_seconds,
+                    price_loop_interval.as_millis()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Parse and validate the `PRICE_FEED_CONFIG` JSON string.
 ///
 /// Expected format:
@@ -678,6 +715,18 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
                     "min_sources ({}) exceeds number of configured sources ({})",
                     token.min_sources,
                     token.sources.len()
+                ),
+            });
+        }
+        // #1292: the oracle contract rejects a SignedPrice older than 300 s,
+        // so a wider freshness window makes every batch for this token revert.
+        if token.stale_after_seconds > MAX_STALE_AFTER_SECONDS {
+            return Err(ConfigError::InvalidToken {
+                symbol: token.symbol.clone(),
+                reason: format!(
+                    "stale_after_seconds ({}) must not exceed {}s: the oracle contract \
+                     rejects prices older than 300s",
+                    token.stale_after_seconds, MAX_STALE_AFTER_SECONDS
                 ),
             });
         }
@@ -1622,5 +1671,57 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parse_price_feed_config_rejects_staleness_above_contract_window() {
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["fixed"],"min_sources":1,"fixed_price":"1000000000000000000000000000000","stale_after_seconds":271}]"#;
+
+        let err = parse_price_feed_config(json).unwrap_err();
+
+        assert!(err.to_string().contains("stale_after_seconds"), "{err}");
+        assert!(err.to_string().contains("270"), "{err}");
+    }
+
+    #[test]
+    fn parse_price_feed_config_accepts_staleness_at_contract_window_edge() {
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["fixed"],"min_sources":1,"fixed_price":"1000000000000000000000000000000","stale_after_seconds":270}]"#;
+
+        assert!(parse_price_feed_config(json).is_ok());
+    }
+
+    #[test]
+    fn validate_staleness_above_loop_interval_uses_whole_seconds() {
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["fixed"],"min_sources":1,"fixed_price":"1000000000000000000000000000000","stale_after_seconds":2}]"#;
+        let tokens = parse_price_feed_config(json).unwrap().tokens;
+
+        // A 2.5 s refresh outruns a 2 s freshness window.
+        assert!(
+            validate_staleness_above_loop_interval(&tokens, Duration::from_millis(2_500)).is_err()
+        );
+        // A 1.5 s refresh leaves headroom between refreshes.
+        assert!(
+            validate_staleness_above_loop_interval(&tokens, Duration::from_millis(1_500)).is_ok()
+        );
+    }
+
+    #[test]
+    fn config_from_lookup_rejects_staleness_not_above_price_loop() {
+        let mut env = valid_env();
+        env.insert(
+            "PRICE_FEED_CONFIG",
+            r#"[{"symbol":"TUSDC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["fixed"],"min_sources":1,"fixed_price":"1000000000000000000000000000000","stale_after_seconds":1}]"#.to_string(),
+        );
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        assert!(
+            err.0.iter().any(|error| matches!(
+                error,
+                EnvError::TokenConfig(ConfigError::InvalidToken { .. })
+            )),
+            "expected a token-config error, got: {err}"
+        );
+        assert!(err.to_string().contains("PRICE_LOOP_MS"), "{err}");
     }
 }
