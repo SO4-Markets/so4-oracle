@@ -655,11 +655,6 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
                             reason: e.to_string(),
                         });
                     }
-                "fixed" if token.fixed_price.as_deref().unwrap_or("").is_empty() => {
-                    return Err(ConfigError::InvalidToken {
-                        symbol: token.symbol.clone(),
-                        reason: "fixed_price is required for fixed source".to_string(),
-                    });
                 }
                 "binance" | "coinbase" | "pyth" => {}
                 other => {
@@ -1032,8 +1027,9 @@ mod tests {
 
     #[test]
     fn accept_valid_fixed_price() {
-        let json = r#"[{"symbol":"TUSDC","stellar_address":"CADDR","sources":["fixed"],"fixed_price":"10000000"}]"#;
-        assert!(parse_price_feed_config(json).is_ok());
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["fixed"],"fixed_price":"10000000","min_sources":1}]"#;
+        let result = parse_price_feed_config(json);
+        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
     }
 
     #[test]
