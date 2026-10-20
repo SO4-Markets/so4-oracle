@@ -56,6 +56,37 @@ pub fn test_config_with_tokens(
     })
 }
 
+/// Base64 XDR for a `LedgerEntryData::Account` with the given sequence number,
+/// so RPC mocks can answer `getLedgerEntries` with real ledger-entry XDR
+/// (#1241). `account_id` must be the G... keeper account used in the test
+/// config.
+pub fn account_ledger_entry_xdr(account_id: &str, sequence: i64) -> String {
+    use stellar_xdr::{
+        AccountEntry, AccountEntryExt, AccountId, LedgerEntryData, Limits, PublicKey,
+        SequenceNumber, Thresholds, Uint256, WriteXdr,
+    };
+
+    let pk = match stellar_strkey::Strkey::from_string(account_id) {
+        Ok(stellar_strkey::Strkey::PublicKeyEd25519(pk)) => pk,
+        other => panic!("test account must be a G... strkey: {other:?}"),
+    };
+
+    let entry = LedgerEntryData::Account(AccountEntry {
+        account_id: AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(pk.0))),
+        balance: 100_0000000,
+        seq_num: SequenceNumber(sequence),
+        num_sub_entries: 0,
+        inflation_dest: None,
+        flags: 0,
+        home_domain: Default::default(),
+        thresholds: Thresholds([1, 1, 1, 1]),
+        signers: Default::default(),
+        ext: AccountEntryExt::V0,
+    });
+
+    entry.to_xdr_base64(Limits::none()).unwrap()
+}
+
 pub fn fixed_token(symbol: &str, address: &str) -> TokenConfig {
     fixed_token_with_price(symbol, address, "1000000000000000000000000000000")
 }

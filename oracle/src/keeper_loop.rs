@@ -1059,7 +1059,7 @@ struct HandlerError {
     message: String,
     /// The originating submission error, absent for failures raised before
     /// the transaction was ever sent (bad key hex, build/sign errors, and a
-    /// failed `getAccount` sequence fetch).
+    /// failed account-sequence fetch).
     submit: Option<SubmitError>,
 }
 
@@ -1437,8 +1437,8 @@ fn is_bad_sequence_xdr(error_result_xdr: &str) -> bool {
 /// `sequence_cache` is shared across every `execute_handler` invocation
 /// within one keeper cycle: the first call of the cycle fetches the account
 /// sequence once and caches it; every subsequent call reuses and locally
-/// increments that cached value on success, avoiding a redundant `getAccount`
-/// RPC round-trip per pending order/deposit/withdrawal (#805). The cache is
+/// increments that cached value on success, avoiding a redundant account-ledger
+/// round-trip per pending order/deposit/withdrawal (#805). The cache is
 /// only cleared (forcing a fresh fetch on the next call) when a submission is
 /// rejected for a sequence-related reason, since that's the one case where
 /// the cached value is known to be wrong.
@@ -1535,14 +1535,25 @@ async fn get_account_sequence(state: &Arc<AppState>) -> Result<u64, SequenceFetc
 }
 
 async fn get_account_sequence_once(state: &Arc<AppState>) -> Result<u64, SequenceFetchError> {
+    use stellar_xdr::{ReadXdr, WriteXdr};
+
     let rpc_url = &state.config.stellar_rpc_url;
     let account_id = &state.config.keeper_account_id;
+
+    // Stellar RPC has no `getAccount` method (#1241): fetch the account ledger
+    // entry and read `seq_num` out of the decoded `AccountEntry`.
+    let account_key = ledger_key_account(account_id)?;
+    let key_xdr = account_key
+        .to_xdr_base64(stellar_xdr::Limits::none())
+        .map_err(|e| {
+            SequenceFetchError::MissingOrInvalid(format!("failed to encode LedgerKey: {e}"))
+        })?;
 
     let payload = serde_json::to_string(&serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "getAccount",
-        "params": { "account": account_id }
+        "method": "getLedgerEntries",
+        "params": { "keys": [key_xdr] }
     }))
     .map_err(|e| {
         SequenceFetchError::MissingOrInvalid(format!("failed to serialize request: {e}"))
@@ -1551,32 +1562,81 @@ async fn get_account_sequence_once(state: &Arc<AppState>) -> Result<u64, Sequenc
     // Use the shared RPC POST helper instead of hand-rolling the request here (#751).
     let body = crate::stellar_rpc::rpc_post(rpc_url, payload)
         .await
-        .map_err(|e| SequenceFetchError::Network(format!("getAccount request failed: {e}")))?;
+        .map_err(|e| {
+            SequenceFetchError::Network(format!("getLedgerEntries request failed: {e}"))
+        })?;
 
     let response_json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-        SequenceFetchError::Network(format!("Failed to parse getAccount response: {e}"))
+        SequenceFetchError::Network(format!("Failed to parse getLedgerEntries response: {e}"))
     })?;
 
     if let Some(error) = response_json.get("error") {
         return Err(SequenceFetchError::Network(format!(
-            "getAccount error: {}",
+            "getLedgerEntries error: {}",
             truncate_rpc_error(error)
         )));
     }
 
-    let seq_str = response_json
+    let entry_xdr = response_json
         .get("result")
-        .and_then(|r| r.get("sequence"))
-        .and_then(|s| s.as_str())
+        .and_then(|r| r.get("entries"))
+        .and_then(|e| e.as_array())
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry.get("xdr"))
+        .and_then(|xdr| xdr.as_str())
         .ok_or_else(|| {
             SequenceFetchError::MissingOrInvalid(
-                "Missing sequence in getAccount response".to_string(),
+                "no account ledger entry in getLedgerEntries response".to_string(),
             )
         })?;
 
-    seq_str.parse::<u64>().map(|seq| seq + 1).map_err(|e| {
-        SequenceFetchError::MissingOrInvalid(format!("failed to parse sequence '{seq_str}': {e}"))
-    })
+    let entry =
+        stellar_xdr::LedgerEntryData::from_xdr_base64(entry_xdr, stellar_xdr::Limits::none())
+            .map_err(|e| {
+                SequenceFetchError::MissingOrInvalid(format!(
+                    "failed to decode account ledger entry: {e}"
+                ))
+            })?;
+
+    let seq_num = match entry {
+        stellar_xdr::LedgerEntryData::Account(account) => account.seq_num.0,
+        _ => {
+            return Err(SequenceFetchError::MissingOrInvalid(
+                "ledger entry for keeper account is not an AccountEntry".to_string(),
+            ))
+        }
+    };
+
+    let seq = u64::try_from(seq_num).map_err(|e| {
+        SequenceFetchError::MissingOrInvalid(format!("negative account sequence {seq_num}: {e}"))
+    })?;
+
+    Ok(seq + 1)
+}
+
+/// Build the `LedgerKey::Account` used to fetch the keeper's sequence (#1241).
+fn ledger_key_account(account_id: &str) -> Result<stellar_xdr::LedgerKey, SequenceFetchError> {
+    let public_key = match stellar_strkey::Strkey::from_string(account_id) {
+        Ok(stellar_strkey::Strkey::PublicKeyEd25519(pk)) => {
+            stellar_xdr::PublicKey::PublicKeyTypeEd25519(stellar_xdr::Uint256(pk.0))
+        }
+        Ok(other) => {
+            return Err(SequenceFetchError::MissingOrInvalid(format!(
+                "expected G... keeper account, got: {other:?}"
+            )))
+        }
+        Err(e) => {
+            return Err(SequenceFetchError::MissingOrInvalid(format!(
+                "invalid KEEPER_ACCOUNT_ID '{account_id}': {e}"
+            )))
+        }
+    };
+
+    Ok(stellar_xdr::LedgerKey::Account(
+        stellar_xdr::LedgerKeyAccount {
+            account_id: stellar_xdr::AccountId(public_key),
+        },
+    ))
 }
 
 /// Failure of a single `simulateTransaction` call, split so the retry loop
@@ -2128,7 +2188,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         // The keeper cycle needs pending work to reach the stale-price filter,
-        // then set_prices needs getAccount + sendTransaction + getTransaction.
+        // then set_prices needs getLedgerEntries + sendTransaction + getTransaction.
         // Return no pending work for simulate calls so the cycle short-circuits
         // after the stale-price filter — the filter runs before pending-work
         // lookup, so this exercises the code path we care about.

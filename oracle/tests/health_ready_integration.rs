@@ -406,19 +406,18 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
                         }))
                     }
                 }
-                "getAccount" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "getLedgerEntries" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 1,
                     "result": {
-                        "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
-                        "sequence": "100",
-                        "subentries": 0,
-                        "inflationDestination": "",
-                        "homeDomain": "",
-                        "thresholds": {"low": 1, "med": 1, "high": 1},
-                        "signers": [],
-                        "data": {},
-                        "balances": []
+                        "entries": [{
+                            "xdr": common::account_ledger_entry_xdr(
+                                "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                                100
+                            ),
+                            "lastModifiedLedgerSeq": 123
+                        }],
+                        "latestLedger": 123
                     }
                 })),
                 "sendTransaction" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
