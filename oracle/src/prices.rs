@@ -37,16 +37,21 @@ pub struct AggregatedPrice {
     pub median: i128,
     pub sources_used: Vec<String>,
     pub rejected_sources: Vec<RejectedSource>,
+    pub min_observation_time: u64,
 }
 
 pub fn aggregate_prices(
     prices: &[i128],
     sources: &[String],
+    observation_times: &[u64],
     min_sources: usize,
     max_deviation_bps: u32,
 ) -> Result<AggregatedPrice, String> {
     if prices.len() != sources.len() {
         return Err("prices and sources length mismatch".to_string());
+    }
+    if prices.len() != observation_times.len() {
+        return Err("observation_times and sources length mismatch".to_string());
     }
     if prices.len() < min_sources {
         return Err(format!(
@@ -113,12 +118,28 @@ pub fn aggregate_prices(
             .ok_or_else(|| "cannot compute confidence interval".to_string())?;
     let median = compute_median_allow_single(&filter_result.filtered_prices).unwrap_or(props.min);
 
+    // Compute the minimum observation time from the sources used in the final aggregation
+    let min_observation_time = filter_result
+        .filtered_sources
+        .iter()
+        .enumerate()
+        .filter_map(|(i, source)| {
+            // Find the index of this source in the original sources array
+            sources
+                .iter()
+                .position(|s| s == source)
+                .map(|orig_idx| observation_times[orig_idx])
+        })
+        .min()
+        .ok_or_else(|| "no observation times available".to_string())?;
+
     Ok(AggregatedPrice {
         min: props.min,
         max: props.max,
         median,
         sources_used: filter_result.filtered_sources,
         rejected_sources,
+        min_observation_time,
     })
 }
 
@@ -402,6 +423,11 @@ pub fn deviation_bps(price: i128, median: i128) -> f64 {
 mod tests {
     use super::*;
 
+    // Helper for tests to create observation_times vector
+    fn observation_times_for(count: usize, base: u64) -> Vec<u64> {
+        (0..count).map(|i| base + i as u64).collect()
+    }
+
     #[test]
     fn five_prices_tenth_and_ninetieth_percentile() {
         // sorted: [100, 200, 300, 400, 500]
@@ -501,9 +527,10 @@ mod tests {
     #[test]
     fn single_source_requires_configured_min_sources() {
         let sources = vec!["fixed".to_string()];
-        let ok = aggregate_prices(&[1_000], &sources, 1, 50).unwrap();
+        let obs_times = observation_times_for(1, 1000);
+        let ok = aggregate_prices(&[1_000], &sources, &obs_times, 1, 50).unwrap();
         assert_eq!(ok.median, 1_000);
-        let err = aggregate_prices(&[1_000], &sources, 2, 50).unwrap_err();
+        let err = aggregate_prices(&[1_000], &sources, &obs_times, 2, 50).unwrap_err();
         assert!(err.contains("insufficient sources"));
     }
 
@@ -514,7 +541,8 @@ mod tests {
             "coinbase".to_string(),
             "pyth".to_string(),
         ];
-        let result = aggregate_prices(&[100, 101, 160], &sources, 2, 200).unwrap();
+        let obs_times = observation_times_for(3, 1000);
+        let result = aggregate_prices(&[100, 101, 160], &sources, &obs_times, 2, 200).unwrap();
         assert_eq!(result.sources_used, vec!["binance", "coinbase"]);
         assert_eq!(result.rejected_sources.len(), 1);
     }
@@ -671,7 +699,8 @@ mod tests {
             "coinbase".to_string(),
             "pyth".to_string(),
         ];
-        let result = aggregate_prices(&[100, 101, 1000], &sources, 3, 200);
+        let obs_times = observation_times_for(3, 1000);
+        let result = aggregate_prices(&[100, 101, 1000], &sources, &obs_times, 3, 200);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -687,7 +716,8 @@ mod tests {
         // outlier filter, or confidence interval is computed.
         let prices: Vec<i128> = vec![];
         let sources: Vec<String> = vec![];
-        let err = aggregate_prices(&prices, &sources, 0, 100).unwrap_err();
+        let obs_times: Vec<u64> = vec![];
+        let err = aggregate_prices(&prices, &sources, &obs_times, 0, 100).unwrap_err();
         assert_eq!(err, "no consistent price cluster found");
     }
 
@@ -759,7 +789,8 @@ mod tests {
         // Two honest-ish at ~100, one extreme outlier. The cluster of [100, 101] should win.
         let prices = vec![100, 101, 10000];
         let sources = vec!["src1".to_string(), "src2".to_string(), "bad".to_string()];
-        let result = aggregate_prices(&prices, &sources, 2, 500).unwrap();
+        let obs_times = observation_times_for(3, 1000);
+        let result = aggregate_prices(&prices, &sources, &obs_times, 2, 500).unwrap();
         assert_eq!(result.sources_used.len(), 2);
         assert!(result.sources_used.contains(&"src1".to_string()));
         assert!(result.sources_used.contains(&"src2".to_string()));
@@ -775,7 +806,8 @@ mod tests {
         // Should fail because no cluster meets min_sources
         let prices = vec![100, 100, 110];
         let sources = vec!["src1".to_string(), "src2".to_string(), "src3".to_string()];
-        let result = aggregate_prices(&prices, &sources, 3, 500);
+        let obs_times = observation_times_for(3, 1000);
+        let result = aggregate_prices(&prices, &sources, &obs_times, 3, 500);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -793,7 +825,8 @@ mod tests {
             "src3".to_string(),
             "bad".to_string(),
         ];
-        let result = aggregate_prices(&prices, &sources, 2, 500).unwrap();
+        let obs_times = observation_times_for(4, 1000);
+        let result = aggregate_prices(&prices, &sources, &obs_times, 2, 500).unwrap();
         assert_eq!(result.sources_used.len(), 3);
         assert_eq!(result.median, 100); // median of [99, 100, 101]
         assert_eq!(result.rejected_sources.len(), 1);
@@ -868,7 +901,8 @@ mod tests {
             vec![1000, 1001, 1002, 1003, 1004],
             vec![100, 101, 99, 5000],
         ] {
-            let result = aggregate_prices(&prices, &names(prices.len()), 1, 10_000).unwrap();
+            let obs_times = observation_times_for(prices.len(), 1000);
+            let result = aggregate_prices(&prices, &names(prices.len()), &obs_times, 1, 10_000).unwrap();
             assert!(
                 result.min <= result.median && result.median <= result.max,
                 "min {} <= median {} <= max {} violated for {prices:?}",
@@ -900,7 +934,8 @@ mod tests {
             vec![1000i128, 1001, 1002, 1003],
             vec![100i128, 101, 99, 5000],
         ] {
-            let result = aggregate_prices(&prices, &names(prices.len()), 1, 10_000).unwrap();
+            let obs_times = observation_times_for(prices.len(), 1000);
+            let result = aggregate_prices(&prices, &names(prices.len()), &obs_times, 1, 10_000).unwrap();
             assert_eq!(
                 result.sources_used.len() + result.rejected_sources.len(),
                 prices.len(),
@@ -916,9 +951,11 @@ mod tests {
             vec![100i128, 101, 99, 5000],
             vec![1000i128, 1001, 1002, 1003, 1004, 1200],
         ] {
-            let baseline = aggregate_prices(&prices, &names(prices.len()), 2, 500).unwrap();
+            let obs_times = observation_times_for(prices.len(), 1000);
+            let baseline = aggregate_prices(&prices, &names(prices.len()), &obs_times, 2, 500).unwrap();
             for (p, s) in permutations(&prices) {
-                let r = aggregate_prices(&p, &s, 2, 500).unwrap();
+                let obs_times_perm = observation_times_for(p.len(), 1000);
+                let r = aggregate_prices(&p, &s, &obs_times_perm, 2, 500).unwrap();
                 assert_eq!(
                     (r.min, r.median, r.max),
                     (baseline.min, baseline.median, baseline.max),
@@ -952,8 +989,9 @@ mod tests {
 
         // 100 vs 107 is 700 bps: cut at the default 5%, kept at an 8% token config.
         let sources = names(3);
-        assert!(aggregate_prices(&[100, 107, 104], &sources, 3, 400).is_err());
-        let ok = aggregate_prices(&[100, 107, 104], &sources, 3, 800).unwrap();
+        let obs_times = observation_times_for(3, 1000);
+        assert!(aggregate_prices(&[100, 107, 104], &sources, &obs_times, 3, 400).is_err());
+        let ok = aggregate_prices(&[100, 107, 104], &sources, &obs_times, 3, 800).unwrap();
         assert_eq!(ok.sources_used.len(), 3);
     }
 
