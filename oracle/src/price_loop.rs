@@ -8,6 +8,13 @@ use crate::prices::AggregatedPrice;
 use crate::retry::MAX_BACKOFF_DELAY_MS;
 use crate::state::{AppState, CachedPrice, FailedSubmission};
 
+/// Price with its observation timestamp for tracking staleness correctly.
+#[derive(Debug, Clone, Copy)]
+struct PriceWithObservationTime {
+    price: i128,
+    observation_time: u64,
+}
+
 const SOURCE_RETRY_ATTEMPTS: u32 = 3;
 const SOURCE_RETRY_BASE_DELAY_MS: u64 = 100;
 const LEDGER_SEQUENCE_RETRY_ATTEMPTS: u32 = 3;
@@ -382,6 +389,7 @@ async fn build_cached_price(
 ) -> Result<CachedPrice, String> {
     let mut prices = Vec::new();
     let mut sources = Vec::new();
+    let mut observation_times = Vec::new();
 
     for source in &token.sources {
         match fetch_source_with_retry(
@@ -395,8 +403,9 @@ async fn build_cached_price(
         )
         .await
         {
-            Ok(price) => {
-                prices.push(price);
+            Ok(price_with_time) => {
+                prices.push(price_with_time.price);
+                observation_times.push(price_with_time.observation_time);
                 sources.push(source.clone());
             }
             Err(error) => {
@@ -426,6 +435,7 @@ async fn build_cached_price(
     let aggregate = crate::prices::aggregate_prices(
         &prices,
         &sources,
+        &observation_times,
         token.min_sources,
         token.max_deviation_bps,
     )?;
@@ -459,7 +469,7 @@ async fn fetch_source_with_retry(
     pyth_batch_failed: bool,
     binance_prices: Option<&std::collections::HashMap<String, i128>>,
     coinbase_base_url: &str,
-) -> Result<i128, PriceSourceError> {
+) -> Result<PriceWithObservationTime, PriceSourceError> {
     crate::retry::retry_with_backoff(
         || async {
             fetch_source_price(
@@ -488,7 +498,8 @@ async fn fetch_source_price(
     pyth_batch_failed: bool,
     binance_prices: Option<&std::collections::HashMap<String, i128>>,
     coinbase_base_url: &str,
-) -> Result<i128, PriceSourceError> {
+) -> Result<PriceWithObservationTime, PriceSourceError> {
+    let now = crate::current_timestamp_secs();
     match source {
         "binance" => {
             let symbol = token
@@ -496,7 +507,10 @@ async fn fetch_source_price(
                 .as_ref()
                 .ok_or_else(|| PriceSourceError::Config("missing binance_symbol".to_string()))?;
             if let Some(prices) = binance_prices {
-                prices.get(symbol).copied().ok_or_else(|| {
+                prices.get(symbol).copied().map(|price| PriceWithObservationTime {
+                    price,
+                    observation_time: now,
+                }).ok_or_else(|| {
                     PriceSourceError::Config(format!(
                         "binance symbol not returned in batch: {symbol}"
                     ))
@@ -510,7 +524,10 @@ async fn fetch_source_price(
                 results
                     .into_iter()
                     .find(|(got_symbol, _)| got_symbol == symbol)
-                    .map(|(_, price)| price)
+                    .map(|(_, price)| PriceWithObservationTime {
+                        price,
+                        observation_time: now,
+                    })
                     .ok_or_else(|| {
                         PriceSourceError::Config(format!("binance symbol not returned: {symbol}"))
                     })
@@ -523,6 +540,10 @@ async fn fetch_source_price(
                 .ok_or_else(|| PriceSourceError::Config("missing coinbase_symbol".to_string()))?;
             crate::coinbase::fetch_spot_price_with_url(coinbase_base_url, symbol)
                 .await
+                .map(|price| PriceWithObservationTime {
+                    price,
+                    observation_time: now,
+                })
                 .map_err(PriceSourceError::Coinbase)
         }
         "pyth" => {
@@ -533,10 +554,14 @@ async fn fetch_source_price(
             if let Some(feed) = pyth_prices.get(feed_id) {
                 crate::pyth::validate_pyth_price(
                     &feed.price,
-                    crate::current_timestamp_secs(),
+                    now,
                     token.stale_after_seconds,
                     token.pyth_max_confidence_bps,
                 )
+                .map(|result| PriceWithObservationTime {
+                    price: result.price,
+                    observation_time: result.observation_time,
+                })
             } else {
                 // If batch failed, we should not fall back to individual requests
                 // as this would create N requests when Hermes is unstable
@@ -568,15 +593,24 @@ async fn fetch_source_price(
                     .and_then(|feed| {
                         crate::pyth::validate_pyth_price(
                             &feed.price,
-                            crate::current_timestamp_secs(),
+                            now,
                             token.stale_after_seconds,
                             token.pyth_max_confidence_bps,
                         )
+                        .map(|result| PriceWithObservationTime {
+                            price: result.price,
+                            observation_time: result.observation_time,
+                        })
                     })
             }
             .map_err(PriceSourceError::Pyth)
         }
-        "fixed" => crate::fixed::fixed_price(token).map_err(PriceSourceError::Fixed),
+        "fixed" => crate::fixed::fixed_price(token)
+            .map(|price| PriceWithObservationTime {
+                price,
+                observation_time: now,
+            })
+            .map_err(PriceSourceError::Fixed),
         other => Err(PriceSourceError::Unsupported(other.to_string())),
     }
 }
@@ -589,7 +623,9 @@ fn signed_cached_price(
     ledger_seq: u32,
     aggregate: AggregatedPrice,
 ) -> Result<CachedPrice, String> {
-    let timestamp = crate::current_timestamp_secs();
+    // Use the minimum observation time from all sources used, not the signing time.
+    // This ensures staleness is measured from the oldest contributing price.
+    let timestamp = aggregate.min_observation_time;
     // Sign with the key decoded once at startup (#1226); fall back to the
     // string key only so a missing/invalid key still reports its error.
     let signature = match state.price_signing_key.as_deref() {

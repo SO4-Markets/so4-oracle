@@ -161,12 +161,19 @@ pub fn normalize_pyth_price(price_str: &str, exponent: i32) -> Result<i128, Pyth
         })
 }
 
+/// Price with its observation timestamp for staleness tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriceWithTimestamp {
+    pub price: i128,
+    pub observation_time: u64,
+}
+
 pub fn validate_pyth_price(
     data: &PythPriceData,
     now_seconds: u64,
     stale_after_seconds: u64,
     max_confidence_bps: u32,
-) -> Result<i128, PythPriceError> {
+) -> Result<PriceWithTimestamp, PythPriceError> {
     let price = normalize_pyth_price(&data.price, data.expo)?;
     let publish_time = data
         .publish_time
@@ -216,7 +223,10 @@ pub fn validate_pyth_price(
         }
     }
 
-    Ok(price)
+    Ok(PriceWithTimestamp {
+        price,
+        observation_time: publish_time,
+    })
 }
 
 // URL-injecting twin of the batched fetch path, used by the mock-server tests below.
@@ -394,8 +404,9 @@ mod tests {
             expo: -8,
             publish_time: Some(1_000),
         };
-        let price = validate_pyth_price(&data, 1_010, 60, 50).unwrap();
-        assert_eq!(price, FLOAT_PRECISION);
+        let result = validate_pyth_price(&data, 1_010, 60, 50).unwrap();
+        assert_eq!(result.price, FLOAT_PRECISION);
+        assert_eq!(result.observation_time, 1_000);
     }
 
     #[test]
@@ -873,8 +884,8 @@ mod tests {
             publish_time: Some(1_000),
         };
         // now=1_010, age=10 < stale_after=60 → accepted
-        let price = validate_pyth_price(&data, 1_010, 60, 100).unwrap();
-        assert_eq!(price, 45 * FLOAT_PRECISION);
+        let result = validate_pyth_price(&data, 1_010, 60, 100).unwrap();
+        assert_eq!(result.price, 45 * FLOAT_PRECISION);
     }
 
     // #366 — normalize_pyth_price rejects a positive exponent with PriceParseError
