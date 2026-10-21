@@ -206,7 +206,12 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
         .collect();
 
     let binance_prices = if !binance_symbols.is_empty() {
-        match crate::binance::fetch_spot_prices_with_url(&state.config.binance_base_url, &binance_symbols).await {
+        match crate::binance::fetch_spot_prices_with_url(
+            &state.config.binance_base_url,
+            &binance_symbols,
+        )
+        .await
+        {
             Ok(results) => {
                 let map: std::collections::HashMap<String, i128> = results.into_iter().collect();
                 Some(map)
@@ -750,6 +755,8 @@ mod tests {
             price_feed: PriceFeedConfig {
                 tokens: vec![token],
             },
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         Arc::new(AppState::new(Arc::new(config)))
     }
@@ -784,6 +791,8 @@ mod tests {
             price_loop_interval: Duration::from_millis(50),
             keeper_loop_interval: Duration::from_millis(50),
             price_feed: PriceFeedConfig { tokens: vec![] },
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         Arc::new(AppState::new(Arc::new(config)))
     }

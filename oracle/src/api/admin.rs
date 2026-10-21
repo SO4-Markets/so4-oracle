@@ -225,7 +225,9 @@ pub async fn metrics(_auth: AdminAuth, State(state): State<Arc<AppState>>) -> Re
     {
         let cache = state.price_cache.read().await;
         let now = std::time::SystemTime::now();
-        prometheus.push_str("# HELP oracle_price_age_seconds Seconds since each token's price was last cached\n");
+        prometheus.push_str(
+            "# HELP oracle_price_age_seconds Seconds since each token's price was last cached\n",
+        );
         prometheus.push_str("# TYPE oracle_price_age_seconds gauge\n");
         for (symbol, price) in &cache.prices {
             // CachedPrice.timestamp is a Unix timestamp in seconds set by the
@@ -276,12 +278,15 @@ pub async fn metrics(_auth: AdminAuth, State(state): State<Arc<AppState>>) -> Re
     // In-flight and blacklisted key counts (#1267).
     {
         let in_flight = state.in_flight_keys.lock().await.len();
-        prometheus.push_str("# HELP oracle_in_flight_keys Keys currently being submitted on-chain\n");
+        prometheus
+            .push_str("# HELP oracle_in_flight_keys Keys currently being submitted on-chain\n");
         prometheus.push_str("# TYPE oracle_in_flight_keys gauge\n");
         prometheus.push_str(&format!("oracle_in_flight_keys {}\n", in_flight));
 
         let blacklisted = state.frozen_order_blacklist.lock().await.len();
-        prometheus.push_str("# HELP oracle_blacklisted_keys Keys permanently abandoned after repeated failures\n");
+        prometheus.push_str(
+            "# HELP oracle_blacklisted_keys Keys permanently abandoned after repeated failures\n",
+        );
         prometheus.push_str("# TYPE oracle_blacklisted_keys gauge\n");
         prometheus.push_str(&format!("oracle_blacklisted_keys {}\n", blacklisted));
     }
