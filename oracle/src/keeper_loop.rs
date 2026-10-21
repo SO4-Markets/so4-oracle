@@ -1060,7 +1060,7 @@ struct HandlerError {
     message: String,
     /// The originating submission error, absent for failures raised before
     /// the transaction was ever sent (bad key hex, build/sign errors, and a
-    /// failed `getAccount` sequence fetch).
+    /// failed `getLedgerEntries` sequence fetch).
     submit: Option<SubmitError>,
 }
 
@@ -1346,36 +1346,70 @@ async fn filter_prices_by_threshold(
     let last_submitted = cache.last_submitted_medians.clone();
     drop(cache);
 
+    // `prices` (and `last_submitted_medians`) are keyed by
+    // `TokenConfig::lookup_key()` — the lowercased stellar address, not the
+    // symbol — so the threshold map must use the same key or every lookup
+    // misses and every token is submitted every cycle (#1242).
     let token_thresholds: std::collections::HashMap<String, u32> = state
         .config
         .price_feed
         .tokens
         .iter()
-        .map(|t| (t.symbol.clone(), t.submit_threshold_bps))
+        .map(|t| (t.lookup_key(), t.submit_threshold_bps))
         .collect();
 
     prices
         .iter()
-        .filter(|(symbol, price)| {
+        .filter(|(key, price)| {
             if is_heartbeat {
                 return true;
             }
-            let threshold = token_thresholds.get(symbol.as_str()).copied().unwrap_or(0);
+            let threshold = token_thresholds.get(key.as_str()).copied().unwrap_or(0);
             let last_median = last_submitted
                 .as_ref()
-                .and_then(|m| m.get(symbol.as_str()))
+                .and_then(|m| m.get(key.as_str()))
                 .copied();
             match (last_median, threshold) {
                 (Some(_last), 0) => true,
-                (Some(last), thresh) => {
-                    let change = (price.median - last).abs();
-                    change > (thresh as i128)
-                }
+                (Some(last), thresh) => move_exceeds_bps(last, price.median, thresh),
                 (None, _) => true,
             }
         })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
+}
+
+/// Basis points in one unit: 10_000 bps = 100%.
+const BPS_DENOMINATOR: i128 = 10_000;
+
+/// True when the move from `last` to `median` is strictly greater than
+/// `threshold_bps` basis points of `last`.
+///
+/// Prices are 1e30-scaled integers, so a raw delta cannot be compared with a
+/// basis-point count — it has to be compared relatively (#1242):
+/// `|median - last| * 10_000 > |last| * threshold_bps`.
+///
+/// Overflow means the move is astronomically large, so the safe answer is to
+/// submit; every arithmetic step is checked to avoid panicking in the keeper
+/// loop (`panic = "abort"` in release).
+fn move_exceeds_bps(last: i128, median: i128, threshold_bps: u32) -> bool {
+    let change = match median.checked_sub(last).and_then(i128::checked_abs) {
+        Some(change) => change,
+        None => return true,
+    };
+    if change == 0 {
+        return false;
+    }
+
+    let threshold = i128::from(threshold_bps);
+    let scaled_change = match change.checked_mul(BPS_DENOMINATOR) {
+        Some(scaled) => scaled,
+        None => return true,
+    };
+    match last.checked_abs().and_then(|last| last.checked_mul(threshold)) {
+        Some(bound) => scaled_change > bound,
+        None => true,
+    }
 }
 
 async fn update_submitted_prices(
@@ -1433,8 +1467,9 @@ fn is_bad_sequence_xdr(error_result_xdr: &str) -> bool {
 /// `sequence_cache` is shared across every `execute_handler` invocation
 /// within one keeper cycle: the first call of the cycle fetches the account
 /// sequence once and caches it; every subsequent call reuses and locally
-/// increments that cached value on success, avoiding a redundant `getAccount`
-/// RPC round-trip per pending order/deposit/withdrawal (#805). The cache is
+/// increments that cached value on success, avoiding a redundant
+/// `getLedgerEntries` RPC round-trip per pending order/deposit/withdrawal
+/// (#805). The cache is
 /// only cleared (forcing a fresh fetch on the next call) when a submission is
 /// rejected for a sequence-related reason, since that's the one case where
 /// the cached value is known to be wrong.
@@ -1537,47 +1572,24 @@ async fn get_account_sequence(state: &Arc<AppState>) -> Result<u64, SequenceFetc
 }
 
 async fn get_account_sequence_once(state: &Arc<AppState>) -> Result<u64, SequenceFetchError> {
-    let rpc_url = &state.config.stellar_rpc_url;
-    let account_id = &state.config.keeper_account_id;
-
-    let payload = serde_json::to_string(&serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getAccount",
-        "params": { "account": account_id }
-    }))
+    // Stellar RPC has no `getAccount` method — that only exists in SDKs, which
+    // implement it on top of `getLedgerEntries` (#1241). Fetch the account
+    // ledger entry directly instead, otherwise every submission fails before
+    // anything is signed.
+    crate::stellar_rpc::get_account_sequence(
+        &state.config.stellar_rpc_url,
+        &state.config.keeper_account_id,
+    )
+    .await
     .map_err(|e| {
-        SequenceFetchError::MissingOrInvalid(format!("failed to serialize request: {e}"))
-    })?;
-
-    // Use the shared RPC POST helper instead of hand-rolling the request here (#751).
-    let body = crate::stellar_rpc::rpc_post(rpc_url, payload)
-        .await
-        .map_err(|e| SequenceFetchError::Network(format!("getAccount request failed: {e}")))?;
-
-    let response_json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-        SequenceFetchError::Network(format!("Failed to parse getAccount response: {e}"))
-    })?;
-
-    if let Some(error) = response_json.get("error") {
-        return Err(SequenceFetchError::Network(format!(
-            "getAccount error: {}",
-            truncate_rpc_error(error)
-        )));
-    }
-
-    let seq_str = response_json
-        .get("result")
-        .and_then(|r| r.get("sequence"))
-        .and_then(|s| s.as_str())
-        .ok_or_else(|| {
-            SequenceFetchError::MissingOrInvalid(
-                "Missing sequence in getAccount response".to_string(),
-            )
-        })?;
-
-    seq_str.parse::<u64>().map(|seq| seq + 1).map_err(|e| {
-        SequenceFetchError::MissingOrInvalid(format!("failed to parse sequence '{seq_str}': {e}"))
+        // Preserve the retry split: transport failures (5xx/429/network) are
+        // worth retrying, while JSON/RPC faults will not change on a retry.
+        let message = format!("getLedgerEntries request failed: {e}");
+        if crate::retry::Retryable::is_retryable(&e) {
+            SequenceFetchError::Network(message)
+        } else {
+            SequenceFetchError::MissingOrInvalid(message)
+        }
     })
 }
 
@@ -2129,7 +2141,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         // The keeper cycle needs pending work to reach the stale-price filter,
-        // then set_prices needs getAccount + sendTransaction + getTransaction.
+        // then set_prices needs getLedgerEntries + sendTransaction + getTransaction.
         // Return no pending work for simulate calls so the cycle short-circuits
         // after the stale-price filter — the filter runs before pending-work
         // lookup, so this exercises the code path we care about.
@@ -2255,5 +2267,105 @@ mod tests {
             "keeper cycle should succeed with stale prices filtered: {:?}",
             result.err()
         );
+    }
+
+    // ── #1242: submit-threshold lookup key and relative (bps) comparison ────
+
+    fn threshold_test_state(submit_threshold_bps: u32) -> Arc<AppState> {
+        use crate::config::{Config, Network, PriceFeedConfig, SecretString};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let config = Config {
+            bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            network: Network::Testnet,
+            network_passphrase: "Test SDF Network ; September 2015".to_string(),
+            stellar_rpc_url: "not-a-valid-url".to_string(),
+            horizon_url: "not-a-valid-url".to_string(),
+            oracle_contract_id: "CORACLE".to_string(),
+            role_store_contract_id: "CROLE".to_string(),
+            data_store_contract_id: "CDATA".to_string(),
+            order_handler_contract_id: "CORDER".to_string(),
+            deposit_handler_contract_id: "CDEPOSIT".to_string(),
+            withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
+            reader_contract_id: "CREADER".to_string(),
+            keeper_private_key: SecretString::new(
+                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            ),
+            keeper_secret_key: SecretString::new(
+                "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            ),
+            keeper_account_id: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI"
+                .to_string(),
+            keeper_index: 0,
+            admin_api_token: None,
+            pyth_api_key: None,
+            min_keeper_balance_xlm: 0.0,
+            set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
+            keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
+            price_loop_interval: Duration::from_millis(50),
+            keeper_loop_interval: Duration::from_millis(50),
+            price_feed: PriceFeedConfig {
+                tokens: vec![shared_config::TokenConfig {
+                    symbol: "TUSDC".to_string(),
+                    stellar_address: "GADDR".to_string(),
+                    submit_threshold_bps,
+                    ..Default::default()
+                }],
+            },
+        };
+        Arc::new(AppState::new(Arc::new(config)))
+    }
+
+    fn threshold_price(median: i128) -> CachedPrice {
+        CachedPrice {
+            token_address: "GADDR".to_string(),
+            symbol: "TUSDC".to_string(),
+            display_symbol: "USDC".to_string(),
+            keeper_index: 0,
+            min: median,
+            max: median,
+            median,
+            timestamp: 0,
+            ledger_seq: 1,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        }
+    }
+
+    /// The threshold must be looked up by `lookup_key()` (the lowercased
+    /// stellar address) and compared relatively in basis points (#1242).
+    #[tokio::test]
+    async fn submit_threshold_is_keyed_by_lookup_key_and_compared_in_bps() {
+        let state = threshold_test_state(10);
+        // `lookup_key()` lowercases the address; the symbol is irrelevant.
+        let key = "gaddr".to_string();
+
+        {
+            let mut cache = state.price_cache.write().await;
+            cache.last_submitted_medians = Some(BTreeMap::from([(key.clone(), 10_000_000)]));
+        }
+
+        // 10_005_000 is a 5 bps move from 10_000_000 — below a 10 bps threshold.
+        let mut prices = BTreeMap::from([(key.clone(), threshold_price(10_005_000))]);
+        let filtered = filter_prices_by_threshold(&state, &prices, 0, false).await;
+        assert!(
+            filtered.is_empty(),
+            "a 5 bps move must not be submitted at a 10 bps threshold"
+        );
+
+        // 10_011_000 is an 11 bps move — above the threshold.
+        prices.get_mut(&key).unwrap().median = 10_011_000;
+        let filtered = filter_prices_by_threshold(&state, &prices, 0, false).await;
+        assert_eq!(filtered.len(), 1, "an 11 bps move must be submitted");
+    }
+
+    #[test]
+    fn move_exceeds_bps_handles_zero_and_overflow() {
+        assert!(!move_exceeds_bps(0, 0, 10));
+        assert!(move_exceeds_bps(0, 1, 10));
+        assert!(!move_exceeds_bps(10_000, 10_005, 10));
+        assert!(move_exceeds_bps(10_000, 10_011, 10));
+        // A delta that overflows i128 must be treated as a large move, not panic.
+        assert!(move_exceeds_bps(i128::MAX, i128::MIN, 10));
     }
 }

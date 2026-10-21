@@ -214,17 +214,9 @@ async fn mock_rpc_full_keeper_cycle_with_pending_orders() {
                         }))
                     }
                 }
-                "getAccount" => {
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "jsonrpc": "2.0", "id": 1,
-                        "result": {
-                            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
-                            "sequence": "100",
-                            "subentries": 0, "inflationDestination": "", "homeDomain": "",
-                            "thresholds": {"low":1,"med":1,"high":1},
-                            "signers": [], "data": {}, "balances": []
-                        }
-                    }))
+                "getLedgerEntries" => {
+                    ResponseTemplate::new(200)
+                        .set_body_json(common::account_entry_response(100))
                 }
                 "sendTransaction" => {
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -320,21 +312,13 @@ async fn keeper_cycle_retries_transient_get_account_sequence_failure() {
                         }))
                     }
                 }
-                "getAccount" => {
+                "getLedgerEntries" => {
                     let attempt = get_account_attempts_for_mock.fetch_add(1, Ordering::SeqCst);
                     if attempt == 0 {
                         ResponseTemplate::new(500).set_body_string("transient rpc error")
                     } else {
-                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                            "jsonrpc": "2.0", "id": 1,
-                            "result": {
-                                "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
-                                "sequence": "100",
-                                "subentries": 0, "inflationDestination": "", "homeDomain": "",
-                                "thresholds": {"low":1,"med":1,"high":1},
-                                "signers": [], "data": {}, "balances": []
-                            }
-                        }))
+                        ResponseTemplate::new(200)
+                            .set_body_json(common::account_entry_response(100))
                     }
                 }
                 "sendTransaction" => {
@@ -379,12 +363,12 @@ async fn keeper_cycle_retries_transient_get_account_sequence_failure() {
 
     assert!(
         result.is_ok(),
-        "keeper cycle should recover from transient getAccount failure: {:?}",
+        "keeper cycle should recover from transient getLedgerEntries failure: {:?}",
         result.err()
     );
     assert!(
         get_account_attempts.load(Ordering::SeqCst) >= 2,
-        "getAccount should have been retried"
+        "getLedgerEntries should have been retried"
     );
     assert_eq!(result.unwrap().orders_executed, 1);
 }
@@ -487,17 +471,9 @@ async fn keeper_cycle_freezes_order_when_budget_exceeded_and_freeze_succeeds() {
                         }))
                     }
                 }
-                "getAccount" => {
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "jsonrpc": "2.0", "id": 1,
-                        "result": {
-                            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
-                            "sequence": "100",
-                            "subentries": 0, "inflationDestination": "", "homeDomain": "",
-                            "thresholds": {"low":1,"med":1,"high":1},
-                            "signers": [], "data": {}, "balances": []
-                        }
-                    }))
+                "getLedgerEntries" => {
+                    ResponseTemplate::new(200)
+                        .set_body_json(common::account_entry_response(100))
                 }
                 "sendTransaction" => {
                     let nth = submissions.fetch_add(1, Ordering::SeqCst);
@@ -611,16 +587,8 @@ async fn keeper_cycle_rejects_non_hex_order_key() {
                         }))
                     }
                 }
-                "getAccount" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "jsonrpc": "2.0", "id": 1,
-                    "result": {
-                        "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
-                        "sequence": "100",
-                        "subentries": 0, "inflationDestination": "", "homeDomain": "",
-                        "thresholds": {"low":1,"med":1,"high":1},
-                        "signers": [], "data": {}, "balances": []
-                    }
-                })),
+                "getLedgerEntries" => ResponseTemplate::new(200)
+                    .set_body_json(common::account_entry_response(100)),
                 "sendTransaction" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "jsonrpc": "2.0", "id": 1,
                     "result": {
@@ -689,10 +657,10 @@ async fn state_with_price(rpc_url: &str) -> Arc<AppState> {
 }
 
 /// Returns a wiremock handler that answers simulateTransaction with count=0
-/// (no pending work) and delegates getAccount to the supplied closure.
-macro_rules! mount_with_get_account {
-    ($server:expr, $get_account_response:expr) => {{
-        let get_account_json = $get_account_response;
+/// (no pending work) and delegates getLedgerEntries to the supplied closure.
+macro_rules! mount_with_get_ledger_entries {
+    ($server:expr, $ledger_entries_response:expr) => {{
+        let ledger_entries_json = $ledger_entries_response;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .respond_with(move |req: &Request| {
                 let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
@@ -719,8 +687,8 @@ macro_rules! mount_with_get_account {
                             }))
                         }
                     }
-                    "getAccount" => ResponseTemplate::new(200)
-                        .set_body_json(get_account_json.clone()),
+                    "getLedgerEntries" => ResponseTemplate::new(200)
+                        .set_body_json(ledger_entries_json.clone()),
                     _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                         "jsonrpc": "2.0", "id": 1,
                         "error": {"code": -1, "message": "unexpected method"}
@@ -735,7 +703,7 @@ macro_rules! mount_with_get_account {
 #[tokio::test]
 async fn get_account_sequence_rpc_error_field_propagates() {
     let server = MockServer::start().await;
-    mount_with_get_account!(
+    mount_with_get_ledger_entries!(
         server,
         serde_json::json!({
             "jsonrpc": "2.0", "id": 1,
@@ -746,42 +714,42 @@ async fn get_account_sequence_rpc_error_field_propagates() {
     let state = state_with_price(&server.uri()).await;
     let result = oracle::keeper_loop::run_keeper_cycle(state).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("getAccount error"));
+    assert!(result.unwrap_err().contains("getLedgerEntries"));
 }
 
 #[tokio::test]
-async fn get_account_sequence_missing_sequence_field_propagates() {
+async fn get_account_sequence_missing_ledger_entry_propagates() {
     let server = MockServer::start().await;
-    mount_with_get_account!(
+    mount_with_get_ledger_entries!(
         server,
         serde_json::json!({
             "jsonrpc": "2.0", "id": 1,
-            "result": {"id": "GACCOUNT"}
-            // "sequence" key intentionally absent
+            // The account has no ledger entry on this network.
+            "result": {"entries": []}
         })
     );
 
     let state = state_with_price(&server.uri()).await;
     let result = oracle::keeper_loop::run_keeper_cycle(state).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Missing sequence"));
+    assert!(result.unwrap_err().contains("not found"));
 }
 
 #[tokio::test]
-async fn get_account_sequence_non_numeric_sequence_propagates() {
+async fn get_account_sequence_invalid_ledger_entry_xdr_propagates() {
     let server = MockServer::start().await;
-    mount_with_get_account!(
+    mount_with_get_ledger_entries!(
         server,
         serde_json::json!({
             "jsonrpc": "2.0", "id": 1,
-            "result": {"id": "GACCOUNT", "sequence": "not-a-number"}
+            "result": {"entries": [{"key": "", "xdr": "not-base64"}]}
         })
     );
 
     let state = state_with_price(&server.uri()).await;
     let result = oracle::keeper_loop::run_keeper_cycle(state).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("failed to parse sequence"));
+    assert!(result.unwrap_err().contains("invalid ledger entry XDR"));
 }
 
 // ── #516: simulate_contract_call error branches ───────────────────────────────
@@ -895,16 +863,8 @@ fn mount_order_exec_always_fails(
                     }))
                 }
             }
-            "getAccount" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc": "2.0", "id": 1,
-                "result": {
-                    "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
-                    "sequence": "100",
-                    "subentries": 0, "inflationDestination": "", "homeDomain": "",
-                    "thresholds": {"low":1,"med":1,"high":1},
-                    "signers": [], "data": {}, "balances": []
-                }
-            })),
+            "getLedgerEntries" => ResponseTemplate::new(200)
+                .set_body_json(common::account_entry_response(100)),
             "sendTransaction" => {
                 let nth = mock_server_uri_submissions.fetch_add(1, Ordering::SeqCst);
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({

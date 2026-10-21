@@ -1,4 +1,8 @@
 use serde::{Deserialize, Serialize};
+use stellar_xdr::{
+    AccountId, LedgerEntryData, LedgerKey, LedgerKeyAccount, Limits, PublicKey, ReadXdr, Uint256,
+    WriteXdr,
+};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum RpcError {
@@ -169,6 +173,96 @@ pub(crate) async fn rpc_post(rpc_url: &str, payload: String) -> Result<String, R
     Ok(body)
 }
 
+// ── Account sequence (getLedgerEntries) ─────────────────────────────────────
+
+/// Encode `account_id` as the base64 XDR of a `LedgerKey::Account`.
+///
+/// Stellar RPC has no `getAccount` method (that is an SDK-side convenience
+/// built on top of `getLedgerEntries`), so the account's sequence number has
+/// to be fetched by looking up its ledger entry directly (#1241).
+fn account_ledger_key_xdr(account_id: &str) -> Result<String, RpcError> {
+    let public_key = stellar_strkey::ed25519::PublicKey::from_string(account_id)
+        .map_err(|e| RpcError::JsonError(format!("invalid account id '{account_id}': {e}")))?;
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(public_key.0.as_ref());
+
+    LedgerKey::Account(LedgerKeyAccount {
+        account_id: AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(bytes))),
+    })
+    .to_xdr_base64(Limits::none())
+    .map_err(|e| RpcError::JsonError(format!("failed to encode account ledger key: {e}")))
+}
+
+#[derive(Debug, Deserialize)]
+struct GetLedgerEntriesResult {
+    entries: Vec<LedgerEntryResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LedgerEntryResult {
+    xdr: String,
+}
+
+/// Parse the raw JSON body returned by a `getLedgerEntries` call for an
+/// account and return the sequence number the *next* transaction must use.
+///
+/// The on-chain `seqNum` is the last sequence number consumed, so it is
+/// incremented by one (matching the previous `getAccount` behaviour).
+pub fn parse_account_sequence_response(body: &str) -> Result<u64, RpcError> {
+    let resp: JsonRpcResponse<GetLedgerEntriesResult> =
+        serde_json::from_str(body).map_err(|e| RpcError::JsonError(e.to_string()))?;
+
+    if let Some(fault) = resp.error {
+        return Err(RpcError::RpcFault {
+            code: fault.code,
+            message: fault.message,
+        });
+    }
+
+    let result = resp
+        .result
+        .ok_or_else(|| RpcError::JsonError("missing 'result' field".to_string()))?;
+
+    let entry = result
+        .entries
+        .into_iter()
+        .next()
+        .ok_or_else(|| RpcError::JsonError("account ledger entry not found".to_string()))?;
+
+    let data = LedgerEntryData::from_xdr_base64(&entry.xdr, Limits::none())
+        .map_err(|e| RpcError::JsonError(format!("invalid ledger entry XDR: {e}")))?;
+
+    match data {
+        LedgerEntryData::Account(account) => {
+            let sequence = u64::try_from(account.seq_num.0).map_err(|_| {
+                RpcError::JsonError(format!(
+                    "account sequence number {} is negative",
+                    account.seq_num.0
+                ))
+            })?;
+            Ok(sequence.saturating_add(1))
+        }
+        _ => Err(RpcError::JsonError(
+            "ledger entry is not an account".to_string(),
+        )),
+    }
+}
+
+/// Fetch the keeper account's next sequence number from Stellar RPC using
+/// `getLedgerEntries` with a `LedgerKey::Account` (#1241).
+pub async fn get_account_sequence(rpc_url: &str, account_id: &str) -> Result<u64, RpcError> {
+    let payload = serde_json::to_string(&JsonRpcRequest {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getLedgerEntries",
+        params: serde_json::json!({ "keys": [account_ledger_key_xdr(account_id)?] }),
+    })
+    .map_err(|e| RpcError::JsonError(e.to_string()))?;
+
+    let body = rpc_post(rpc_url, payload).await?;
+    parse_account_sequence_response(&body)
+}
+
 // ── Account balance (Horizon REST) ──────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -327,6 +421,92 @@ mod tests {
     fn parse_missing_result_field() {
         let body = r#"{"jsonrpc":"2.0","id":1}"#;
         let err = parse_latest_ledger_response(body).unwrap_err();
+        assert!(matches!(err, RpcError::JsonError(_)));
+    }
+
+    // ── account sequence (getLedgerEntries) ─────────────────────────────────
+
+    fn account_entry_xdr(seq: i64) -> String {
+        LedgerEntryData::Account(stellar_xdr::AccountEntry {
+            seq_num: stellar_xdr::SequenceNumber(seq),
+            ..Default::default()
+        })
+        .to_xdr_base64(Limits::none())
+        .expect("account entry encodes")
+    }
+
+    /// #1241 — the sequence comes from a real `LedgerEntryData::Account`
+    /// (`getLedgerEntries`), not a non-existent `getAccount` method, and the
+    /// returned value is the next usable sequence number.
+    #[test]
+    fn parse_account_sequence_from_ledger_entry() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "entries": [{"key": "", "xdr": account_entry_xdr(100)}],
+                "latestLedger": 12345
+            }
+        })
+        .to_string();
+
+        assert_eq!(parse_account_sequence_response(&body).unwrap(), 101);
+    }
+
+    #[test]
+    fn parse_account_sequence_missing_entry() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"entries":[]}}"#;
+        let err = parse_account_sequence_response(body).unwrap_err();
+        assert!(matches!(err, RpcError::JsonError(ref m) if m.contains("not found")));
+    }
+
+    #[test]
+    fn parse_account_sequence_invalid_xdr() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"entries":[{"xdr":"not-base64"}]}}"#;
+        let err = parse_account_sequence_response(body).unwrap_err();
+        assert!(
+            matches!(err, RpcError::JsonError(ref m) if m.contains("invalid ledger entry XDR"))
+        );
+    }
+
+    #[test]
+    fn parse_account_sequence_rpc_fault() {
+        let body = r#"{
+            "jsonrpc":"2.0","id":1,
+            "error":{"code":-32601,"message":"method not found"}
+        }"#;
+        let err = parse_account_sequence_response(body).unwrap_err();
+        assert_eq!(
+            err,
+            RpcError::RpcFault {
+                code: -32601,
+                message: "method not found".to_string(),
+            }
+        );
+    }
+
+    /// The key sent to `getLedgerEntries` must decode as a `LedgerKey::Account`
+    /// for the requested account (#1241).
+    #[test]
+    fn account_ledger_key_encodes_as_account_key() {
+        let account = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let encoded = account_ledger_key_xdr(account).unwrap();
+        let decoded = LedgerKey::from_xdr_base64(&encoded, Limits::none()).unwrap();
+
+        match decoded {
+            LedgerKey::Account(key) => {
+                let stellar_xdr::PublicKey::PublicKeyTypeEd25519(stellar_xdr::Uint256(bytes)) =
+                    key.account_id.0;
+                let expected = stellar_strkey::ed25519::PublicKey::from_string(account).unwrap();
+                assert_eq!(bytes, expected.0);
+            }
+            other => panic!("expected LedgerKey::Account, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn account_ledger_key_rejects_invalid_account() {
+        let err = account_ledger_key_xdr("not-an-account").unwrap_err();
         assert!(matches!(err, RpcError::JsonError(_)));
     }
 

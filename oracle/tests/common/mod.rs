@@ -94,6 +94,31 @@ pub fn bad_token(symbol: &str, address: &str) -> TokenConfig {
     }
 }
 
+/// Build the JSON-RPC response `getLedgerEntries` returns for an account
+/// ledger entry, using real XDR so the keeper's decoder is exercised (#1241).
+///
+/// `seq_num` is the account's last consumed sequence number; the keeper
+/// derives the next transaction sequence from it.
+pub fn account_entry_response(seq_num: i64) -> serde_json::Value {
+    use stellar_xdr::{AccountEntry, LedgerEntryData, Limits, SequenceNumber, WriteXdr};
+
+    let xdr = LedgerEntryData::Account(AccountEntry {
+        seq_num: SequenceNumber(seq_num),
+        ..Default::default()
+    })
+    .to_xdr_base64(Limits::none())
+    .expect("account entry XDR encodes");
+
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "entries": [{ "key": "", "xdr": xdr }],
+            "latestLedger": 12345
+        }
+    })
+}
+
 pub fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
     let config = Arc::new(Config {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
