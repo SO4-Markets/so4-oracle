@@ -148,6 +148,10 @@ fn validate_admin_api_token(token: &str) -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvError {
     MissingVar(&'static str),
+    MissingAnyVar {
+        primary: &'static str,
+        fallback: &'static str,
+    },
     InvalidVar { var: &'static str, reason: String },
     TokenConfig(ConfigError),
 }
@@ -156,6 +160,9 @@ impl fmt::Display for EnvError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EnvError::MissingVar(var) => write!(f, "required env var '{var}' is not set"),
+            EnvError::MissingAnyVar { primary, fallback } => {
+                write!(f, "required env var '{primary}' (or fallback '{fallback}') is not set")
+            }
             EnvError::InvalidVar { var, reason } => write!(f, "invalid env var '{var}': {reason}"),
             EnvError::TokenConfig(error) => write!(f, "invalid PRICE_FEED_CONFIG: {error}"),
         }
@@ -509,9 +516,7 @@ fn required_any(
     lookup(primary)
         .filter(|value| !value.trim().is_empty())
         .or_else(|| lookup(fallback).filter(|value| !value.trim().is_empty()))
-        .ok_or(EnvError::MissingVar(
-            "ORACLE_CONTRACT_ID' (or fallback alias 'ORACLE')",
-        ))
+        .ok_or(EnvError::MissingAnyVar { primary, fallback })
 }
 
 fn parse_or_default<T>(
@@ -1627,4 +1632,33 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn required_any_reports_missing_any_var() {
+        let mut lookup = |_key: &str| None;
+        let err = required_any(&mut lookup, "PRIMARY_VAR", "FALLBACK_VAR").unwrap_err();
+        assert_eq!(
+            err,
+            EnvError::MissingAnyVar {
+                primary: "PRIMARY_VAR",
+                fallback: "FALLBACK_VAR",
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "required env var 'PRIMARY_VAR' (or fallback 'FALLBACK_VAR') is not set"
+        );
+    }
+
+    #[test]
+    fn required_any_uses_fallback_when_primary_missing() {
+        let mut lookup = |key: &str| match key {
+            "PRIMARY_VAR" => None,
+            "FALLBACK_VAR" => Some("val".to_string()),
+            _ => None,
+        };
+        let val = required_any(&mut lookup, "PRIMARY_VAR", "FALLBACK_VAR").unwrap();
+        assert_eq!(val, "val");
+    }
 }
+
