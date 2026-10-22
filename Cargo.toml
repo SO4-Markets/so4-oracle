@@ -14,8 +14,6 @@ authors = ["SO4 Markets"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-# Allow during the Rust 2024 migration while dependencies and generated code settle on one lifetime spelling.
-mismatched_lifetime_syntaxes = "allow"
 
 # Aligned with railway.json healthcheck: setting healthcheckPath to /ready
 # ensures the probe reflects real liveness (/ready inspects state.cycle_status).
