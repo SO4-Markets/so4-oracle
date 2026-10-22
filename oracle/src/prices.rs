@@ -191,6 +191,10 @@ fn find_largest_consistent_cluster(
     })
 }
 
+/// Test-only convenience wrapper around [`compute_confidence_interval_with_spread`]
+/// with a hard-coded 100 bps spread. Production code must call the
+/// `_with_spread` variant with the configured value.
+#[cfg(test)]
 pub fn compute_confidence_interval(prices: &[i128]) -> Option<PriceProps> {
     compute_confidence_interval_with_spread(prices, 100)
 }
@@ -228,7 +232,10 @@ pub fn compute_confidence_interval_with_spread(
     }
 }
 
-/// Interpolating percentile (nearest-rank method).
+/// Percentile of a sorted slice using linear interpolation between the two
+/// nearest order statistics. The result is therefore not necessarily one of
+/// the observed prices (for example, p10 of `[100, 200]` is 110, not 100).
+/// `p` is clamped: `0` returns the minimum, `>= 100` the maximum.
 pub fn percentile(sorted: &[i128], p: u8) -> i128 {
     debug_assert!(!sorted.is_empty());
     if sorted.len() == 1 || p == 0 {
@@ -391,7 +398,9 @@ pub fn filter_outliers(
     }
 }
 
-/// Compute the median of a slice of prices safely.
+/// Test-only median that rejects single-element inputs. Production uses
+/// [`compute_median_allow_single`].
+#[cfg(test)]
 pub fn compute_median(prices: &[i128]) -> Option<i128> {
     if prices.len() < 2 {
         return None;
