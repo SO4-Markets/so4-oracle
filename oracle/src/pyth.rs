@@ -154,11 +154,24 @@ pub fn normalize_pyth_price(price_str: &str, exponent: i32) -> Result<i128, Pyth
         crate::SCALE_DIGITS,
     );
 
-    price_int
+    let scaled = price_int
         .checked_mul(10i128.pow(exponent_diff.max(0) as u32))
         .ok_or_else(|| {
             PythPriceError::PriceParseError("price overflow during normalization".to_string())
-        })
+        })?;
+
+    // #1290 — reject a parseable but absurd price (buggy or compromised
+    // upstream feed) before it can reach the aggregation, where
+    // near-i128::MAX inputs used to overflow the unchecked median/mean
+    // additions and (with `overflow-checks` on in release) panic the price
+    // loop, shutting the whole process down.
+    if scaled > crate::MAX_SANE_PRICE {
+        return Err(PythPriceError::PriceParseError(format!(
+            "price exceeds sanity bound: {price_str}"
+        )));
+    }
+
+    Ok(scaled)
 }
 
 /// Price with its observation timestamp for staleness tracking.
@@ -506,6 +519,26 @@ mod tests {
     fn normalize_pyth_price_rejects_overflow() {
         let err = normalize_pyth_price(&i128::MAX.to_string(), 0).unwrap_err();
         assert!(matches!(err, PythPriceError::PriceParseError(_)));
+    }
+
+    // #1290 — a parseable price above the sanity bound must be rejected before
+    // it can reach the aggregation's median/mean arithmetic.
+    #[test]
+    fn normalize_pyth_price_rejects_price_above_sanity_bound() {
+        // 10^7 + 1 whole units × 1e30 scaling = 10^37 + 10^30, above the bound
+        // but small enough that the scaling itself cannot overflow.
+        let just_above = (crate::MAX_SANE_PRICE / FLOAT_PRECISION + 1).to_string();
+        let err = normalize_pyth_price(&just_above, 0).unwrap_err();
+        assert!(matches!(err, PythPriceError::PriceParseError(_)), "{err:?}");
+    }
+
+    #[test]
+    fn normalize_pyth_price_accepts_price_at_sanity_bound() {
+        let at_bound = (crate::MAX_SANE_PRICE / FLOAT_PRECISION).to_string();
+        assert_eq!(
+            normalize_pyth_price(&at_bound, 0).unwrap(),
+            crate::MAX_SANE_PRICE
+        );
     }
 
     // ── Staleness validation (#351) ───────────────────────────────────────────

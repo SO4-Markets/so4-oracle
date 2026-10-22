@@ -35,6 +35,13 @@ pub fn fixed_price(token: &TokenConfig) -> Result<i128, FixedPriceError> {
     if price <= 0 {
         return Err(FixedPriceError::InvalidFixedPrice(raw.to_string()));
     }
+    // #1290 — reject an absurd configured price before it can reach the
+    // aggregation, where near-i128::MAX inputs used to overflow the unchecked
+    // median/mean additions and (with `overflow-checks` on in release) panic
+    // the price loop, shutting the whole process down.
+    if price > crate::MAX_SANE_PRICE {
+        return Err(FixedPriceError::InvalidFixedPrice(raw.to_string()));
+    }
     Ok(price)
 }
 
@@ -118,6 +125,25 @@ mod tests {
     fn accepts_smallest_valid_fixed_price() {
         let token = token_with_fixed_price(Some("1"));
         assert_eq!(fixed_price(&token).unwrap(), 1);
+    }
+
+    // #1290 — a parseable fixed price above the sanity bound must be rejected
+    // before it can reach the aggregation's median/mean arithmetic.
+    #[test]
+    fn rejects_fixed_price_above_sanity_bound() {
+        let above = (crate::MAX_SANE_PRICE + 1).to_string();
+        let token = token_with_fixed_price(Some(above.as_str()));
+        assert!(matches!(
+            fixed_price(&token).unwrap_err(),
+            FixedPriceError::InvalidFixedPrice(_)
+        ));
+    }
+
+    #[test]
+    fn accepts_fixed_price_at_sanity_bound() {
+        let at_bound = crate::MAX_SANE_PRICE.to_string();
+        let token = token_with_fixed_price(Some(at_bound.as_str()));
+        assert_eq!(fixed_price(&token).unwrap(), crate::MAX_SANE_PRICE);
     }
 
     #[test]
