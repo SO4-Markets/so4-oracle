@@ -10,7 +10,10 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded runs on pull requests only. On main, a second merge must
+  # not cancel the first merge's in-flight run: its docker job is the only CD
+  # path and would otherwise skip the GHCR publish for that commit (#1294).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
