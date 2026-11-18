@@ -139,10 +139,15 @@ pub struct Config {
     pub withdrawal_handler_contract_id: String,
     /// On-chain reader contract address. Env: `READER`.
     pub reader_contract_id: String,
-    /// Keeper ed25519 private key (hex-encoded 32 bytes). Env: `KEEPER_PRIVATE_KEY`.
-    pub keeper_private_key: SecretString,
-    /// Keeper Stellar strkey secret seed (S-prefixed). Env: `KEEPER_SECRET_KEY`.
-    pub keeper_secret_key: SecretString,
+    /// `KEEPER_PRIVATE_KEY` (hex-encoded 32-byte ed25519 seed) decoded once at
+    /// config load (#1472, #1473). `None` when unset; an undecodable value is
+    /// a boot failure naming the underlying error. The raw string is dropped
+    /// inside `from_lookup`, so the decoded key is the only copy in memory.
+    pub keeper_private_key: Option<std::sync::Arc<ed25519_dalek::SigningKey>>,
+    /// `KEEPER_SECRET_KEY` (S-prefixed strkey) decoded once at config load
+    /// (#1472, #1473). `None` when unset; an undecodable value is a boot
+    /// failure naming the underlying error.
+    pub keeper_secret_key: Option<std::sync::Arc<ed25519_dalek::SigningKey>>,
     /// Keeper Stellar account ID (G-prefixed strkey). Env: `KEEPER_ACCOUNT_ID`.
     pub keeper_account_id: String,
     /// Index of this keeper instance, used only to label which keeper signed a
@@ -311,28 +316,49 @@ impl Config {
         let reader_contract_id =
             collect_or_default!(required(&mut lookup, "READER"), String::new());
 
+        // Decode the keys at load rather than only shape-checking them: a value
+        // that cannot produce a `SigningKey` (e.g. an S-strkey with a bad
+        // CRC16) is a boot failure naming the underlying error, never a silent
+        // per-signature fallback (#1473). Only the decoded key is kept — the
+        // raw string is dropped here (#1472).
         let keeper_private_key_raw =
             collect_or_default!(required(&mut lookup, "KEEPER_PRIVATE_KEY"), String::new());
         let keeper_private_key = if !keeper_private_key_raw.is_empty() {
             collect_or_default!(
-                validate_hex_key("KEEPER_PRIVATE_KEY", keeper_private_key_raw, 32)
-                    .map(SecretString::new),
-                SecretString::new(String::new())
+                (|| {
+                    let value =
+                        validate_hex_key("KEEPER_PRIVATE_KEY", keeper_private_key_raw, 32)?;
+                    crate::signing::signing_key_from_hex(&value)
+                        .map(|key| Some(std::sync::Arc::new(key)))
+                        .map_err(|err| EnvError::InvalidVar {
+                            var: "KEEPER_PRIVATE_KEY",
+                            reason: err.to_string(),
+                        })
+                })(),
+                None
             )
         } else {
-            SecretString::new(String::new())
+            None
         };
 
         let keeper_secret_key_raw =
             collect_or_default!(required(&mut lookup, "KEEPER_SECRET_KEY"), String::new());
         let keeper_secret_key = if !keeper_secret_key_raw.is_empty() {
             collect_or_default!(
-                validate_strkey("KEEPER_SECRET_KEY", keeper_secret_key_raw, 'S')
-                    .map(SecretString::new),
-                SecretString::new(String::new())
+                (|| {
+                    let value =
+                        validate_strkey("KEEPER_SECRET_KEY", keeper_secret_key_raw, 'S')?;
+                    crate::chain::tx_builder::signing_key_from_secret(&value)
+                        .map(|key| Some(std::sync::Arc::new(key)))
+                        .map_err(|err| EnvError::InvalidVar {
+                            var: "KEEPER_SECRET_KEY",
+                            reason: err.to_string(),
+                        })
+                })(),
+                None
             )
         } else {
-            SecretString::new(String::new())
+            None
         };
 
         let keeper_account_id_raw =
@@ -762,8 +788,8 @@ impl Config {
             deposit_handler_contract_id: String::new(),
             withdrawal_handler_contract_id: String::new(),
             reader_contract_id: String::new(),
-            keeper_private_key: SecretString::new(String::new()),
-            keeper_secret_key: SecretString::new(String::new()),
+            keeper_private_key: None,
+            keeper_secret_key: None,
             keeper_account_id: String::new(),
             keeper_index: 0,
             admin_api_token: None,

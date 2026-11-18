@@ -233,13 +233,17 @@ pub struct AppState {
     /// crossed its two sequential lock reads and retry, rather than returning a
     /// torn `keeper_status` / `cycle_status` pair (#797).
     pub keeper_cycle_generation: Arc<AtomicU64>,
+    /// `KEEPER_PRIVATE_KEY` decoded once at config load (#1226, #1473).
+    /// `SigningKey` zeroises its seed on drop. `None` when unset; an
+    /// undecodable key is a boot failure, not a per-signature fallback.
     /// Last startup preflight result, exposed on `/oracle/status` (#1468).
     pub preflight_result: Arc<RwLock<Option<crate::preflight::PreflightResult>>>,
     /// `KEEPER_PRIVATE_KEY` decoded once at startup for price signing (#1226).
     /// `SigningKey` zeroises its seed on drop. `None` if unset or invalid, in
     /// which case signing falls back to the string key and reports the error.
     pub price_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
-    /// `KEEPER_SECRET_KEY` decoded once at startup for transaction signing (#1226).
+    /// `KEEPER_SECRET_KEY` decoded once at config load (#1226, #1473).
+    /// `None` when unset; an undecodable key is a boot failure.
     pub tx_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     /// Throttles repeated failed admin-token attempts per client (#1214).
     pub admin_auth_limiter: Arc<AdminAuthLimiter>,
@@ -251,14 +255,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: Arc<Config>) -> Self {
-        let price_signing_key =
-            crate::signing::signing_key_from_hex(config.keeper_private_key.as_str())
-                .ok()
-                .map(Arc::new);
-        let tx_signing_key =
-            crate::chain::tx_builder::signing_key_from_secret(config.keeper_secret_key.as_str())
-                .ok()
-                .map(Arc::new);
+        // Keys were decoded (and the raw strings dropped) at config load
+        // (#1472, #1473); AppState just carries the Arc'd decoded keys.
+        let price_signing_key = config.keeper_private_key.clone();
+        let tx_signing_key = config.keeper_secret_key.clone();
         Self {
             config,
             http: crate::http::client().clone(),
@@ -382,12 +382,19 @@ mod admin_auth_limiter_tests {
 mod signing_key_state_tests {
     use super::*;
 
-    // #1226 — keys are decoded once when AppState is built, not per signature.
+    // #1226/#1473 — keys are decoded at config load; AppState carries them.
     #[test]
-    fn app_state_decodes_valid_keys_once_and_skips_invalid_ones() {
+    fn app_state_carries_decoded_keys_from_config() {
         let mut config = Config::default_for_tests();
-        config.keeper_private_key = crate::config::SecretString::new("11".repeat(32));
-        config.keeper_secret_key = crate::config::SecretString::new("22".repeat(32));
+        config.keeper_private_key = Some(std::sync::Arc::new(
+            crate::signing::signing_key_from_hex(&"11".repeat(32)).unwrap(),
+        ));
+        config.keeper_secret_key = Some(std::sync::Arc::new(
+            crate::chain::tx_builder::signing_key_from_secret(
+                "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            )
+            .unwrap(),
+        ));
         let state = AppState::new(Arc::new(config));
         assert!(state.price_signing_key.is_some());
         assert!(state.tx_signing_key.is_some());
@@ -395,8 +402,8 @@ mod signing_key_state_tests {
         let state = AppState::new(Arc::new(Config::default_for_tests()));
         assert!(
             state.price_signing_key.is_none(),
-            "empty key must not decode"
+            "unset key must stay None"
         );
-        assert!(state.tx_signing_key.is_none(), "empty key must not decode");
+        assert!(state.tx_signing_key.is_none(), "unset key must stay None");
     }
 }

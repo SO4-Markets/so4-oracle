@@ -64,18 +64,15 @@ impl std::fmt::Display for SequenceFetchError {
     }
 }
 
-/// Sign a keeper transaction with the key decoded once at startup (#1226),
-/// falling back to the string key so a missing/invalid key reports its error.
+/// Sign a keeper transaction with the key decoded once at config load (#1226).
+/// Decoding failures are boot failures (#1473), so `None` here means the key
+/// was never configured — not that a raw string might still work.
 fn sign_keeper_tx(state: &AppState, tx: &stellar_xdr::Transaction) -> Result<String, String> {
     match state.tx_signing_key.as_deref() {
         Some(key) => {
             tx_builder::sign_transaction_with_key(tx, key, &state.config.network_passphrase)
         }
-        None => tx_builder::sign_transaction(
-            tx,
-            state.config.keeper_secret_key.as_str(),
-            &state.config.network_passphrase,
-        ),
+        None => Err("KEEPER_SECRET_KEY is not configured".to_string()),
     }
 }
 
@@ -2084,7 +2081,7 @@ mod tests {
 
     // ── #512: run_keeper_loop shutdown coverage ───────────────────────────────
 
-    use crate::config::{Config, Network, PriceFeedConfig, SecretString};
+    use crate::config::{Config, Network, PriceFeedConfig};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Duration;
 
@@ -2102,12 +2099,18 @@ mod tests {
             deposit_handler_contract_id: "CDEPOSIT".to_string(),
             withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
             reader_contract_id: "CREADER".to_string(),
-            keeper_private_key: SecretString::new(
-                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-            ),
-            keeper_secret_key: SecretString::new(
-                "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
-            ),
+            keeper_private_key: Some(std::sync::Arc::new(
+                crate::signing::signing_key_from_hex(
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .unwrap(),
+            )),
+            keeper_secret_key: Some(std::sync::Arc::new(
+                crate::chain::tx_builder::signing_key_from_secret(
+                    "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                )
+                .unwrap(),
+            )),
             keeper_account_id: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI"
                 .to_string(),
             keeper_index: 0,
@@ -2189,7 +2192,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_keeper_cycle_filters_stale_prices() {
-        use crate::config::{Config, Network, PriceFeedConfig, SecretString};
+        use crate::config::{Config, Network, PriceFeedConfig};
         use crate::state::AppState;
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         use std::time::Duration;
@@ -2224,12 +2227,18 @@ mod tests {
             deposit_handler_contract_id: "CDEPOSIT".to_string(),
             withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
             reader_contract_id: "CREADER".to_string(),
-            keeper_private_key: SecretString::new(
-                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-            ),
-            keeper_secret_key: SecretString::new(
-                "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
-            ),
+            keeper_private_key: Some(std::sync::Arc::new(
+                crate::signing::signing_key_from_hex(
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .unwrap(),
+            )),
+            keeper_secret_key: Some(std::sync::Arc::new(
+                crate::chain::tx_builder::signing_key_from_secret(
+                    "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                )
+                .unwrap(),
+            )),
             keeper_account_id: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI"
                 .to_string(),
             keeper_index: 0,
@@ -2330,7 +2339,7 @@ mod tests {
     // ── #1242: submit-threshold lookup key and relative (bps) comparison ────
 
     fn threshold_test_state(submit_threshold_bps: u32) -> Arc<AppState> {
-        use crate::config::{Config, Network, PriceFeedConfig, SecretString};
+        use crate::config::{Config, Network, PriceFeedConfig};
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
         let config = Config {
@@ -2346,12 +2355,18 @@ mod tests {
             deposit_handler_contract_id: "CDEPOSIT".to_string(),
             withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
             reader_contract_id: "CREADER".to_string(),
-            keeper_private_key: SecretString::new(
-                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-            ),
-            keeper_secret_key: SecretString::new(
-                "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
-            ),
+            keeper_private_key: Some(std::sync::Arc::new(
+                crate::signing::signing_key_from_hex(
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .unwrap(),
+            )),
+            keeper_secret_key: Some(std::sync::Arc::new(
+                crate::chain::tx_builder::signing_key_from_secret(
+                    "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                )
+                .unwrap(),
+            )),
             keeper_account_id: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI"
                 .to_string(),
             keeper_index: 0,

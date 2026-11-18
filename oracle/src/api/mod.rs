@@ -489,9 +489,13 @@ mod tests {
     #[tokio::test]
     async fn test_secrets_redacted_from_logs_and_metrics() {
         let mut config = Config::default_for_tests();
-        let test_secret = "SCVXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        let test_secret = "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
         let test_admin_token = "admin_super_secret_token_123";
-        config.keeper_secret_key = crate::config::SecretString::new(test_secret.to_string());
+        // #1472 — only the decoded key is kept; the raw strkey is dropped at
+        // config load and must never resurface in logs or metrics.
+        config.keeper_secret_key = Some(Arc::new(
+            crate::chain::tx_builder::signing_key_from_secret(test_secret).unwrap(),
+        ));
         config.admin_api_token = Some(crate::config::SecretString::new(
             test_admin_token.to_string(),
         ));
@@ -526,5 +530,44 @@ mod tests {
             !metrics_out.contains(test_admin_token),
             "admin token found in metrics"
         );
+    }
+
+    // #1474 — every route registered in build_router must appear in the
+    // endpoint table in oracle/README.md (parsed from the markdown).
+    #[test]
+    fn readme_endpoint_table_covers_every_route() {
+        let source = include_str!("mod.rs");
+        let readme = include_str!("../../README.md");
+
+        let start = source
+            .find("pub fn build_router")
+            .expect("build_router present");
+        let body = &source[start..];
+        let end = body.find("\n}").expect("build_router closes");
+        let body = &body[..end];
+
+        let mut routes = Vec::new();
+        let mut rest = body;
+        while let Some(idx) = rest.find("\"/") {
+            rest = &rest[idx + 1..];
+            let close = rest.find('"').expect("route literal closed");
+            routes.push(&rest[..close]);
+            rest = &rest[close + 1..];
+        }
+        assert!(
+            !routes.is_empty(),
+            "no route literals found in build_router"
+        );
+
+        let table_start = readme
+            .find("## Endpoints")
+            .expect("oracle/README.md has an Endpoints section");
+        let table = &readme[table_start..];
+        for route in routes {
+            assert!(
+                table.contains(route),
+                "route {route} from build_router is missing from the endpoint table in oracle/README.md"
+            );
+        }
     }
 }
