@@ -407,3 +407,72 @@ mod signing_key_state_tests {
         assert!(state.tx_signing_key.is_none(), "unset key must stay None");
     }
 }
+
+#[cfg(test)]
+mod keeper_status_snapshot_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    // #1408 (1): with a stable generation the pair is returned from the first read.
+    #[tokio::test]
+    async fn snapshot_returns_pair_when_generation_unchanged() {
+        let state = AppState::new(Arc::new(Config::default_for_tests()));
+        state.keeper_status.write().await.pending_orders = 3;
+        state.cycle_status.write().await.last_keeper_cycle_latency_ms = Some(7);
+
+        let (ks, cs) = state.keeper_status_snapshot().await;
+        assert_eq!(ks.pending_orders, 3);
+        assert_eq!(cs.last_keeper_cycle_latency_ms, Some(7));
+    }
+
+    // #1408 (2): a generation bump between the two reads forces a retry, so
+    // the returned keeper_status is re-read after the bump.
+    #[tokio::test]
+    async fn snapshot_retries_when_generation_bumps_between_reads() {
+        let state = Arc::new(AppState::new(Arc::new(Config::default_for_tests())));
+        state.keeper_status.write().await.pending_orders = 1;
+
+        // Hold the second lock so the snapshot stalls between its two reads.
+        let stall = state.cycle_status.write().await;
+        let reader = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { state.keeper_status_snapshot().await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        state.keeper_cycle_generation.fetch_add(1, Ordering::SeqCst);
+        state.keeper_status.write().await.pending_orders = 2;
+        drop(stall);
+
+        let (ks, _) = reader.await.unwrap();
+        assert_eq!(
+            ks.pending_orders, 2,
+            "snapshot must re-read after a generation bump"
+        );
+    }
+
+    // #1408 (3): under permanent generation flux every attempt collides and
+    // the call falls through to the best-effort pair instead of looping.
+    #[tokio::test]
+    async fn snapshot_falls_back_when_generation_never_settles() {
+        let state = Arc::new(AppState::new(Arc::new(Config::default_for_tests())));
+        state.keeper_status.write().await.pending_orders = 9;
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flux = {
+            let gen = Arc::clone(&state.keeper_cycle_generation);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    gen.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+
+        let (ks, _) = state.keeper_status_snapshot().await;
+        stop.store(true, Ordering::SeqCst);
+        flux.join().unwrap();
+        assert_eq!(ks.pending_orders, 9, "best-effort pair must still return");
+    }
+}
