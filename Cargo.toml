@@ -1,3 +1,6 @@
+# Virtual manifest: `[workspace]` with no `[package]`, so there is no root
+# crate and no root `tests/` — Cargo silently ignores one here. Integration
+# tests live in `oracle/tests/` (see AGENTS.md §1).
 [workspace]
 members = ["oracle", "shared/config"]
 resolver = "2"
