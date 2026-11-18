@@ -217,12 +217,24 @@ fly deploy
 Non-secret settings (network, contract IDs, `KEEPER_ACCOUNT_ID`, loop
 intervals, fees) live in `fly.toml`'s `[env]`; edit the `YOUR_…` placeholders there.
 
+> **Both manifests must be edited before the first deploy (#1427).** Every
+> `YOUR_…` value in `fly.toml` and `railway.json` is a placeholder that
+> `Config::from_env()` rejects (`STELLAR_NETWORK` must be `testnet` or
+> `mainnet`, contract IDs and `KEEPER_ACCOUNT_ID` must be valid strkeys), so
+> deploying a manifest as committed starts a container that exits at boot and
+> is restarted in a loop (`min_machines_running = 1` on Fly,
+> `restartPolicyMaxRetries: 100` on Railway). The boot log names the first
+> invalid variable.
+
 ### Railway
 
 ```bash
 # Deploy to Railway
 railway up
 ```
+
+Replace every `YOUR_…` placeholder in `railway.json`'s `variables` first (or
+override it in the dashboard) — see the boot-loop note under Fly.io above.
 
 `railway.json` only carries non-secret variables. Add `KEEPER_PRIVATE_KEY`,
 `KEEPER_SECRET_KEY`, `ADMIN_API_TOKEN` (and optionally `PYTH_API_KEY`) in the

@@ -6,6 +6,9 @@ primary_region = 'iad'
 
 [env]
   BIND_ADDR = '0.0.0.0:8080'
+  # Every 'YOUR_...' value below is a placeholder the config layer rejects:
+  # deploying this file unedited boot-loops the machine (#1427). Replace them
+  # all before the first `fly deploy`.
   # REQUIRED: override this for your target network before deploying.
   # The network passphrase is derived automatically from STELLAR_NETWORK
   # (see oracle/src/config.rs) — it is not read from the environment.

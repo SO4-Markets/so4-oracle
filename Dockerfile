@@ -17,8 +17,12 @@ COPY oracle/Cargo.toml ./oracle/Cargo.toml
 # config/tokens.json is embedded at compile time; provide a minimal stub so
 # include_str! resolves during the dependency-cache build.
 COPY config ./config
+# oracle/Cargo.toml declares an explicit [lib] target (src/lib.rs), and Cargo
+# validates every declared target before building any, so the stub needs a
+# lib.rs as well as main.rs (#1426).
 RUN mkdir -p shared/config/src oracle/src \
     && echo 'pub fn placeholder() {}' > shared/config/src/lib.rs \
+    && echo '' > oracle/src/lib.rs \
     && echo 'fn main() {}' > oracle/src/main.rs \
     && cargo build --release --locked --bin oracle \
     && rm -rf oracle/src shared/config/src
