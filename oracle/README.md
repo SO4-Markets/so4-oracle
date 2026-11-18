@@ -46,6 +46,33 @@ Optional defaults:
 
 For mainnet, `STELLAR_RPC_URL` and `ORACLE_CONTRACT_ID` must be explicit.
 
+## Endpoints
+
+The router (`build_router` in `oracle/src/api/mod.rs`) serves exactly these
+routes. "Admin" rows require `Authorization: Bearer <ADMIN_API_TOKEN>`; when
+the token is unset they respond `503`, and repeated bad tokens from one client
+are throttled with `429`. Query parameters and response shapes:
+
+| Endpoint                     | Method | Auth   | Query parameters                          | Response                                                                 |
+| ---------------------------- | ------ | ------ | ----------------------------------------- | ------------------------------------------------------------------------ |
+| `/health`                    | GET    | public | —                                         | `{"status":"ok","version":"<semver>"}`                                    |
+| `/ready`                     | GET    | public | —                                         | same body as `/health`; `503` until the first price fetch succeeds        |
+| `/prices`                    | GET    | public | —                                         | array of `CachedPrice` objects from the in-memory cache; `503 {"error":"no_prices"}` before the first cycle |
+| `/oracle/status`             | GET    | admin  | —                                         | `OracleStatusResponse`: last cycle timings and per-token price state      |
+| `/keeper/status`             | GET    | admin  | —                                         | `KeeperStatusResponse`: pending orders/deposits/withdrawals, recent executions, cycle timing |
+| `/keeper/balance`            | GET    | admin  | —                                         | `{"account_id":"G…","balance_stroops":<i64>,"balance_xlm":<f64>,"min_balance_xlm":<f64>,"is_funded":<bool>}` |
+| `/keeper/blacklist/{key}`    | DELETE | admin  | —                                         | `{"key":"<key>","cleared":true}`                                          |
+| `/oracle/failed-submissions` | GET    | admin  | `operation=<prefix>`, `limit=<n>`         | `{"failures":[FailedSubmission],"total_count":<n>}`                       |
+| `/metrics`                   | GET    | admin  | —                                         | Prometheus text exposition                                                |
+
+`/oracle/failed-submissions` returns the most recent failures first,
+filtered by operation-name prefix when `?operation=` is given, at most
+`?limit=` entries (default 100, capped at 256).
+
+The `readme_endpoint_table_covers_every_route` test in `oracle/src/api/mod.rs`
+parses this table and fails if any route registered in `build_router` is
+missing from it.
+
 ## Smoke Check
 
 ```sh

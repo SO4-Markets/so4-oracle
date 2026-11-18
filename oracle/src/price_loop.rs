@@ -626,8 +626,8 @@ fn signed_cached_price(
     // Use the minimum observation time from all sources used, not the signing time.
     // This ensures staleness is measured from the oldest contributing price.
     let timestamp = aggregate.min_observation_time;
-    // Sign with the key decoded once at startup (#1226); fall back to the
-    // string key only so a missing/invalid key still reports its error.
+    // Sign with the key decoded once at config load (#1226). Decoding failures
+    // are boot failures (#1473), so `None` means the key was never configured.
     let signature = match state.price_signing_key.as_deref() {
         Some(key) => crate::signing::sign_price_with_key(
             key,
@@ -638,16 +638,7 @@ fn signed_cached_price(
             aggregate.max,
             timestamp,
         ),
-        None => crate::signing::sign_price(
-            state.config.keeper_private_key.as_str(),
-            &state.config.network_passphrase,
-            ledger_seq,
-            &token.stellar_address,
-            aggregate.min,
-            aggregate.max,
-            timestamp,
-        )
-        .map_err(|err| err.to_string())?,
+        None => return Err("KEEPER_PRIVATE_KEY is not configured".to_string()),
     };
 
     Ok(CachedPrice {
@@ -716,7 +707,7 @@ async fn record_error_with_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, Network, PriceFeedConfig, SecretString};
+    use crate::config::{Config, Network, PriceFeedConfig};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Duration;
 
@@ -734,10 +725,13 @@ mod tests {
             deposit_handler_contract_id: "CDEPOSIT".to_string(),
             withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
             reader_contract_id: "CREADER".to_string(),
-            keeper_private_key: SecretString::new(
-                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-            ),
-            keeper_secret_key: SecretString::new("SSECRET".to_string()),
+            keeper_private_key: Some(std::sync::Arc::new(
+                crate::signing::signing_key_from_hex(
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .unwrap(),
+            )),
+            keeper_secret_key: None,
             keeper_account_id: "GACCOUNT".to_string(),
             keeper_index: 0,
             admin_api_token: None,
@@ -770,10 +764,13 @@ mod tests {
             deposit_handler_contract_id: "CDEPOSIT".to_string(),
             withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
             reader_contract_id: "CREADER".to_string(),
-            keeper_private_key: SecretString::new(
-                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-            ),
-            keeper_secret_key: SecretString::new("SSECRET".to_string()),
+            keeper_private_key: Some(std::sync::Arc::new(
+                crate::signing::signing_key_from_hex(
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .unwrap(),
+            )),
+            keeper_secret_key: None,
             keeper_account_id: "GACCOUNT".to_string(),
             keeper_index: 0,
             admin_api_token: None,

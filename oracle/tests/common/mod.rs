@@ -35,12 +35,18 @@ pub fn test_config_with_tokens(
         withdrawal_handler_contract_id: "CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE"
             .to_string(),
         reader_contract_id: "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC".to_string(),
-        keeper_private_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_secret_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
+        keeper_private_key: Some(std::sync::Arc::new(
+            oracle::signing::signing_key_from_hex(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        )),
+        keeper_secret_key: Some(std::sync::Arc::new(
+            oracle::chain::tx_builder::signing_key_from_secret(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        )),
         keeper_account_id: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
         keeper_index: 0,
         admin_api_token: Some(SecretString::new("test-admin-token".to_string())),
@@ -133,10 +139,13 @@ pub fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
         deposit_handler_contract_id: "CDEPOSIT".to_string(),
         withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
         reader_contract_id: "CREADER".to_string(),
-        keeper_private_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_secret_key: SecretString::new("SSECRET".to_string()),
+        keeper_private_key: Some(std::sync::Arc::new(
+            oracle::signing::signing_key_from_hex(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        )),
+        keeper_secret_key: None,
         keeper_account_id: "GACCOUNT".to_string(),
         keeper_index: 0,
         admin_api_token: None,

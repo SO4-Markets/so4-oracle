@@ -31,6 +31,55 @@ so4-oracle  (single statically-deployed binary)
       → record results; never panics the loop
 ```
 
+### The two loops and shared state
+
+`main.rs` builds one `AppState` (config, HTTP client, `PriceCache`, cycle and
+keeper status, failure/blacklist counters, and the decoded signing keys) and
+spawns two tokio tasks that share it.
+
+- **Price loop** (`oracle/src/price_loop.rs`, `PRICE_LOOP_MS`, default 1s) —
+  fetches every configured source (Binance, Coinbase, Pyth, fixed), validates
+  and aggregates min/max/median per token, signs the payload with the decoded
+  `KEEPER_PRIVATE_KEY`, writes the result into `PriceCache`, and submits
+  `set_prices` to the oracle contract when medians move.
+- **Keeper loop** (`oracle/src/keeper_loop.rs`, `KEEPER_LOOP_MS`, default
+  1.5s) — polls the reader contract for pending orders, deposits and
+  withdrawals; refreshes prices for the tokens that pending work touches
+  (again via `set_prices`); then executes — or freezes — each item on its
+  handler contract. Every error is recorded and the loop continues; it never
+  panics (`panic = "abort"` in the release profile would take the process
+  down).
+
+`PriceCache` is the bridge between the loops and the API: the price loop
+writes signed prices into it, `GET /prices` serves it to the frontend, and
+the keeper loop reads it to decide which tokens need a fresh submission
+before executing work. Cycle/keeper status and the failure ring buffer in
+`AppState` back the admin endpoints.
+
+### On-chain contracts each side talks to
+
+| Contract env var       | Used by                    | For                                          |
+| ---------------------- | -------------------------- | -------------------------------------------- |
+| `ORACLE_CONTRACT_ID`   | price loop, keeper loop    | `set_prices` submissions                     |
+| `READER`               | keeper loop                | polling pending orders/deposits/withdrawals  |
+| `DATA_STORE`           | keeper loop                | read-side state behind the reader queries    |
+| `ORDER_HANDLER`        | keeper loop                | `execute_order` / `freeze_order`             |
+| `DEPOSIT_HANDLER`      | keeper loop                | executing / freezing deposits                |
+| `WITHDRAWAL_HANDLER`   | keeper loop                | executing / freezing withdrawals             |
+
+`ROLE_STORE` is the on-chain role store the handler contracts authorize
+against; the service requires its address at boot and validates it is
+distinct from the other contract IDs.
+
+### Failure states an operator will encounter
+
+| Failure state            | What it means                                                                                     | Where to look                                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Frozen order/deposit/withdrawal | repeated freeze/execute failures abandoned the key (`MAX_CONSECUTIVE_FREEZE_FAILURES`, `MAX_CONSECUTIVE_EXECUTION_FAILURES`) | `GET /keeper/status` recent executions, `GET /oracle/failed-submissions`, `oracle_blacklisted_keys` metric |
+| Blacklisted key          | the key is permanently skipped until cleared; a replacement must be posted on-chain               | `DELETE /keeper/blacklist/{key}` clears it for retry                                                    |
+| Stale prices             | sources failing or the price cycle has stalled                                                    | `GET /prices` timestamps, `GET /oracle/status`, `oracle_last_set_prices_timestamp_seconds` metric       |
+| Low keeper balance       | balance fell below `MIN_KEEPER_BALANCE_XLM`; execution halts until the account is funded          | `GET /keeper/balance`, `/ready` reports `503`, `oracle_keeper_balance_below_min` metric                 |
+
 ## Deployed Contract Reference
 
 Testnet oracle:
