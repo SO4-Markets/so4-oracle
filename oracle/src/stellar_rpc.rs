@@ -401,6 +401,56 @@ pub async fn get_account_balance(
 mod tests {
     use super::*;
 
+    // #1412 — the exact integer parser is tested directly, with exact stroop
+    // values, instead of only through `parse_account_balance_response`.
+    #[test]
+    fn parse_xlm_balance_to_stroops_exact_values() {
+        let cases = [
+            ("100.0000000", 1_000_000_000),
+            ("0.0000001", 1),
+            ("0.0000000", 0),
+            ("1.5", 15_000_000),
+            ("1.", 10_000_000),
+            ("42", 420_000_000),
+            ("1.12345678", 11_234_567),
+            (" 2.5 ", 25_000_000),
+            ("922337203685.4775807", i64::MAX),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_xlm_balance_to_stroops(input),
+                Ok(expected),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_xlm_balance_to_stroops_rejects_malformed_input() {
+        let cases = [
+            "",
+            "abc",
+            "1.2.3",
+            "+1",
+            "-1",
+            ".5",
+            "1e7",
+            "1,5",
+            "922337203685.4775808",
+            "922337203686",
+            "99999999999999999999",
+        ];
+        for input in cases {
+            assert!(
+                matches!(
+                    parse_xlm_balance_to_stroops(input),
+                    Err(RpcError::JsonError(_))
+                ),
+                "{input:?} should be rejected"
+            );
+        }
+    }
+
     // #1449 — every variant is classified on purpose. `variant` has no
     // wildcard arm, so a new variant fails to compile until it is listed, and
     // the coverage check fails until it has a case.
