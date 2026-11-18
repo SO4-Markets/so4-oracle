@@ -233,6 +233,8 @@ pub struct AppState {
     /// crossed its two sequential lock reads and retry, rather than returning a
     /// torn `keeper_status` / `cycle_status` pair (#797).
     pub keeper_cycle_generation: Arc<AtomicU64>,
+    /// Last startup preflight result, exposed on `/oracle/status` (#1468).
+    pub preflight_result: Arc<RwLock<Option<crate::preflight::PreflightResult>>>,
     /// `KEEPER_PRIVATE_KEY` decoded once at startup for price signing (#1226).
     /// `SigningKey` zeroises its seed on drop. `None` if unset or invalid, in
     /// which case signing falls back to the string key and reports the error.
@@ -273,6 +275,7 @@ impl AppState {
             execution_failure_counts: Arc::new(Mutex::new(HashMap::new())),
             keeper_balance_below_min: Arc::new(AtomicBool::new(false)),
             keeper_cycle_generation: Arc::new(AtomicU64::new(0)),
+            preflight_result: Arc::new(RwLock::new(None)),
             price_signing_key,
             tx_signing_key,
             admin_auth_limiter: Arc::new(AdminAuthLimiter::default()),

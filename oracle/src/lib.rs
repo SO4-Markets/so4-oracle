@@ -9,6 +9,7 @@ pub mod keeper;
 pub mod keeper_loop;
 pub mod metrics;
 pub mod network_config;
+pub mod preflight;
 pub mod price_loop;
 pub mod prices;
 pub mod pyth;
