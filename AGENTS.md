@@ -6,6 +6,7 @@ Read and execute these instructions strictly before committing code or opening a
 - **Binary**: This is an Axum service running the price loop, the keeper loop, and the HTTP API.
 - **Workspace Layout**: Core logic lives in `oracle/`, and shared configuration is in `shared/config/`.
 - **Integration Tests**: Located exclusively in `oracle/tests/`. **Never** create or use a root `tests/` directory—the root manifest is virtual and will silently ignore it.
+- **Docs**: `docs/KEEPER_STATE_MACHINE.md` documents the keeper failure state machine (constant names match the code); `docs/RUNBOOK.md` is the operator runbook.
 
 ## 2. The Verification Gate (Non-Negotiable)
 These commands MUST all exit 0 before any git commit is made, and again before a PR is opened or updated:

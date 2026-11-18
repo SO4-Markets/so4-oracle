@@ -277,6 +277,12 @@ to `railway.json`, which is committed to the repo.
 > job fails if `KEEPER_PRIVATE_KEY`, `KEEPER_SECRET_KEY`, `ADMIN_API_TOKEN` or
 > `PYTH_API_KEY` is assigned in `fly.toml` or `railway.json`.
 
+## Documentation
+
+- [docs/RUNBOOK.md](docs/RUNBOOK.md) — operator runbook: symptoms, diagnosis, remediation
+- [docs/KEEPER_STATE_MACHINE.md](docs/KEEPER_STATE_MACHINE.md) — the keeper failure state machine
+- [docs/RISK_MECHANICS.md](docs/RISK_MECHANICS.md) — design-only reference for the external liquidation/ADL/insurance-fund contracts (not implemented in this service)
+
 ## Endpoints
 
 | Endpoint                     | Method | Auth  | Description                                                   |
