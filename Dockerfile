@@ -41,10 +41,10 @@ FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595
 
 WORKDIR /app
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
+# Install runtime dependencies. Only the trust store rustls needs: the
+# HEALTHCHECK below uses the binary itself, so curl is not installed (#1431).
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from builder
@@ -65,8 +65,10 @@ EXPOSE 8080
 # Health check — timeout covers /ready's worst-case (RPC reachability +
 # keeper-balance retries), capped at 15s by READY_CHECK_TIMEOUT_SECS (#1042,
 # #1043). Use /health for pure liveness (always fast, in-memory only).
+# `oracle --health-check` GETs /health on loopback at BIND_ADDR's port and
+# exits 0/1 (#1431).
 HEALTHCHECK --interval=30s --timeout=20s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD ["/app/oracle", "--health-check"]
 
 # Run the binary
 CMD ["/app/oracle"]

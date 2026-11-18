@@ -26,12 +26,35 @@ Restart=always
 RestartSec=5
 
 # Environment
+# /opt/oracle/.env holds KEEPER_PRIVATE_KEY, KEEPER_SECRET_KEY and
+# ADMIN_API_TOKEN. It must be mode 0600 and owned by oracle:oracle:
+#   sudo chown oracle:oracle /opt/oracle/.env && sudo chmod 0600 /opt/oracle/.env
 EnvironmentFile=/opt/oracle/.env
+
+# Resource limits (#1430): bound a leak or a runaway spawn so it can't take
+# the host down. fly.toml provisions 256 MB; this leaves headroom above that.
+MemoryMax=512M
+TasksMax=256
 
 # Security
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+# Additional sandboxing (#1430). The process only makes outbound TCP
+# connections and serves HTTP; AF_UNIX stays allowed for local name
+# resolution (e.g. systemd-resolved).
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+UMask=0077
 # The oracle process never writes to disk (tokens.json is embedded at compile
 # time via include_str!, and EnvironmentFile is read by systemd itself, not
 # the process) — ReadWritePaths=/opt/oracle granted unneeded write access.
