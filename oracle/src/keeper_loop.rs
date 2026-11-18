@@ -1288,12 +1288,34 @@ async fn get_pending_keys(
     Ok(keys)
 }
 
+/// Splits the prices to publish into `set_prices` batches the oracle contract
+/// accepts: at most `MAX_PRICE_BATCH_SIZE` each, in cache order (#1424).
+fn price_batches(prices: &BTreeMap<String, CachedPrice>) -> Vec<Vec<&CachedPrice>> {
+    let all: Vec<&CachedPrice> = prices.values().collect();
+    all.chunks(scval::MAX_PRICE_BATCH_SIZE)
+        .map(|batch| batch.to_vec())
+        .collect()
+}
+
+/// Publishes `prices`, one `set_prices` transaction per batch (#1424). Stops at
+/// the first failed batch; the caller then leaves the submitted-price state
+/// untouched, so the next cycle republishes everything.
 async fn set_prices_on_chain(
     state: &Arc<AppState>,
     prices: &BTreeMap<String, CachedPrice>,
 ) -> Result<String, HandlerError> {
-    let prices_vec: Vec<&CachedPrice> = prices.values().collect();
-    let prices_scval = scval::encode_prices_vec(&prices_vec)?;
+    let mut confirmed = Vec::new();
+    for batch in price_batches(prices) {
+        confirmed.push(set_price_batch_on_chain(state, &batch).await?);
+    }
+    Ok(confirmed.join(", "))
+}
+
+async fn set_price_batch_on_chain(
+    state: &Arc<AppState>,
+    batch: &[&CachedPrice],
+) -> Result<String, HandlerError> {
+    let prices_scval = scval::encode_prices_vec(batch)?;
 
     let sequence = get_account_sequence(state)
         .await
@@ -2508,5 +2530,30 @@ mod keeper_tx_tests {
 
         let err = sign_keeper_tx(&state, &dummy_tx()).expect_err("must not panic or sign");
         assert!(!err.is_empty(), "error message must not be empty");
+    }
+
+    // #1424 — the contract rejects a set_prices batch over
+    // MAX_PRICE_BATCH_SIZE, so a cache one token over the limit must become
+    // two submissions, in cache order, with nothing dropped.
+    #[test]
+    fn price_batches_split_at_max_price_batch_size() {
+        let cache = |n: usize| -> BTreeMap<String, CachedPrice> {
+            (0..n)
+                .map(|i| (format!("k{i:03}"), threshold_price(i as i128)))
+                .collect()
+        };
+
+        let over = cache(scval::MAX_PRICE_BATCH_SIZE + 1);
+        let batches = price_batches(&over);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), scval::MAX_PRICE_BATCH_SIZE);
+        assert_eq!(batches[1].len(), 1);
+        assert_eq!(batches[1][0].median, scval::MAX_PRICE_BATCH_SIZE as i128);
+
+        assert_eq!(price_batches(&cache(scval::MAX_PRICE_BATCH_SIZE)).len(), 1);
+        assert!(price_batches(&cache(0)).is_empty());
+        for batch in price_batches(&cache(3 * scval::MAX_PRICE_BATCH_SIZE + 7)) {
+            assert!(batch.len() <= scval::MAX_PRICE_BATCH_SIZE);
+        }
     }
 }

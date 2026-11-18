@@ -191,11 +191,6 @@ fn find_largest_consistent_cluster(
     })
 }
 
-#[cfg(test)]
-pub fn compute_confidence_interval(prices: &[i128]) -> Option<PriceProps> {
-    compute_confidence_interval_with_spread(prices, 100)
-}
-
 /// Compute the price spread from a slice of raw source prices.
 pub fn compute_confidence_interval_with_spread(
     prices: &[i128],
@@ -439,7 +434,7 @@ mod tests {
         // 90th percentile index = 0.9 * 4 = 3.6 → lo=3 hi=4 → 400 + 0.6*(500-400) = 460
         // With spread_bps=100 (1%), mid=300, spread=3: min=140-3=137, max=460+3=463
         let prices = vec![300i128, 100, 500, 200, 400];
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
         assert_eq!(p.min, 137);
         assert_eq!(p.max, 463);
     }
@@ -450,7 +445,7 @@ mod tests {
         // 10th: 0.1*2=0.2 → 100+0.2*100=120
         // 90th: 0.9*2=1.8 → 200+0.8*100=280
         // With spread_bps=100 (1%), mid=200, spread=2: min=120-2=118, max=280+2=282
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
         assert_eq!(p.min, 118);
         assert_eq!(p.max, 282);
     }
@@ -458,7 +453,7 @@ mod tests {
     #[test]
     fn two_sources_uses_average_median_equal_spread() {
         let prices = vec![1000i128, 2000];
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
 
         assert_eq!(p.min, 1485, "Expected mid (1500) - 1% (15)");
         assert_eq!(p.max, 1515, "Expected mid (1500) + 1% (15)");
@@ -467,7 +462,7 @@ mod tests {
     #[test]
     fn single_source_uses_fallback_equal_spread() {
         let prices = vec![5000i128];
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
 
         assert_eq!(p.min, 4950, "Expected 5000 - 1% spread (50)");
         assert_eq!(p.max, 5050, "Expected 5000 + 1% spread (50)");
@@ -475,20 +470,20 @@ mod tests {
 
     #[test]
     fn empty_prices_returns_none() {
-        assert_eq!(compute_confidence_interval(&[]), None);
+        assert_eq!(compute_confidence_interval_with_spread(&[], 100), None);
     }
 
     #[test]
     fn min_is_less_than_or_equal_to_max() {
         let prices = vec![42i128, 43, 44, 45, 46];
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
         assert!(p.min <= p.max);
     }
 
     #[test]
     fn even_source_count_six_prices() {
         let prices = vec![100i128, 200, 300, 400, 500, 600];
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
         // 10th: 0.1*5=0.5 → lo=0 hi=1 → 100+0.5*100=150
         // 90th: 0.9*5=4.5 → lo=4 hi=5 → 500+0.5*100=550
         // With spread_bps=100 (1%), mid=350, spread=3: min=150-3=147, max=550+3=553
@@ -500,7 +495,7 @@ mod tests {
     #[test]
     fn odd_source_count_seven_prices() {
         let prices = vec![10i128, 20, 30, 40, 50, 60, 70];
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
         // 10th: 0.1*6=0.6 → lo=0 hi=1 → 10+0.6*10=16
         // 90th: 0.9*6=5.4 → lo=5 hi=6 → 60+0.4*10=64
         // With spread_bps=100 (1%), mid=40, spread=0: min=16, max=64 (spread is 0 due to integer division)
@@ -512,7 +507,7 @@ mod tests {
     #[test]
     fn median_calculation_odd_count() {
         let prices = vec![1i128, 2, 3, 4, 5];
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
         let sorted = [1, 2, 3, 4, 5];
         let median = sorted[sorted.len() / 2]; // 3
         assert_eq!(median, 3);
@@ -522,7 +517,7 @@ mod tests {
     #[test]
     fn median_calculation_even_count() {
         let prices = vec![1i128, 2, 3, 4, 5, 6];
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
         let median = compute_median(&prices).unwrap();
         assert_eq!(median, 3);
         assert!(p.min <= p.max);
@@ -555,7 +550,7 @@ mod tests {
     fn confidence_interval_with_outliers() {
         // Large outliers at both ends; 10th-90th percentile should exclude them
         let prices = vec![1i128, 2, 3, 4, 100, 200, 300, 400, 500, 1000000];
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
         // With percentile method, outliers don't heavily skew the interval
         assert!(p.min <= p.max);
         // 10th percentile should be much lower than max
@@ -565,7 +560,7 @@ mod tests {
     #[test]
     fn duplicate_prices() {
         let prices = vec![100i128, 100, 100, 100, 100];
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
         // All the same price → percentiles are 100, mid=100, spread=1: min=99, max=101
         assert_eq!(p.min, 99);
         assert_eq!(p.max, 101);
@@ -574,7 +569,7 @@ mod tests {
     #[test]
     fn large_price_values() {
         let prices = vec![1_000_000_000i128, 2_000_000_000, 3_000_000_000];
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
         // Should handle large values without overflow
         assert!(p.min <= p.max);
         assert!(p.min > 0);
@@ -618,7 +613,7 @@ mod tests {
     fn full_aggregation_pipeline_even_sources() {
         // Simulate a full price aggregation with even number of sources
         let prices = [45000i128, 45100, 44900, 45050];
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
         assert!(p.min <= p.max);
         // With spread_bps=100, the band is expanded by ~1% around the percentile bounds
         // Sorted: [44900, 45000, 45050, 45100], 10th=44930, 90th=45085, mid=45025, spread=450
@@ -751,7 +746,7 @@ mod tests {
         // mid = 200, spread = 200 * 100 / 10_000 = 2
         // fallback_min = 198, fallback_max = 202
 
-        let p = compute_confidence_interval(&prices).unwrap();
+        let p = compute_confidence_interval_with_spread(&prices, 100).unwrap();
 
         // Assert that the results use the percentile method (expanded by spread_bps),
         // not the fallback spread. With spread_bps=100 (1%), mid=200, spread=2:
@@ -878,22 +873,83 @@ mod tests {
         }
     }
 
-    #[test]
-    fn property_confidence_interval_always_satisfies_min_lte_max() {
-        let cases = vec![
+    /// Every distinct `max_deviation_bps` in the committed `config/tokens.json`
+    /// — the spreads `aggregate_prices` actually passes to
+    /// `compute_confidence_interval_with_spread` in production (#1425). Read
+    /// from the file, so a new token's value is covered automatically.
+    fn configured_spreads() -> Vec<u32> {
+        let raw = include_str!("../../config/tokens.json");
+        let config = crate::config::parse_price_feed_config(raw)
+            .expect("config/tokens.json must parse");
+        let mut spreads: Vec<u32> = config
+            .tokens
+            .iter()
+            .map(|token| token.max_deviation_bps)
+            .collect();
+        spreads.sort_unstable();
+        spreads.dedup();
+        assert!(!spreads.is_empty(), "config/tokens.json has no tokens");
+        spreads
+    }
+
+    fn interval_cases() -> Vec<Vec<i128>> {
+        vec![
             vec![42i128],
             vec![100, 200],
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             vec![999_999_999i128, 1_000_000_000, 1_000_000_001],
             vec![0i128, 0, 0, 0],
-        ];
-        for prices in cases {
-            let p = compute_confidence_interval(&prices).unwrap();
-            assert!(
-                p.min <= p.max,
-                "min {} > max {} for {prices:?}",
-                p.min,
-                p.max
+            vec![1_000_000_000_000_000_000_000_000_000_000i128; 3],
+        ]
+    }
+
+    #[test]
+    fn property_confidence_interval_always_satisfies_min_lte_max() {
+        for spread in configured_spreads() {
+            for prices in interval_cases() {
+                let p = compute_confidence_interval_with_spread(&prices, spread).unwrap();
+                assert!(
+                    p.min <= p.max,
+                    "min {} > max {} for {prices:?} at {spread} bps",
+                    p.min,
+                    p.max
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn property_band_contains_median_at_every_configured_spread() {
+        for spread in configured_spreads() {
+            for prices in interval_cases() {
+                let p = compute_confidence_interval_with_spread(&prices, spread).unwrap();
+                let median = compute_median_allow_single(&prices).unwrap();
+                assert!(
+                    p.min <= median && median <= p.max,
+                    "median {median} outside [{}, {}] for {prices:?} at {spread} bps",
+                    p.min,
+                    p.max
+                );
+                assert!(
+                    p.min >= 0,
+                    "negative min for {prices:?} at {spread} bps"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn property_single_source_band_is_exactly_the_configured_spread() {
+        // The fixed-peg token (one source) is where a wrong band is most
+        // visible on-chain: it must be median +/- median * spread / 10_000.
+        let peg = 1_000_000_000_000_000_000_000_000_000_000i128;
+        for spread in configured_spreads() {
+            let p = compute_confidence_interval_with_spread(&[peg], spread).unwrap();
+            let expected = peg * spread as i128 / 10_000;
+            assert_eq!(
+                (p.min, p.max),
+                (peg - expected, peg + expected),
+                "{spread} bps"
             );
         }
     }
