@@ -85,8 +85,7 @@ async fn main() {
     // cycle (15s) = 30s total, which still fits. If each stage took the full
     // DEFAULT_SHUTDOWN_TIMEOUT_SECS (30s), the process could run 60s and get
     // SIGKILLed mid-loop, defeating the bounded shutdown (#552, #807, #870).
-    let drain_timeout =
-        std::time::Duration::from_secs(oracle::config::DEFAULT_SHUTDOWN_TIMEOUT_SECS / 2);
+    let drain_timeout = drain_timeout();
 
     // If either background task panics or returns unexpectedly while the
     // server is still running, trigger a full shutdown so an external
@@ -134,37 +133,66 @@ async fn main() {
     tracing::info!("shutdown initiated, draining...");
     state.shutdown_token.cancel();
 
-    // Bounded drain of whichever loops are still running, matching the
-    // server-shutdown bound above. If they don't finish in time, abort them
-    // and let the process exit rather than blocking indefinitely (#807).
-    let drain = async {
-        match exited_early {
-            Some(BackgroundTask::Price) => {
-                let _ = (&mut keeper_loop).await;
-            }
-            Some(BackgroundTask::Keeper) => {
-                let _ = (&mut price_loop).await;
-            }
-            None => {
-                let _ = tokio::join!(&mut price_loop, &mut keeper_loop);
-            }
-        }
-    };
-    if tokio::time::timeout(drain_timeout, drain).await.is_err() {
+    let drained = drain_background_tasks(
+        &mut price_loop,
+        &mut keeper_loop,
+        exited_early,
+        drain_timeout,
+    )
+    .await;
+    if drained {
+        tracing::info!("background tasks drained");
+    } else {
         tracing::warn!(
             timeout_secs = drain_timeout.as_secs(),
-            "background tasks did not drain in time; aborting and exiting"
+            "background tasks did not drain in time; aborted them and exiting"
         );
-        price_loop.abort();
-        keeper_loop.abort();
-    } else {
-        tracing::info!("background tasks drained");
     }
 }
 
 enum BackgroundTask {
     Price,
     Keeper,
+}
+
+/// Budget for each of the two sequential shutdown stages (HTTP drain, then
+/// background-loop drain): half of DEFAULT_SHUTDOWN_TIMEOUT_SECS, so the total
+/// stays inside the orchestrator grace period (#552, #807, #870).
+fn drain_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(oracle::config::DEFAULT_SHUTDOWN_TIMEOUT_SECS / 2)
+}
+
+/// Bounded drain of whichever loops are still running, matching the
+/// server-shutdown bound. A loop that already exited (`exited_early`) is not
+/// awaited again. If the rest don't finish within `timeout`, both are aborted
+/// so the process exits rather than blocking indefinitely (#807). Returns
+/// whether they drained in time. Extracted from `main` so the sequencing is
+/// testable (#1418).
+async fn drain_background_tasks(
+    price_loop: &mut tokio::task::JoinHandle<()>,
+    keeper_loop: &mut tokio::task::JoinHandle<()>,
+    exited_early: Option<BackgroundTask>,
+    timeout: std::time::Duration,
+) -> bool {
+    let drain = async {
+        match exited_early {
+            Some(BackgroundTask::Price) => {
+                let _ = (&mut *keeper_loop).await;
+            }
+            Some(BackgroundTask::Keeper) => {
+                let _ = (&mut *price_loop).await;
+            }
+            None => {
+                let _ = tokio::join!(&mut *price_loop, &mut *keeper_loop);
+            }
+        }
+    };
+    if tokio::time::timeout(timeout, drain).await.is_ok() {
+        return true;
+    }
+    price_loop.abort();
+    keeper_loop.abort();
+    false
 }
 
 /// `LOG_FORMAT=pretty` switches to human-readable output for local
@@ -237,7 +265,7 @@ async fn shutdown_signal(token: CancellationToken) {
 
 #[cfg(test)]
 mod tests {
-    use super::use_pretty_logs;
+    use super::{drain_background_tasks, drain_timeout, use_pretty_logs, BackgroundTask};
 
     #[test]
     fn log_format_defaults_to_json() {
@@ -252,5 +280,46 @@ mod tests {
         assert!(use_pretty_logs(Some("pretty")));
         assert!(use_pretty_logs(Some("PRETTY")));
         assert!(use_pretty_logs(Some(" Pretty ")));
+    }
+
+    // #1418 — the two sequential stages together must fit the total budget.
+    #[test]
+    fn shutdown_stages_fit_the_total_budget() {
+        let secs = oracle::config::DEFAULT_SHUTDOWN_TIMEOUT_SECS;
+        let total = std::time::Duration::from_secs(secs);
+        assert!(drain_timeout() * 2 <= total);
+        assert!(!drain_timeout().is_zero());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_returns_true_when_loops_finish() {
+        let mut p = tokio::spawn(async {});
+        let mut k = tokio::spawn(async {});
+        let b = std::time::Duration::from_secs(15);
+        assert!(drain_background_tasks(&mut p, &mut k, None, b).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_aborts_loops_that_overrun_the_budget() {
+        let mut p = tokio::spawn(std::future::pending::<()>());
+        let mut k = tokio::spawn(async {});
+        let b = std::time::Duration::from_secs(15);
+        let started = tokio::time::Instant::now();
+
+        assert!(!drain_background_tasks(&mut p, &mut k, None, b).await);
+        assert!(started.elapsed() >= b);
+        assert!(p.await.unwrap_err().is_cancelled());
+    }
+
+    // A loop that already exited is not awaited again: only the other one is.
+    #[tokio::test(start_paused = true)]
+    async fn drain_skips_the_loop_that_exited_early() {
+        let mut p = tokio::spawn(std::future::pending::<()>());
+        let mut k = tokio::spawn(async {});
+        let b = std::time::Duration::from_secs(15);
+        let early = Some(BackgroundTask::Price);
+
+        assert!(drain_background_tasks(&mut p, &mut k, early, b).await);
+        p.abort();
     }
 }
