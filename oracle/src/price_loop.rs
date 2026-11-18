@@ -468,6 +468,10 @@ async fn build_cached_price(
         }
     }
 
+    state
+        .metrics
+        .set_token_sources_available(&token.symbol, prices.len());
+
     let aggregate = crate::prices::aggregate_prices(
         &prices,
         &sources,

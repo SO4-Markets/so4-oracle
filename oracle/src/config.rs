@@ -32,6 +32,20 @@ pub const MAX_TX_FEE_STROOPS: u32 = 10_000_000;
 const TX_FEE_WARN_MULTIPLIER: u32 = 2;
 /// Default timeout in seconds for graceful shutdown of background tasks.
 pub const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+/// Lower bound for `PRICE_LOOP_MS` / `KEEPER_LOOP_MS` (#1464). Below it the
+/// price loop floods Binance/Coinbase/Pyth and the keeper loop floods the
+/// Stellar RPC, and `/ready`'s `3 × interval` staleness threshold shrinks to
+/// a few milliseconds.
+pub const MIN_LOOP_MS: u64 = 250;
+/// Upper bound for `PRICE_LOOP_MS` / `KEEPER_LOOP_MS` (#1464).
+pub const MAX_LOOP_MS: u64 = 60_000;
+/// Sanity cap for `KEEPER_INDEX` (#1465). The contract has no fixed slot
+/// count — the index selects the `data_store` slot holding this keeper's
+/// public key — so this only catches typos; keepers are numbered from 0.
+pub const MAX_KEEPER_INDEX: u32 = 255;
+/// Shortest `PYTH_API_KEY` accepted (#1466), so a truncated paste fails at
+/// boot instead of on every price cycle.
+pub const MIN_PYTH_API_KEY_LEN: usize = 16;
 
 /// Oracle-specific view of a token feed config.
 /// Re-exports fields from `TokenConfig` for backward compatibility with
@@ -163,10 +177,12 @@ pub struct Config {
     pub keeper_secret_key: Option<std::sync::Arc<ed25519_dalek::SigningKey>>,
     /// Keeper Stellar account ID (G-prefixed strkey). Env: `KEEPER_ACCOUNT_ID`.
     pub keeper_account_id: String,
-    /// Index of this keeper instance, used only to label which keeper signed a
-    /// given price submission. Has no work-partitioning behavior — every
-    /// instance processes the full pending-work set regardless of index.
-    /// Env: `KEEPER_INDEX`, default `0`.
+    /// Index of this keeper instance. It is written into every signed price
+    /// and selects the `data_store` slot whose public key the oracle contract
+    /// verifies the signature against, so it must match the slot this
+    /// keeper's key was registered in. Has no work-partitioning behavior —
+    /// every instance processes the full pending-work set regardless of index.
+    /// Env: `KEEPER_INDEX`, default `0`, at most [`MAX_KEEPER_INDEX`].
     pub keeper_index: u32,
     /// Optional bearer token for admin API endpoints. Env: `ADMIN_API_TOKEN`.
     pub admin_api_token: Option<SecretString>,
@@ -209,6 +225,65 @@ fn validate_admin_api_token(token: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Reject a Pyth key that is visibly malformed (#1466): whitespace inside it
+/// or too short to be a whole key. Never includes the key in the error.
+fn validate_pyth_api_key(key: &str) -> Result<(), String> {
+    if key.chars().any(char::is_whitespace) {
+        return Err("must not contain whitespace (check for a stray space or newline)".to_string());
+    }
+    if key.chars().count() < MIN_PYTH_API_KEY_LEN {
+        return Err(format!("must be at least {MIN_PYTH_API_KEY_LEN} characters (truncated?)"));
+    }
+    Ok(())
+}
+
+/// Reject a `KEEPER_INDEX` above [`MAX_KEEPER_INDEX`] at boot (#1465), rather
+/// than per batch when the contract finds no key in that `data_store` slot.
+fn validate_keeper_index(index: u32) -> Result<u32, EnvError> {
+    if index > MAX_KEEPER_INDEX {
+        return Err(EnvError::InvalidVar {
+            var: "KEEPER_INDEX",
+            reason: format!(
+                "must be between 0 and {MAX_KEEPER_INDEX} (the data_store slot this keeper's \
+                 public key is registered in), got {index}"
+            ),
+        });
+    }
+    Ok(index)
+}
+
+/// Bound a loop interval to `MIN_LOOP_MS..=MAX_LOOP_MS` (#1464).
+fn validate_loop_ms(var: &'static str, ms: u64) -> Result<Duration, EnvError> {
+    if !(MIN_LOOP_MS..=MAX_LOOP_MS).contains(&ms) {
+        return Err(EnvError::InvalidVar {
+            var,
+            reason: format!("must be between {MIN_LOOP_MS} and {MAX_LOOP_MS} ms, got {ms}"),
+        });
+    }
+    Ok(Duration::from_millis(ms))
+}
+
+/// Symbols of tokens that list the `pyth` source while no `PYTH_API_KEY` is
+/// set (#1466) — every pyth fetch for them fails.
+fn pyth_symbols_without_key(price_feed: &PriceFeedConfig, has_key: bool) -> Vec<&str> {
+    if has_key {
+        return Vec::new();
+    }
+    price_feed
+        .tokens
+        .iter()
+        .filter(|token| token.sources.iter().any(|source| source == "pyth"))
+        .map(|token| token.symbol.as_str())
+        .collect()
+}
+
+/// True when one source outage can leave the token aggregating exactly two
+/// prices (#1467): three or more sources but `min_sources < 3`. At two prices
+/// the MAD-based outlier filter cannot reject anything.
+pub fn outlier_rejection_can_degrade(token: &TokenFeedConfig) -> bool {
+    token.sources.len() >= 3 && token.min_sources < 3
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,8 +460,10 @@ impl Config {
             String::new()
         };
 
-        let keeper_index =
-            collect_or_default!(parse_or_default(&mut lookup, "KEEPER_INDEX", "0"), 0u32);
+        let keeper_index = collect_or_default!(
+            parse_or_default(&mut lookup, "KEEPER_INDEX", "0").and_then(validate_keeper_index),
+            0u32
+        );
 
         let admin_api_token = lookup("ADMIN_API_TOKEN")
             .filter(|value| !value.trim().is_empty())
@@ -402,7 +479,16 @@ impl Config {
             });
         let pyth_api_key = lookup("PYTH_API_KEY")
             .filter(|value| !value.trim().is_empty())
-            .map(SecretString::new);
+            .and_then(|value| match validate_pyth_api_key(&value) {
+                Ok(()) => Some(SecretString::new(value)),
+                Err(reason) => {
+                    errors.push(EnvError::InvalidVar {
+                        var: "PYTH_API_KEY",
+                        reason,
+                    });
+                    None
+                }
+            });
 
         let min_keeper_balance_xlm: f64 = collect_or_default!(
             (|| {
@@ -467,13 +553,7 @@ impl Config {
                     "PRICE_LOOP_MS",
                     &DEFAULT_PRICE_LOOP_MS.to_string(),
                 )?;
-                if ms == 0 {
-                    return Err(EnvError::InvalidVar {
-                        var: "PRICE_LOOP_MS",
-                        reason: "must be greater than 0".to_string(),
-                    });
-                }
-                Ok(Duration::from_millis(ms))
+                validate_loop_ms("PRICE_LOOP_MS", ms)
             })(),
             Duration::from_millis(DEFAULT_PRICE_LOOP_MS)
         );
@@ -493,13 +573,7 @@ impl Config {
                     "KEEPER_LOOP_MS",
                     &DEFAULT_KEEPER_LOOP_MS.to_string(),
                 )?;
-                if ms == 0 {
-                    return Err(EnvError::InvalidVar {
-                        var: "KEEPER_LOOP_MS",
-                        reason: "must be greater than 0".to_string(),
-                    });
-                }
-                Ok(Duration::from_millis(ms))
+                validate_loop_ms("KEEPER_LOOP_MS", ms)
             })(),
             Duration::from_millis(DEFAULT_KEEPER_LOOP_MS)
         );
@@ -547,8 +621,36 @@ impl Config {
             }
         }
 
+        // A token whose prices go stale before the next price cycle finishes
+        // can never be served fresh (#1464).
+        for token in &price_feed.tokens {
+            if u128::from(token.stale_after_seconds) * 1_000 <= price_loop_interval.as_millis() {
+                errors.push(EnvError::InvalidVar {
+                    var: "PRICE_LOOP_MS",
+                    reason: format!(
+                        "{} ms is not shorter than token {}'s stale_after_seconds ({}s), so its \
+                         price would be stale before every refresh",
+                        price_loop_interval.as_millis(),
+                        token.symbol,
+                        token.stale_after_seconds
+                    ),
+                });
+            }
+        }
+
         if !errors.is_empty() {
             return Err(EnvErrors(errors));
+        }
+
+        let pyth_without_key = pyth_symbols_without_key(&price_feed, pyth_api_key.is_some());
+        if !pyth_without_key.is_empty() {
+            tracing::warn!(
+                event = "pyth_api_key_missing",
+                symbols = %pyth_without_key.join(","),
+                "PYTH_API_KEY is not set but these tokens use the pyth source; the Hermes \
+                 endpoint rejects unauthenticated requests, so every pyth fetch will fail and \
+                 these tokens run on their remaining sources"
+            );
         }
 
         Ok(Self {
@@ -803,6 +905,12 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
                         reason: "pyth_feed_id is required for pyth source".to_string(),
                     });
                 }
+                "fixed" if token.fixed_price.as_deref().unwrap_or("").is_empty() => {
+                    return Err(ConfigError::InvalidToken {
+                        symbol: token.symbol.clone(),
+                        reason: "fixed_price is required for fixed source".to_string(),
+                    });
+                }
                 "fixed" => {
                     // Validate and parse now so malformed values (e.g. "1e30",
                     // "1.0", "-5") are caught at config load rather than
@@ -861,6 +969,17 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
                 sources = token.sources.len(),
                 "min_sources is less than half the configured sources — \
                  a single source can push a price without cross-source validation"
+            );
+        }
+        if outlier_rejection_can_degrade(token) {
+            tracing::warn!(
+                event = "outlier_rejection_can_degrade",
+                symbol = %token.symbol,
+                min_sources = token.min_sources,
+                sources = token.sources.len(),
+                "one source outage leaves this token aggregating two prices, where the outlier \
+                 filter cannot reject anything; raise min_sources to 3 or watch \
+                 oracle_token_sources_available"
             );
         }
     }
@@ -1846,6 +1965,76 @@ mod tests {
         ));
     }
 
+    // ── #1464–#1467: loop bounds, keeper index, pyth key, source headroom ───
+
+    fn invalid_var_names(err: &EnvErrors) -> Vec<&'static str> {
+        err.0
+            .iter()
+            .filter_map(|e| match e {
+                EnvError::InvalidVar { var, .. } => Some(*var),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn loop_intervals_outside_bounds_are_rejected() {
+        for (var, value) in [
+            ("PRICE_LOOP_MS", "1"),
+            ("PRICE_LOOP_MS", "249"),
+            ("KEEPER_LOOP_MS", "1"),
+            ("KEEPER_LOOP_MS", "60001"),
+        ] {
+            let mut env = valid_env();
+            env.insert(var, value.to_string());
+
+            let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+            assert!(invalid_var_names(&err).contains(&var), "{var}={value}: {err}");
+        }
+    }
+
+    #[test]
+    fn loop_intervals_at_the_bounds_are_accepted() {
+        let mut env = valid_env();
+        env.insert("PRICE_LOOP_MS", MIN_LOOP_MS.to_string());
+        env.insert("KEEPER_LOOP_MS", MAX_LOOP_MS.to_string());
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+        assert_eq!(cfg.price_loop_interval, Duration::from_millis(MIN_LOOP_MS));
+        assert_eq!(cfg.keeper_loop_interval, Duration::from_millis(MAX_LOOP_MS));
+    }
+
+    #[test]
+    fn price_loop_not_shorter_than_stale_after_seconds_is_rejected() {
+        // config/tokens.json ships stale_after_seconds = 60.
+        let mut env = valid_env();
+        env.insert("PRICE_LOOP_MS", "60000".to_string());
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+        assert!(err.to_string().contains("stale_after_seconds"), "{err}");
+    }
+
+    #[test]
+    fn keeper_index_above_the_cap_is_rejected() {
+        let mut env = valid_env();
+        env.insert("KEEPER_INDEX", (MAX_KEEPER_INDEX + 1).to_string());
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+        assert!(invalid_var_names(&err).contains(&"KEEPER_INDEX"), "{err}");
+
+        env.insert("KEEPER_INDEX", MAX_KEEPER_INDEX.to_string());
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+        assert_eq!(cfg.keeper_index, MAX_KEEPER_INDEX);
+    }
+
+    #[test]
+    fn malformed_pyth_api_key_is_rejected_without_echoing_it() {
+        for key in ["short", "abcdefgh ijklmnopqrst"] {
+            let mut env = valid_env();
+            env.insert("PYTH_API_KEY", key.to_string());
+
+            let err = Config::from_lookup(|k| env.get(k).cloned()).unwrap_err();
+            assert!(invalid_var_names(&err).contains(&"PYTH_API_KEY"), "{err}");
+            assert!(!err.to_string().contains(key), "error must not echo the key");
     #[test]
     fn parse_price_feed_config_rejects_staleness_above_contract_window() {
         let json = r#"[{"symbol":"TUSDC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["fixed"],"min_sources":1,"fixed_price":"1000000000000000000000000000000","stale_after_seconds":271}]"#;
@@ -1914,6 +2103,43 @@ mod tests {
     }
 
     #[test]
+    fn well_formed_pyth_api_key_is_accepted() {
+        let mut env = valid_env();
+        env.insert("PYTH_API_KEY", "0123456789abcdef0123".to_string());
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+        assert!(cfg.pyth_api_key.is_some());
+    }
+
+    #[test]
+    fn pyth_tokens_are_reported_only_when_the_key_is_missing() {
+        let cfg = parse_price_feed_config(
+            r#"[
+                {"symbol":"BTC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["binance","pyth"],"binance_symbol":"BTCUSDT","pyth_feed_id":"0xabc","min_sources":1},
+                {"symbol":"ETH","stellar_address":"CAJ6BZKGFT47ALGMVFZZGAOXBV2RWIVYVCU4WJCQIURKRNXU346RWVAU","sources":["binance"],"binance_symbol":"ETHUSDT","min_sources":1}
+            ]"#,
+        )
+        .unwrap();
+
+        assert_eq!(pyth_symbols_without_key(&cfg, false), vec!["BTC"]);
+        assert!(pyth_symbols_without_key(&cfg, true).is_empty());
+    }
+
+    #[test]
+    fn outlier_rejection_degrades_with_three_sources_and_min_two() {
+        let cfg = load_price_feed_config(None).unwrap();
+        let mut token = cfg.tokens[0].clone();
+
+        token.sources = vec!["binance".into(), "coinbase".into(), "pyth".into()];
+        token.min_sources = 2;
+        assert!(outlier_rejection_can_degrade(&token));
+
+        token.min_sources = 3;
+        assert!(!outlier_rejection_can_degrade(&token));
+
+        token.sources.truncate(2);
+        token.min_sources = 2;
+        assert!(!outlier_rejection_can_degrade(&token));
     fn config_from_lookup_accepts_tx_fees_at_the_cap() {
         let mut env = valid_env();
         env.insert("SET_PRICES_TX_FEE", MAX_TX_FEE_STROOPS.to_string());
