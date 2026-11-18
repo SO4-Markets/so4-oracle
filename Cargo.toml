@@ -3,17 +3,44 @@ members = ["oracle", "shared/config"]
 resolver = "2"
 
 [workspace.package]
+version = "0.1.0"
+edition = "2021"
 rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/SO4-Markets/so4-oracle"
+homepage = "https://so4.market"
+description = "Production Axum service for the SO4.market Soroban oracle and keeper"
+authors = ["SO4 Markets"]
 
 [workspace.lints.rust]
+unsafe_code = "forbid"
 # Allow during the Rust 2024 migration while dependencies and generated code settle on one lifetime spelling.
 mismatched_lifetime_syntaxes = "allow"
 
 # Aligned with railway.json healthcheck: setting healthcheckPath to /ready
 # ensures the probe reflects real liveness (/ready inspects state.cycle_status).
+# panic = "unwind" is required for CatchPanicLayer to function — with
+# panic = "abort", a single panicking handler kills the entire process
+# immediately (#1213). The process-level restart is still handled by the
+# railway/fly ON_FAILURE policy if the whole binary exits.
 # Setting panic = "abort" ensures any unexpected panic crashes the process,
 # allowing the ON_FAILURE restart policy to detect and restart it.
+#
+# NOTE: With panic = "abort", the panic-recovery code in main.rs's
+# tokio::select! (the price_loop/keeper_loop JoinHandle match arms) is
+# unreachable in release builds — a panic anywhere aborts the entire process
+# before JoinHandle::Err can be observed. That code only executes under
+# panic = "unwind" (debug builds, cargo test). Cross-reference: main.rs.
 [profile.release]
 overflow-checks = true
-panic = "abort"
+panic = "unwind"
 
+# NOTE: there is intentionally no [patch.crates-io] for stellar-strkey here.
+# A version-only patch (`stellar-strkey = { version = "0.0.18" }`, added for
+# #1007 to collapse the three copies stellar-xdr v27 pulls in) is rejected by
+# cargo >= 1.95 with "patch for `stellar-strkey` points to the same source,
+# but patches must point to different sources" — a manifest-level error that
+# made every cargo invocation in this workspace fail before compiling a single
+# line. The section was therefore inert, not load-bearing, and has been
+# removed. Collapsing the copies for real requires a patch entry with a real
+# `path` or `git` source, which is a separate change.

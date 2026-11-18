@@ -176,6 +176,118 @@ async fn get_ready_retries_transient_keeper_balance_failure() {
     assert_eq!(balance_attempts.load(Ordering::SeqCst), 2);
 }
 
+// #798/#894 - the RPC-reachability check runs before the keeper-balance check
+// and must retry a transient failure too, instead of failing /ready on the
+// first blip.
+#[tokio::test]
+async fn get_ready_retries_transient_rpc_failure() {
+    let rpc_mock = MockServer::start().await;
+    let horizon_mock = MockServer::start().await;
+
+    let rpc_attempts = Arc::new(AtomicUsize::new(0));
+    let rpc_attempts_for_mock = Arc::clone(&rpc_attempts);
+    wiremock::Mock::given(method("GET"))
+        .respond_with(move |_req: &WireMockRequest| {
+            let attempt = rpc_attempts_for_mock.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                ResponseTemplate::new(503).set_body_string("transient rpc error")
+            } else {
+                ResponseTemplate::new(200).set_body_string("ok")
+            }
+        })
+        .mount(&rpc_mock)
+        .await;
+
+    wiremock::Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "balances": [{"asset_type": "native", "balance": "100.0000000"}]
+        })))
+        .mount(&horizon_mock)
+        .await;
+
+    let config = test_config(&rpc_mock.uri(), &horizon_mock.uri());
+    let state = Arc::new(AppState::new(config));
+
+    {
+        let mut cache = state.price_cache.write().await;
+        cache
+            .prices
+            .insert("BTC".to_string(), sample_cached_price());
+    }
+    {
+        let mut cycle = state.cycle_status.write().await;
+        cycle.last_price_cycle_at = Some(SystemTime::now());
+        cycle.last_keeper_cycle_at = Some(SystemTime::now());
+    }
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(rpc_attempts.load(Ordering::SeqCst), 2);
+}
+
+// #894 - when the RPC stays down, /ready still fails after a bounded number of
+// attempts and reports rpc_unhealthy.
+#[tokio::test]
+async fn get_ready_fails_after_rpc_retries_are_exhausted() {
+    let rpc_mock = MockServer::start().await;
+
+    let rpc_attempts = Arc::new(AtomicUsize::new(0));
+    let rpc_attempts_for_mock = Arc::clone(&rpc_attempts);
+    wiremock::Mock::given(method("GET"))
+        .respond_with(move |_req: &WireMockRequest| {
+            rpc_attempts_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(503).set_body_string("rpc down")
+        })
+        .mount(&rpc_mock)
+        .await;
+
+    let config = test_config(&rpc_mock.uri(), "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    {
+        let mut cache = state.price_cache.write().await;
+        cache
+            .prices
+            .insert("BTC".to_string(), sample_cached_price());
+    }
+    {
+        let mut cycle = state.cycle_status.write().await;
+        cycle.last_price_cycle_at = Some(SystemTime::now());
+        cycle.last_keeper_cycle_at = Some(SystemTime::now());
+    }
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 503);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "rpc_unhealthy");
+    assert_eq!(rpc_attempts.load(Ordering::SeqCst), 3);
+}
+
 // #340 — GET /ready returns 503 when keeper loop is stale
 #[tokio::test]
 async fn get_ready_returns_503_when_keeper_loop_stale() {
@@ -229,7 +341,7 @@ async fn get_ready_returns_503_when_keeper_loop_stale() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(predicate::str::contains("stale").eval(json["error"].as_str().unwrap()));
+    assert!(predicates::str::contains("stale").eval(json["error"].as_str().unwrap()));
 }
 
 // #340 — readiness becomes healthy once the spawned price and keeper loops complete
@@ -263,9 +375,10 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
                     "result": {"id": "abc", "sequence": 12345, "protocolVersion": 22}
                 })),
                 "simulateTransaction" => {
-                    let op = body["params"]["transaction"]["operations"][0].clone();
-                    let contract = op["contract_id"].as_str().unwrap_or("");
-                    let method = op["method"].as_str().unwrap_or("");
+                    let (contract, method) = common::simulated_invoke_target(&body)
+                        .unwrap_or_else(|| (String::new(), String::new()));
+                    let contract = contract.as_str();
+                    let method = method.as_str();
 
                     if contract == "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC" {
                         match method {
@@ -293,21 +406,9 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
                         }))
                     }
                 }
-                "getAccount" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": {
-                        "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
-                        "sequence": "100",
-                        "subentries": 0,
-                        "inflationDestination": "",
-                        "homeDomain": "",
-                        "thresholds": {"low": 1, "med": 1, "high": 1},
-                        "signers": [],
-                        "data": {},
-                        "balances": []
-                    }
-                })),
+                "getLedgerEntries" => {
+                    ResponseTemplate::new(200).set_body_json(common::account_entry_response(100))
+                }
                 "sendTransaction" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -383,21 +484,42 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
     let price_handle = tokio::spawn(run_price_loop(Arc::clone(&state)));
     let keeper_handle = tokio::spawn(run_keeper_loop(Arc::clone(&state)));
 
-    let ready_ok = tokio::time::timeout(Duration::from_secs(20), async {
+    // Readiness and keeper submission are two independent milestones, and
+    // ordering between them is not guaranteed: a keeper cycle that starts
+    // before the price loop has published anything completes immediately with
+    // `prices_stale` (deposits/withdrawals still flow, #1145), which is enough
+    // for `last_keeper_cycle_at` to go fresh and flip /ready to 200. So wait
+    // for both, bounded by the same deadline, instead of checking the RPC log
+    // only at the instant /ready first turns green.
+    let observed = tokio::time::timeout(Duration::from_secs(20), async {
+        let mut ready = false;
+        let mut submitted = false;
         loop {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/ready")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            if !ready {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/ready")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                ready = response.status() == 200;
+            }
 
-            if response.status() == 200 {
-                break;
+            if !submitted {
+                let requests = rpc_mock.received_requests().await.unwrap_or_default();
+                submitted = requests.iter().any(|req| {
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&req.body).unwrap_or_default();
+                    body["method"] == "sendTransaction"
+                });
+            }
+
+            if ready && submitted {
+                break (true, true);
             }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -408,16 +530,9 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
     state.shutdown_token.cancel();
     let _ = tokio::join!(price_handle, keeper_handle);
 
-    assert!(ready_ok.is_ok(), "ready did not become healthy in time");
-
-    let requests = rpc_mock.received_requests().await.unwrap_or_default();
-    assert!(
-        requests.iter().any(|req| {
-            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
-            body["method"] == "sendTransaction"
-        }),
-        "keeper did not submit a transaction"
-    );
+    let (ready_ok, submitted) = observed.expect("readiness/submission did not settle in time");
+    assert!(ready_ok, "ready did not become healthy in time");
+    assert!(submitted, "keeper did not submit a transaction");
 }
 
 // #340 — GET /ready returns 503 when RPC is unreachable

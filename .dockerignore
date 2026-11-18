@@ -1,0 +1,33 @@
+# Build artifacts — never send to the Docker daemon
+target/
+**/target/
+
+# Secrets — real .env files must never reach the build context
+.env
+.env.*
+!.env.example
+
+# Version control
+.git/
+.gitignore
+
+# Documentation (not needed at build or runtime)
+docs/
+*.md
+LICENSE
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Test and CI
+tests/
+.github/
+ci/

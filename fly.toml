@@ -5,7 +5,6 @@ primary_region = 'iad'
   dockerfile = 'Dockerfile'
 
 [env]
-  PORT = '8080'
   BIND_ADDR = '0.0.0.0:8080'
   # REQUIRED: override this for your target network before deploying.
   # The network passphrase is derived automatically from STELLAR_NETWORK
@@ -24,16 +23,27 @@ primary_region = 'iad'
   DEPOSIT_HANDLER = 'YOUR_DEPOSIT_HANDLER_CONTRACT_ID'
   WITHDRAWAL_HANDLER = 'YOUR_WITHDRAWAL_HANDLER_CONTRACT_ID'
   READER = 'YOUR_READER_CONTRACT_ID'
-  # REQUIRED: keeper signing credentials. Set these as Fly secrets
-  # (`fly secrets set KEEPER_PRIVATE_KEY=... KEEPER_SECRET_KEY=...`)
-  # rather than plaintext values here.
-  KEEPER_PRIVATE_KEY = 'YOUR_KEEPER_PRIVATE_KEY_HEX'
-  KEEPER_SECRET_KEY = 'YOUR_KEEPER_SECRET_KEY'
+  # REQUIRED: the keeper's public account id (G...). Not a secret.
   KEEPER_ACCOUNT_ID = 'YOUR_KEEPER_ACCOUNT_ID'
+  # SECRETS ARE NOT SET HERE (#1232). [env] is committed to git and visible in
+  # `fly config show` / image metadata, so the keeper signing keys and the
+  # admin token must be Fly secrets, never values in this file:
+  #
+  #   fly secrets set KEEPER_PRIVATE_KEY=<hex> KEEPER_SECRET_KEY=<S...> ADMIN_API_TOKEN=<token>
+  #   fly secrets set PYTH_API_KEY=<key>   # optional
+  #
+  # Without ADMIN_API_TOKEN, admin endpoints (/oracle/status, /keeper/status,
+  # /metrics, etc.) return 503 "ADMIN_API_TOKEN is not configured".
+  # CI (`manifest-secrets` job) fails if any of these names is assigned here.
   PRICE_LOOP_MS = '1000'
   KEEPER_LOOP_MS = '1500'
   MIN_KEEPER_BALANCE_XLM = '10'
   KEEPER_INDEX = '0'
+  SET_PRICES_TX_FEE = '1000000'
+  KEEPER_TX_FEE = '2000000'
+  # Optional secret: PYTH_API_KEY for authenticated Hermes requests. Not
+  # required during the migration period, but production deployments should
+  # set it (as a Fly secret, see above) before Pyth makes auth mandatory.
 
 [http_service]
   internal_port = 8080

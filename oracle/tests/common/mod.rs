@@ -72,9 +72,7 @@ pub fn fixed_token_with_price(symbol: &str, address: &str, price: &str) -> Token
         max_deviation_bps: 100,
         stale_after_seconds: 60,
         submit_threshold_bps: 10,
-        min: 0.0,
-        max: 0.0,
-        sources_used: vec![],
+        pyth_max_confidence_bps: 100,
     }
 }
 
@@ -92,10 +90,33 @@ pub fn bad_token(symbol: &str, address: &str) -> TokenConfig {
         max_deviation_bps: 100,
         stale_after_seconds: 60,
         submit_threshold_bps: 10,
-        min: 0.0,
-        max: 0.0,
-        sources_used: vec![],
+        pyth_max_confidence_bps: 100,
     }
+}
+
+/// Build the JSON-RPC response `getLedgerEntries` returns for an account
+/// ledger entry, using real XDR so the keeper's decoder is exercised (#1241).
+///
+/// `seq_num` is the account's last consumed sequence number; the keeper
+/// derives the next transaction sequence from it.
+pub fn account_entry_response(seq_num: i64) -> serde_json::Value {
+    use stellar_xdr::{AccountEntry, LedgerEntryData, Limits, SequenceNumber, WriteXdr};
+
+    let xdr = LedgerEntryData::Account(AccountEntry {
+        seq_num: SequenceNumber(seq_num),
+        ..Default::default()
+    })
+    .to_xdr_base64(Limits::none())
+    .expect("account entry XDR encodes");
+
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "entries": [{ "key": "", "xdr": xdr }],
+            "latestLedger": 12345
+        }
+    })
 }
 
 pub fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
@@ -128,4 +149,51 @@ pub fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
         pyth_api_key: None,
     });
     Arc::new(AppState::new(config))
+}
+
+/// Extract `(contract_id, method)` from a `simulateTransaction` request body.
+///
+/// Since #997 the keeper builds a real base64 XDR `TransactionEnvelope`
+/// rather than a hand-rolled JSON object, so a mock cannot discriminate
+/// between `get_order_count` and `get_deposit_keys` by reading
+/// `params.transaction.operations[0]` out of JSON — that path is always
+/// null. Decode the envelope instead and pull the contract address and
+/// function name out of the `InvokeContract` host function.
+pub fn simulated_invoke_target(body: &serde_json::Value) -> Option<(String, String)> {
+    use stellar_xdr::{
+        HostFunction, InvokeHostFunctionOp, Limits, OperationBody, ReadXdr, ScAddress,
+        TransactionEnvelope,
+    };
+
+    let b64 = body.get("params")?.get("transaction")?.as_str()?;
+
+    let envelope = TransactionEnvelope::from_xdr_base64(b64, Limits::none()).ok()?;
+    let tx = match envelope {
+        TransactionEnvelope::Tx(v1) => v1.tx,
+        _ => return None,
+    };
+    let op = tx.operations.first()?;
+
+    let args = match &op.body {
+        OperationBody::InvokeHostFunction(InvokeHostFunctionOp {
+            host_function: HostFunction::InvokeContract(args),
+            ..
+        }) => args,
+        _ => return None,
+    };
+
+    let contract = match &args.contract_address {
+        ScAddress::Contract(id) => {
+            format!(
+                "{}",
+                stellar_strkey::Strkey::Contract(stellar_strkey::Contract(id.0 .0))
+            )
+        }
+        _ => return None,
+    };
+
+    // `format!` rather than `.to_string()`: `Strkey::to_string` returns a
+    // heapless string, and `StringM` changes type depending on whether
+    // stellar-xdr's `alloc` feature is on for this target.
+    Some((contract, format!("{}", args.function_name.0)))
 }

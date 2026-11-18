@@ -72,9 +72,7 @@ fn three_source_token() -> TokenConfig {
         max_deviation_bps: 100,
         stale_after_seconds: 60,
         submit_threshold_bps: 10,
-        min: 0.0,
-        max: 0.0,
-        sources_used: vec![],
+        pyth_max_confidence_bps: 100,
     }
 }
 
@@ -233,9 +231,7 @@ async fn multi_source_single_source_token_still_works_with_min_sources_1() {
         max_deviation_bps: 100,
         stale_after_seconds: 60,
         submit_threshold_bps: 10,
-        min: 0.0,
-        max: 0.0,
-        sources_used: vec![],
+        pyth_max_confidence_bps: 100,
     };
 
     let multi = three_source_token();

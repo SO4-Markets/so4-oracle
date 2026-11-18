@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -36,6 +36,10 @@ pub struct PriceCache {
     pub prices: BTreeMap<String, CachedPrice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_updated: Option<SystemTime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_submitted_medians: Option<BTreeMap<String, i128>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_full_submission: Option<SystemTime>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -75,6 +79,10 @@ pub struct FailedSubmission {
     pub network: String,
     pub token: String,
     pub symbol: String,
+    /// Price source that failed (`binance`, `coinbase`, ...), for per-source
+    /// fetch failures; `None` for failures not tied to one source (#1450).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(serialize_with = "ser_i128_str")]
     pub min: i128,
     #[serde(serialize_with = "ser_i128_str")]
@@ -150,6 +158,48 @@ pub const MAX_CONSECUTIVE_EXECUTION_FAILURES: u32 = 5;
 /// stuck orders within a handful of keeper cycles.
 pub const IN_FLIGHT_EXPIRY: Duration = Duration::from_secs(300);
 
+/// Failed admin-auth attempts allowed per client within [`ADMIN_AUTH_WINDOW`]
+/// before further attempts are rejected with 429 until the window ends (#1214).
+pub const MAX_ADMIN_AUTH_FAILURES: u32 = 5;
+pub const ADMIN_AUTH_WINDOW: Duration = Duration::from_secs(60);
+/// Cap on tracked clients so the map can't grow without bound.
+const MAX_TRACKED_ADMIN_CLIENTS: usize = 10_000;
+
+/// Per-client failure counter for `AdminAuth` (#1214). Keyed by client IP
+/// (or "unknown" when the peer address isn't available, e.g. in tests).
+#[derive(Default)]
+pub struct AdminAuthLimiter {
+    failures: std::sync::Mutex<HashMap<String, (u32, Instant)>>,
+}
+
+impl AdminAuthLimiter {
+    /// True when `client` has used up its failure budget for the current window.
+    pub fn is_blocked(&self, client: &str, now: Instant) -> bool {
+        let map = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+        matches!(map.get(client), Some((count, start))
+            if *count >= MAX_ADMIN_AUTH_FAILURES && now.duration_since(*start) < ADMIN_AUTH_WINDOW)
+    }
+
+    pub fn record_failure(&self, client: &str, now: Instant) {
+        let mut map = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= MAX_TRACKED_ADMIN_CLIENTS {
+            map.retain(|_, (_, start)| now.duration_since(*start) < ADMIN_AUTH_WINDOW);
+        }
+        let entry = map.entry(client.to_string()).or_insert((0, now));
+        if now.duration_since(entry.1) >= ADMIN_AUTH_WINDOW {
+            *entry = (0, now);
+        }
+        entry.0 += 1;
+    }
+
+    pub fn record_success(&self, client: &str) {
+        self.failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(client);
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
@@ -185,10 +235,30 @@ pub struct AppState {
     pub keeper_cycle_generation: Arc<AtomicU64>,
     /// Last startup preflight result, exposed on `/oracle/status` (#1468).
     pub preflight_result: Arc<RwLock<Option<crate::preflight::PreflightResult>>>,
+    /// `KEEPER_PRIVATE_KEY` decoded once at startup for price signing (#1226).
+    /// `SigningKey` zeroises its seed on drop. `None` if unset or invalid, in
+    /// which case signing falls back to the string key and reports the error.
+    pub price_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    /// `KEEPER_SECRET_KEY` decoded once at startup for transaction signing (#1226).
+    pub tx_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    /// Throttles repeated failed admin-token attempts per client (#1214).
+    pub admin_auth_limiter: Arc<AdminAuthLimiter>,
+    /// Round-robin start index for `get_pending_keys` fetches so keys near
+    /// the end of the on-chain list are not permanently starved when the list
+    /// is longer than the batch each cycle can process (#1268).
+    pub pending_key_start_index: Arc<AtomicU32>,
 }
 
 impl AppState {
     pub fn new(config: Arc<Config>) -> Self {
+        let price_signing_key =
+            crate::signing::signing_key_from_hex(config.keeper_private_key.as_str())
+                .ok()
+                .map(Arc::new);
+        let tx_signing_key =
+            crate::chain::tx_builder::signing_key_from_secret(config.keeper_secret_key.as_str())
+                .ok()
+                .map(Arc::new);
         Self {
             config,
             http: crate::http::client().clone(),
@@ -206,6 +276,10 @@ impl AppState {
             keeper_balance_below_min: Arc::new(AtomicBool::new(false)),
             keeper_cycle_generation: Arc::new(AtomicU64::new(0)),
             preflight_result: Arc::new(RwLock::new(None)),
+            price_signing_key,
+            tx_signing_key,
+            admin_auth_limiter: Arc::new(AdminAuthLimiter::default()),
+            pending_key_start_index: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -268,5 +342,61 @@ mod tests {
         buffer.push(3);
 
         assert_eq!(buffer.iter().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod admin_auth_limiter_tests {
+    use super::*;
+
+    #[test]
+    fn blocks_after_max_failures_and_resets_after_window() {
+        let limiter = AdminAuthLimiter::default();
+        let t0 = Instant::now();
+        for _ in 0..MAX_ADMIN_AUTH_FAILURES {
+            assert!(!limiter.is_blocked("1.2.3.4", t0));
+            limiter.record_failure("1.2.3.4", t0);
+        }
+        assert!(limiter.is_blocked("1.2.3.4", t0));
+        assert!(
+            !limiter.is_blocked("5.6.7.8", t0),
+            "other clients are unaffected"
+        );
+        assert!(!limiter.is_blocked("1.2.3.4", t0 + ADMIN_AUTH_WINDOW));
+    }
+
+    #[test]
+    fn success_clears_failures() {
+        let limiter = AdminAuthLimiter::default();
+        let t0 = Instant::now();
+        for _ in 0..MAX_ADMIN_AUTH_FAILURES - 1 {
+            limiter.record_failure("1.2.3.4", t0);
+        }
+        limiter.record_success("1.2.3.4");
+        limiter.record_failure("1.2.3.4", t0);
+        assert!(!limiter.is_blocked("1.2.3.4", t0));
+    }
+}
+
+#[cfg(test)]
+mod signing_key_state_tests {
+    use super::*;
+
+    // #1226 — keys are decoded once when AppState is built, not per signature.
+    #[test]
+    fn app_state_decodes_valid_keys_once_and_skips_invalid_ones() {
+        let mut config = Config::default_for_tests();
+        config.keeper_private_key = crate::config::SecretString::new("11".repeat(32));
+        config.keeper_secret_key = crate::config::SecretString::new("22".repeat(32));
+        let state = AppState::new(Arc::new(config));
+        assert!(state.price_signing_key.is_some());
+        assert!(state.tx_signing_key.is_some());
+
+        let state = AppState::new(Arc::new(Config::default_for_tests()));
+        assert!(
+            state.price_signing_key.is_none(),
+            "empty key must not decode"
+        );
+        assert!(state.tx_signing_key.is_none(), "empty key must not decode");
     }
 }

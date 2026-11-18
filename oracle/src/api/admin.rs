@@ -12,6 +12,8 @@ use tracing::info;
 use super::{AdminAuth, ApiError};
 use crate::state::{AppState, CachedPrice, FailedSubmission};
 
+// #1280 — failure counters and last-cycle timestamps moved here from the public
+// /health probe so they are only visible to authenticated admin callers.
 // Matches prices.rs's READY_BALANCE_RETRY_* constants (#1024) — the same
 // underlying Horizon call should be retried the same way regardless of
 // which endpoint triggers it.
@@ -25,6 +27,14 @@ pub struct OracleStatusResponse {
     pub prices: Vec<CachedPrice>,
     pub recent_errors: Vec<FailedSubmission>,
     pub preflight: Option<crate::preflight::PreflightResult>,
+    pub price_cycle_count: u64,
+    pub keeper_cycle_count: u64,
+    pub token_fetch_failures: u64,
+    pub submit_failures: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_price_cycle_secs_ago: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_keeper_cycle_secs_ago: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,12 +63,19 @@ pub async fn oracle_status(
     _auth: AdminAuth,
     State(state): State<Arc<AppState>>,
 ) -> Json<OracleStatusResponse> {
-    let last_cycle_time = state
-        .cycle_status
-        .read()
-        .await
+    let cycle = state.cycle_status.read().await;
+    let last_cycle_time = cycle.last_price_cycle_at.and_then(system_time_secs);
+    let last_price_cycle_secs_ago = cycle
         .last_price_cycle_at
-        .and_then(system_time_secs);
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs());
+    let last_keeper_cycle_secs_ago = cycle
+        .last_keeper_cycle_at
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs());
+    drop(cycle);
+
+    let metrics = state.metrics.to_response();
     let prices = state
         .price_cache
         .read()
@@ -69,13 +86,45 @@ pub async fn oracle_status(
         .collect();
     let recent_errors = state.failures.lock().await.iter().rev().cloned().collect();
     let preflight = state.preflight_result.read().await.clone();
+    let recent_errors: Vec<_> = state
+        .failures
+        .lock()
+        .await
+        .iter()
+        .rev()
+        .take(20)
+        .cloned()
+        .collect();
+
+    // Check keeper balance using the same pattern as keeper_balance handler (#871).
+    let keeper_cfg = crate::keeper::KeeperBalanceConfig {
+        horizon_url: state.config.horizon_url.clone(),
+        account_id: state.config.keeper_account_id.clone(),
+        min_balance_xlm: state.config.min_keeper_balance_xlm,
+    };
+
+    let keeper_balance = crate::retry::retry_with_backoff(
+        || crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min),
+        KEEPER_BALANCE_RETRY_ATTEMPTS,
+        KEEPER_BALANCE_RETRY_BASE_DELAY_MS,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
+    )
+    .await
+    .ok()
+    .map(|stroops| stroops as f64 / crate::keeper::XLM_IN_STROOPS as f64);
 
     Json(OracleStatusResponse {
         last_cycle_time,
-        keeper_balance: None,
+        keeper_balance,
         prices,
         recent_errors,
         preflight,
+        price_cycle_count: metrics.price_cycle_count,
+        keeper_cycle_count: metrics.keeper_cycle_count,
+        token_fetch_failures: metrics.token_fetch_failures,
+        submit_failures: metrics.submit_failures,
+        last_price_cycle_secs_ago,
+        last_keeper_cycle_secs_ago,
     })
 }
 
@@ -129,9 +178,10 @@ pub struct ClearBlacklistResponse {
 /// "manual intervention required" the blacklist log message promises
 /// actually possible through the API (#802).
 ///
-/// Also resets the key's consecutive freeze-failure count, so it gets a
-/// fresh `MAX_CONSECUTIVE_FREEZE_FAILURES` budget instead of being
-/// re-blacklisted after a single further failure.
+/// Also resets the key's consecutive freeze-failure count and execution-failure
+/// count, so it gets a fresh `MAX_CONSECUTIVE_FREEZE_FAILURES` and
+/// `MAX_CONSECUTIVE_EXECUTION_FAILURES` budget instead of being re-blacklisted
+/// after a single further failure (#887).
 pub async fn clear_blacklisted_key(
     _auth: AdminAuth,
     State(state): State<Arc<AppState>>,
@@ -149,13 +199,97 @@ pub async fn clear_blacklisted_key(
     }
 
     state.freeze_failure_counts.lock().await.remove(&key);
+    state.execution_failure_counts.lock().await.remove(&key);
 
     info!(key = %key, "blacklisted order key cleared via admin API");
     Ok(Json(ClearBlacklistResponse { key, cleared: true }))
 }
 
 pub async fn metrics(_auth: AdminAuth, State(state): State<Arc<AppState>>) -> Response {
-    let prometheus = state.metrics.to_prometheus();
+    let mut prometheus = state.metrics.to_prometheus();
+
+    // ── Gauges from AppState not tracked by Metrics (#1267) ─────────────────
+
+    // keeper XLM balance (last known value; 0 until the first balance check).
+    let balance_stroops = state
+        .keeper_balance_below_min
+        .load(std::sync::atomic::Ordering::Relaxed);
+    // We expose the below-min flag as a gauge (0/1) since the raw balance is
+    // only known after a Horizon call. The balance_xlm gauge requires the live
+    // RPC call that /keeper/balance already serves; duplicating it here would
+    // block every scrape. Expose the boolean flag instead.
+    prometheus.push_str("# HELP oracle_keeper_balance_below_min 1 if keeper XLM balance is below minimum threshold\n");
+    prometheus.push_str("# TYPE oracle_keeper_balance_below_min gauge\n");
+    prometheus.push_str(&format!(
+        "oracle_keeper_balance_below_min {}\n",
+        if balance_stroops { 1 } else { 0 }
+    ));
+
+    // Per-token price age in seconds (#1267).
+    {
+        let cache = state.price_cache.read().await;
+        let now = std::time::SystemTime::now();
+        prometheus.push_str("# HELP oracle_price_age_seconds Seconds since each token's price was last cached\n");
+        prometheus.push_str("# TYPE oracle_price_age_seconds gauge\n");
+        for (symbol, price) in &cache.prices {
+            // CachedPrice.timestamp is a Unix timestamp in seconds set by the
+            // price loop when it stores a fetched price.
+            let age = now
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+                .saturating_sub(price.timestamp);
+            prometheus.push_str(&format!(
+                "oracle_price_age_seconds{{symbol=\"{}\"}} {}\n",
+                symbol, age
+            ));
+        }
+        // last_set_prices timestamp (#1267).
+        prometheus.push_str("# HELP oracle_last_set_prices_timestamp_seconds Unix timestamp of the last successful set_prices submission\n");
+        prometheus.push_str("# TYPE oracle_last_set_prices_timestamp_seconds gauge\n");
+        let last_ts = cache
+            .last_updated
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        prometheus.push_str(&format!(
+            "oracle_last_set_prices_timestamp_seconds {}\n",
+            last_ts
+        ));
+    }
+
+    // Pending work counts from KeeperStatus (#1267).
+    {
+        let ks = state.keeper_status.read().await;
+        prometheus.push_str("# HELP oracle_pending_keys Number of pending keys by kind\n");
+        prometheus.push_str("# TYPE oracle_pending_keys gauge\n");
+        prometheus.push_str(&format!(
+            "oracle_pending_keys{{kind=\"orders\"}} {}\n",
+            ks.pending_orders
+        ));
+        prometheus.push_str(&format!(
+            "oracle_pending_keys{{kind=\"deposits\"}} {}\n",
+            ks.pending_deposits
+        ));
+        prometheus.push_str(&format!(
+            "oracle_pending_keys{{kind=\"withdrawals\"}} {}\n",
+            ks.pending_withdrawals
+        ));
+    }
+
+    // In-flight and blacklisted key counts (#1267).
+    {
+        let in_flight = state.in_flight_keys.lock().await.len();
+        prometheus.push_str("# HELP oracle_in_flight_keys Keys currently being submitted on-chain\n");
+        prometheus.push_str("# TYPE oracle_in_flight_keys gauge\n");
+        prometheus.push_str(&format!("oracle_in_flight_keys {}\n", in_flight));
+
+        let blacklisted = state.frozen_order_blacklist.lock().await.len();
+        prometheus.push_str("# HELP oracle_blacklisted_keys Keys permanently abandoned after repeated failures\n");
+        prometheus.push_str("# TYPE oracle_blacklisted_keys gauge\n");
+        prometheus.push_str(&format!("oracle_blacklisted_keys {}\n", blacklisted));
+    }
+
     (
         StatusCode::OK,
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
@@ -187,7 +321,7 @@ pub async fn keeper_balance(
         || crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min),
         KEEPER_BALANCE_RETRY_ATTEMPTS,
         KEEPER_BALANCE_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await;
 

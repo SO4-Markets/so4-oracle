@@ -3,6 +3,7 @@
 Production Axum service for the SO4.market Soroban oracle and keeper.
 
 This repository contains a single Rust binary that runs:
+
 - Price fetching and aggregation from multiple sources (Binance, Coinbase, Pyth)
 - Keeper loop that executes pending orders, deposits, and withdrawals on-chain
 - HTTP API for price feeds and operational endpoints
@@ -19,6 +20,7 @@ so4-oracle  (single statically-deployed binary)
 │     GET /oracle/status               admin    last cycle, balance, per-token state
 │     GET /keeper/status               admin    pending work + last N executions
 │     GET /keeper/balance              admin    live keeper account XLM balance
+│     DELETE /keeper/blacklist/{key}   admin    clears a permanently-blacklisted order/deposit/withdrawal key
 │     GET /oracle/failed-submissions   admin    ring buffer of failures
 │     GET /metrics                     admin    Prometheus metrics
 ├── task: price_loop   tokio::interval(~1s)
@@ -42,7 +44,7 @@ READER=CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC
 DATA_STORE=CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J
 ROLE_STORE=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q
 NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
-RPC_URL=https://soroban-testnet.stellar.org
+STELLAR_RPC_URL=https://soroban-testnet.stellar.org
 ```
 
 ## Required Environment Variables.
@@ -85,8 +87,19 @@ ADMIN_API_TOKEN=<optional admin token>
 PRICE_LOOP_MS=1000
 KEEPER_LOOP_MS=1500
 
-# Price feed configuration (optional; falls back to embedded config/tokens.json)
-PRICE_FEED_CONFIG=/path/to/tokens.json
+# Logging (optional)
+RUST_LOG=info                     # tracing EnvFilter, e.g. oracle=debug,tower_http=debug
+LOG_FORMAT=json                   # "json" (default) or "pretty" for local development
+
+# Price feed configuration (optional; falls back to embedded config/tokens.json).
+# Must be an inline JSON string — NOT a file path. Pass the JSON directly or
+# read a file at startup:
+#   PRICE_FEED_CONFIG="$(cat /path/to/tokens.json)"
+# Example with a single token entry:
+PRICE_FEED_CONFIG='[{"symbol":"TUSDC","display_symbol":"USDC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES"}]'
+
+# Pyth authentication (optional now, mandatory once Pyth enforces auth)
+# PYTH_API_KEY=<your-pyth-api-key>
 ```
 
 > **Note:** `NETWORK_PASSPHRASE` is not read by the binary — the correct
@@ -136,6 +149,13 @@ docker build -t so4-oracle .
 # Run with environment variables
 docker run -p 8080:8080 \
   -e STELLAR_RPC_URL=https://soroban-testnet.stellar.org \
+  -e ORACLE_CONTRACT_ID=CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY \
+  -e ROLE_STORE=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q \
+  -e DATA_STORE=CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J \
+  -e ORDER_HANDLER=CC35OFZVWUTAZPV3B6UKSDVAVORZEWUUMOMTHO33H4YR4C5FKPEFODKY \
+  -e DEPOSIT_HANDLER=CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C \
+  -e WITHDRAWAL_HANDLER=CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE \
+  -e READER=CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC \
   -e KEEPER_PRIVATE_KEY=<key> \
   -e KEEPER_SECRET_KEY=<secret> \
   -e KEEPER_ACCOUNT_ID=<account> \
@@ -145,6 +165,16 @@ docker run -p 8080:8080 \
 ### Systemd
 
 ```bash
+# Build the release binary
+cargo build --release --bin oracle
+
+# Create the deployment directory
+sudo mkdir -p /opt/oracle
+
+# Copy the binary
+sudo cp target/release/oracle /opt/oracle/oracle
+sudo chown oracle:oracle /opt/oracle/oracle
+
 # Copy the service file
 sudo cp oracle.service /etc/systemd/system/
 
@@ -152,49 +182,72 @@ sudo cp oracle.service /etc/systemd/system/
 sudo cp .env /opt/oracle/.env
 
 # Enable and start
+sudo systemctl daemon-reload
 sudo systemctl enable oracle
+sudo systemctl start oracle
+```
+
+The unit restarts on any exit with a 5-second delay, and systemd's start limit
+allows 50 restarts per 5 minutes — enough for a bad deploy or a transient boot
+dependency to self-heal. If the limit is ever exhausted (check with
+`systemctl status oracle`), clear it with:
+
+```bash
+sudo systemctl reset-failed oracle
 sudo systemctl start oracle
 ```
 
 ### Fly.io
 
 ```bash
-# Deploy to Fly.io
-fly deploy
+# Set secrets BEFORE deploying (never in fly.toml: its [env] block is committed and shown by `fly config show`)
+fly secrets set KEEPER_PRIVATE_KEY=<hex> KEEPER_SECRET_KEY=<S...> ADMIN_API_TOKEN=<token>
+fly secrets set PYTH_API_KEY=<key>   # optional
 
-# Set secrets
-fly secrets set KEEPER_PRIVATE_KEY=<key>
-fly secrets set KEEPER_SECRET_KEY=<secret>
-fly secrets set KEEPER_ACCOUNT_ID=<account>
+# Deploy to Fly.io (secrets are already in place; the app starts with them)
+fly deploy
 ```
+
+Non-secret settings (network, contract IDs, `KEEPER_ACCOUNT_ID`, loop
+intervals, fees) live in `fly.toml`'s `[env]`; edit the `YOUR_…` placeholders there.
 
 ### Railway
 
 ```bash
 # Deploy to Railway
 railway up
-
-# Set environment variables in Railway dashboard
 ```
+
+`railway.json` only carries non-secret variables. Add `KEEPER_PRIVATE_KEY`,
+`KEEPER_SECRET_KEY`, `ADMIN_API_TOKEN` (and optionally `PYTH_API_KEY`) in the
+Railway dashboard under the service's **Variables** tab, and mark each one
+**Sealed** so its value can't be viewed or exported afterwards. Never add them
+to `railway.json`, which is committed to the repo.
+
+> **Secrets never go in a tracked manifest (#1232).** CI's `manifest-secrets`
+> job fails if `KEEPER_PRIVATE_KEY`, `KEEPER_SECRET_KEY`, `ADMIN_API_TOKEN` or
+> `PYTH_API_KEY` is assigned in `fly.toml` or `railway.json`.
 
 ## Endpoints
 
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/health` | GET | No | Liveness check |
-| `/ready` | GET | No | Readiness check (RPC + keeper balance) |
-| `/prices` | GET | No | Current price feeds (CORS-enabled) |
-| `/oracle/status` | GET | Admin | Oracle status and recent errors |
-| `/keeper/status` | GET | Admin | Keeper status and execution history |
-| `/keeper/balance` | GET | Admin | Live keeper account XLM balance |
-| `/oracle/failed-submissions` | GET | Admin | Failed submission history |
-| `/metrics` | GET | Admin | Prometheus metrics |
+| Endpoint                     | Method | Auth  | Description                                                   |
+| ---------------------------- | ------ | ----- | ------------------------------------------------------------- |
+| `/health`                    | GET    | No    | Liveness check                                                |
+| `/ready`                     | GET    | No    | Readiness check (RPC + keeper balance)                        |
+| `/prices`                    | GET    | No    | Current price feeds (CORS-enabled)                            |
+| `/oracle/status`             | GET    | Admin | Oracle status and recent errors                               |
+| `/keeper/status`             | GET    | Admin | Keeper status and execution history                           |
+| `/keeper/balance`            | GET    | Admin | Live keeper account XLM balance                               |
+| `/keeper/blacklist/{key}`    | DELETE | Admin | Clears a permanently-blacklisted order/deposit/withdrawal key |
+| `/oracle/failed-submissions` | GET    | Admin | Failed submission history                                     |
+| `/metrics`                   | GET    | Admin | Prometheus metrics                                            |
 
 ## Observability
 
 Every request emits a structured JSON log carrying: `timestamp`, `level`, `method`, `route` (matched path, not raw URI), `status`, `latency_ms`, and `request_id`. An `x-request-id` header is accepted on inbound requests; if absent, a UUIDv4 is generated. The request ID is echoed in the response headers and included in all handler-internal log events.
 
 The following HTTP metrics are exposed at `/metrics`:
+
 - `oracle_http_requests_total{route,method,status_class}` (counter)
 - `oracle_http_request_duration_seconds_bucket{route,le}` (histogram)
 - `oracle_http_requests_in_flight` (gauge)

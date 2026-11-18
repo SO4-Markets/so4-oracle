@@ -36,9 +36,12 @@ impl std::error::Error for BinancePriceError {}
 impl crate::retry::Retryable for BinancePriceError {
     fn is_retryable(&self) -> bool {
         match self {
-            // Network errors and 5xx HTTP errors are transient
+            // Network errors and transient HTTP statuses (408/425/429/5xx)
+            // are retried. Binance answers an over-rate-limited client with
+            // 429 (#708); the status table is shared with every other source
+            // via is_transient_http_status (#1448).
             Self::NetworkError(_) => true,
-            Self::HttpError { status, .. } => *status >= 500,
+            Self::HttpError { status, .. } => crate::retry::is_transient_http_status(*status),
             // Parse/JSON errors are permanent failures
             Self::JsonError(_) | Self::PriceParseError(_) => false,
         }
@@ -235,6 +238,71 @@ mod tests {
         parse_ticker_http_result, parse_ticker_response_body, BinancePriceError,
         BINANCE_TICKER_PRICE_URL, FLOAT_PRECISION,
     };
+    use crate::retry::Retryable;
+
+    // #1449 — every variant is classified on purpose. `variant` has no
+    // wildcard arm, so a new variant fails to compile until it is listed, and
+    // the coverage check fails until it has a case.
+    #[test]
+    fn every_variant_is_classified() {
+        fn variant(err: &BinancePriceError) -> &'static str {
+            match err {
+                BinancePriceError::NetworkError(_) => "NetworkError",
+                BinancePriceError::HttpError { .. } => "HttpError",
+                BinancePriceError::JsonError(_) => "JsonError",
+                BinancePriceError::PriceParseError(_) => "PriceParseError",
+            }
+        }
+        let http = |status| BinancePriceError::HttpError {
+            status,
+            body: String::new(),
+        };
+        let cases = [
+            (BinancePriceError::NetworkError("x".into()), true),
+            (http(429), true),
+            (http(503), true),
+            (http(404), false),
+            (BinancePriceError::JsonError("x".into()), false),
+            (BinancePriceError::PriceParseError("x".into()), false),
+        ];
+        let seen: std::collections::HashSet<_> = cases.iter().map(|(e, _)| variant(e)).collect();
+        assert_eq!(seen.len(), 4);
+        for (err, expected) in &cases {
+            assert_eq!(err.is_retryable(), *expected, "{err:?}");
+        }
+    }
+
+    // #708 — a 429 from Binance means "slow down", not "give up". It must be
+    // retried with backoff instead of being classified as a permanent failure.
+    #[test]
+    fn http_error_429_is_retryable() {
+        let err = BinancePriceError::HttpError {
+            status: 429,
+            body: "too many requests".to_string(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn http_error_5xx_is_retryable_and_4xx_is_not() {
+        for status in [500, 502, 503] {
+            let err = BinancePriceError::HttpError {
+                status,
+                body: String::new(),
+            };
+            assert!(err.is_retryable(), "status {status} should be retryable");
+        }
+        for status in [400, 401, 404, 451] {
+            let err = BinancePriceError::HttpError {
+                status,
+                body: String::new(),
+            };
+            assert!(
+                !err.is_retryable(),
+                "status {status} should not be retryable"
+            );
+        }
+    }
 
     #[test]
     fn parse_price_integer() {

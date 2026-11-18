@@ -1,0 +1,11 @@
+# Repository settings managed via the GitHub Settings app (#1272).
+# Enforces squash-merge-only and automatic head-branch deletion so that
+# git log --first-parent stays linear and revertable, and merged branches
+# are cleaned up without manual housekeeping.
+repository:
+  allow_merge_commit: false
+  allow_squash_merge: true
+  allow_rebase_merge: false
+  squash_merge_commit_title: PR_TITLE
+  squash_merge_commit_message: PR_BODY
+  delete_branch_on_merge: true

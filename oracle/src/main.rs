@@ -70,22 +70,32 @@ async fn main() {
     );
 
     let shutdown_token = state.shutdown_token.clone();
-    let server_future =
-        axum::serve(listener, app).with_graceful_shutdown(shutdown_signal(shutdown_token.clone()));
+    let server_future = axum::serve(
+        listener,
+        // Peer addresses feed the per-client admin-auth limiter (#1214).
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown_token.clone()));
 
-    // How long to wait for the background loops to finish their in-progress
-    // cycle once shutdown has been signalled. A keeper cycle can legitimately
-    // run for KEEPER_CYCLE_TIMEOUT_SECS (50s) and a price cycle longer, so
-    // without a bound `tokio::join!` below can block well past the
-    // orchestrator's SIGTERM grace period (Docker 10s, Kubernetes 30s) — the
-    // process then gets SIGKILLed mid-loop, which is exactly what the bounded
-    // server shutdown above exists to prevent (#552, #807).
+    // Split the DEFAULT_SHUTDOWN_TIMEOUT_SECS budget between HTTP drain and
+    // background-loop drain so the *total* worst-case shutdown stays within
+    // the orchestrator's grace period (Docker 10s, Kubernetes 30s). The two
+    // timeouts are sequential: the server drains first, then the loops drain
+    // afterward. Without splitting, a slow HTTP drain (15s) + a slow keeper
+    // cycle (15s) = 30s total, which still fits. If each stage took the full
+    // DEFAULT_SHUTDOWN_TIMEOUT_SECS (30s), the process could run 60s and get
+    // SIGKILLed mid-loop, defeating the bounded shutdown (#552, #807, #870).
     let drain_timeout =
-        std::time::Duration::from_secs(oracle::config::DEFAULT_SHUTDOWN_TIMEOUT_SECS);
+        std::time::Duration::from_secs(oracle::config::DEFAULT_SHUTDOWN_TIMEOUT_SECS / 2);
 
     // If either background task panics or returns unexpectedly while the
     // server is still running, trigger a full shutdown so an external
     // restart policy can take over rather than serving a half-dead process.
+    //
+    // NOTE: With panic = "abort" in [profile.release] (Cargo.toml), a panic
+    // inside a spawned task aborts the entire process before this match can
+    // observe JoinHandle::Err. This code only executes under panic = "unwind"
+    // (debug builds, cargo test). Cross-reference: Cargo.toml [profile.release].
     let exited_early = tokio::select! {
         result = &mut price_loop => {
             match result {
@@ -157,6 +167,13 @@ enum BackgroundTask {
     Keeper,
 }
 
+/// `LOG_FORMAT=pretty` switches to human-readable output for local
+/// development (#1457). Anything else, including unset, keeps JSON, which is
+/// what the deployed log pipelines parse.
+fn use_pretty_logs(log_format: Option<&str>) -> bool {
+    log_format.is_some_and(|value| value.trim().eq_ignore_ascii_case("pretty"))
+}
+
 fn init_tracing() {
     let (filter, invalid_rust_log) = match std::env::var("RUST_LOG") {
         Ok(raw) => match EnvFilter::try_new(&raw) {
@@ -166,12 +183,16 @@ fn init_tracing() {
         Err(_) => (EnvFilter::new("info"), None),
     };
 
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(filter)
-        .with_current_span(true)
-        .with_span_list(true)
-        .init();
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    if use_pretty_logs(std::env::var("LOG_FORMAT").ok().as_deref()) {
+        builder.pretty().init();
+    } else {
+        builder
+            .json()
+            .with_current_span(true)
+            .with_span_list(true)
+            .init();
+    }
 
     if let Some((raw, error)) = invalid_rust_log {
         tracing::warn!(
@@ -212,4 +233,24 @@ async fn shutdown_signal(token: CancellationToken) {
     }
 
     token.cancel();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::use_pretty_logs;
+
+    #[test]
+    fn log_format_defaults_to_json() {
+        assert!(!use_pretty_logs(None));
+        assert!(!use_pretty_logs(Some("")));
+        assert!(!use_pretty_logs(Some("json")));
+        assert!(!use_pretty_logs(Some("something-else")));
+    }
+
+    #[test]
+    fn log_format_pretty_is_case_insensitive() {
+        assert!(use_pretty_logs(Some("pretty")));
+        assert!(use_pretty_logs(Some("PRETTY")));
+        assert!(use_pretty_logs(Some(" Pretty ")));
+    }
 }

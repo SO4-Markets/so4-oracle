@@ -5,11 +5,30 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+/// Cumulative latency bucket upper bounds, in seconds, matching the `if`
+/// ladder in `record_http_request`. The trailing `+Inf` slot counts every
+/// request for the route, so its length is `Counters::http_request_duration_buckets`'s
+/// inner-array length.
+const HTTP_DURATION_BUCKETS: [&str; 7] = ["0.01", "0.05", "0.1", "0.25", "0.5", "1", "+Inf"];
+
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct HttpRouteLabels {
     pub route: String,
     pub method: String,
     pub status_class: String,
+}
+
+/// Label set for the per-source token counters.
+///
+/// Ordering is derived so this can key a `BTreeMap` without pulling in a
+/// hash-map hasher. The label set is bounded by
+/// (configured tokens × configured sources) — see
+/// `record_token_source_fetch_failure` for the cardinality argument.
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct TokenSourceLabels {
+    pub symbol: String,
+    pub token: String,
+    pub source: String,
 }
 
 /// All price-cycle and keeper-cycle counters, held behind a single mutex.
@@ -34,6 +53,8 @@ struct Counters {
     deposits_executed: u64,
     withdrawals_executed: u64,
     submit_failures: u64,
+    keeper_balance_low_count: u64,
+    prices_stale_count: u64,
     last_metrics_update: u64,
     http_requests_in_flight: u64,
     http_requests_total: BTreeMap<HttpRouteLabels, u64>,
@@ -44,22 +65,11 @@ struct Counters {
 
 #[derive(Debug, Default)]
 pub struct Metrics {
+    /// Every cycle counter, behind one mutex so a single `record_*` call is
+    /// observed by readers as one consistent generation (#599).
     counters: Mutex<Counters>,
-    pub token_source_fetch_failures: Mutex<BTreeMap<TokenSourceLabels, u64>>,
-    /// Per (symbol, token, source) count of times that source's price was
-    /// excluded by the MAD-based outlier filter in `aggregate_prices`, even
-    /// on cycles where enough other sources still met `min_sources` and the
-    /// cycle succeeded. Surfaces `AggregatedPrice.rejected_sources`, which
-    /// was previously computed on every successful aggregation and then
-    /// discarded before reaching any consumer (#728).
-    pub token_source_outlier_rejections: Mutex<BTreeMap<TokenSourceLabels, u64>>,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct TokenSourceLabels {
-    pub symbol: String,
-    pub token: String,
-    pub source: String,
+    token_source_fetch_failures: Mutex<BTreeMap<TokenSourceLabels, u64>>,
+    token_source_outlier_rejections: Mutex<BTreeMap<TokenSourceLabels, u64>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,7 +84,24 @@ pub struct MetricsResponse {
     pub deposits_executed: u64,
     pub withdrawals_executed: u64,
     pub submit_failures: u64,
+    pub keeper_balance_low_count: u64,
+    pub prices_stale_count: u64,
     pub last_metrics_update: u64,
+}
+
+/// What a single keeper cycle did, as reported by the keeper loop.
+///
+/// Grouped into a struct rather than passed as seven positional arguments so
+/// the two `bool` flags cannot be transposed at a call site — a swapped pair
+/// would silently attribute a low-balance cycle as a stale-price one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeeperCycleTally {
+    pub orders: usize,
+    pub deposits: usize,
+    pub withdrawals: usize,
+    pub errors: usize,
+    pub keeper_balance_low: bool,
+    pub prices_stale: bool,
 }
 
 impl Metrics {
@@ -91,21 +118,20 @@ impl Metrics {
         Self::stamp(&mut c);
     }
 
-    pub fn record_keeper_cycle(
-        &self,
-        latency_ms: u64,
-        orders: usize,
-        deposits: usize,
-        withdrawals: usize,
-        errors: usize,
-    ) {
+    pub fn record_keeper_cycle(&self, latency_ms: u64, tally: KeeperCycleTally) {
         let mut c = self.counters.lock().unwrap_or_else(|p| p.into_inner());
         c.keeper_cycle_count += 1;
         c.keeper_cycle_latency_ms = latency_ms;
-        c.orders_executed += orders as u64;
-        c.deposits_executed += deposits as u64;
-        c.withdrawals_executed += withdrawals as u64;
-        c.submit_failures += errors as u64;
+        c.orders_executed += tally.orders as u64;
+        c.deposits_executed += tally.deposits as u64;
+        c.withdrawals_executed += tally.withdrawals as u64;
+        c.submit_failures += tally.errors as u64;
+        if tally.keeper_balance_low {
+            c.keeper_balance_low_count += 1;
+        }
+        if tally.prices_stale {
+            c.prices_stale_count += 1;
+        }
         Self::stamp(&mut c);
     }
 
@@ -232,6 +258,8 @@ impl Metrics {
             deposits_executed: c.deposits_executed,
             withdrawals_executed: c.withdrawals_executed,
             submit_failures: c.submit_failures,
+            keeper_balance_low_count: c.keeper_balance_low_count,
+            prices_stale_count: c.prices_stale_count,
             last_metrics_update: c.last_metrics_update,
         }
     }
@@ -358,7 +386,23 @@ impl Metrics {
             c.last_metrics_update
         ));
 
-        output.push_str("# HELP oracle_http_requests_total Total number of HTTP requests\n");
+        output.push_str("# HELP oracle_keeper_balance_low_count Total number of cycles with keeper balance below minimum\n");
+        output.push_str("# TYPE oracle_keeper_balance_low_count counter\n");
+        output.push_str(&format!(
+            "oracle_keeper_balance_low_count {}\n",
+            c.keeper_balance_low_count
+        ));
+
+        output.push_str(
+            "# HELP oracle_prices_stale_count Total number of cycles with stale prices\n",
+        );
+        output.push_str("# TYPE oracle_prices_stale_count counter\n");
+        output.push_str(&format!(
+            "oracle_prices_stale_count {}\n",
+            c.prices_stale_count
+        ));
+
+        output.push_str("# HELP oracle_http_requests_total Total HTTP requests by route, method and status class\n");
         output.push_str("# TYPE oracle_http_requests_total counter\n");
         for (labels, count) in &c.http_requests_total {
             output.push_str(&format!(
@@ -370,56 +414,39 @@ impl Metrics {
             ));
         }
 
+        // Cumulative histogram. The bucket bounds are the ones
+        // `record_http_request` writes into, in ascending order; the last slot
+        // is the +Inf catch-all and is always total request count for the
+        // route.
         output.push_str(
-            "# HELP oracle_http_request_duration_seconds HTTP request duration histogram\n",
+            "# HELP oracle_http_request_duration_seconds HTTP request duration by route\n",
         );
         output.push_str("# TYPE oracle_http_request_duration_seconds histogram\n");
         for (route, buckets) in &c.http_request_duration_buckets {
-            let escaped_route = escape_label_value(route);
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"0.01\"}} {}\n",
-                escaped_route, buckets[0]
-            ));
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"0.05\"}} {}\n",
-                escaped_route, buckets[1]
-            ));
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"0.1\"}} {}\n",
-                escaped_route, buckets[2]
-            ));
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"0.25\"}} {}\n",
-                escaped_route, buckets[3]
-            ));
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"0.5\"}} {}\n",
-                escaped_route, buckets[4]
-            ));
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"1\"}} {}\n",
-                escaped_route, buckets[5]
-            ));
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"+Inf\"}} {}\n",
-                escaped_route, buckets[6]
-            ));
-
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_count{{route=\"{}\"}} {}\n",
-                escaped_route, buckets[6]
-            ));
-            if let Some(sum) = c.http_request_duration_sum.get(route) {
+            let route_label = escape_label_value(route);
+            for (bound, count) in HTTP_DURATION_BUCKETS.iter().zip(buckets) {
                 output.push_str(&format!(
-                    "oracle_http_request_duration_seconds_sum{{route=\"{}\"}} {}\n",
-                    escaped_route, sum
+                    "oracle_http_request_duration_seconds_bucket{{route=\"{route_label}\",le=\"{bound}\"}} {count}\n"
                 ));
             }
         }
+        for (route, sum) in &c.http_request_duration_sum {
+            output.push_str(&format!(
+                "oracle_http_request_duration_seconds_sum{{route=\"{}\"}} {}\n",
+                escape_label_value(route),
+                sum
+            ));
+        }
+        for (route, buckets) in &c.http_request_duration_buckets {
+            output.push_str(&format!(
+                "oracle_http_request_duration_seconds_count{{route=\"{}\"}} {}\n",
+                escape_label_value(route),
+                buckets[HTTP_DURATION_BUCKETS.len() - 1]
+            ));
+        }
 
-        output.push_str(
-            "# HELP oracle_http_requests_in_flight Current number of in-flight HTTP requests\n",
-        );
+        output
+            .push_str("# HELP oracle_http_requests_in_flight HTTP requests currently in flight\n");
         output.push_str("# TYPE oracle_http_requests_in_flight gauge\n");
         output.push_str(&format!(
             "oracle_http_requests_in_flight {}\n",
@@ -454,8 +481,18 @@ mod tests {
     #[test]
     fn test_metrics_recording() {
         let metrics = Metrics::new();
-        metrics.record_price_cycle(100, 3, 1);
-        metrics.record_keeper_cycle(200, 5, 3, 2, 1);
+        metrics.record_price_cycle(100, 0, 0);
+        metrics.record_keeper_cycle(
+            200,
+            KeeperCycleTally {
+                orders: 5,
+                deposits: 3,
+                withdrawals: 2,
+                errors: 1,
+                keeper_balance_low: true,
+                prices_stale: false,
+            },
+        );
 
         let response = metrics.to_response();
         assert_eq!(response.price_cycle_count, 1);
@@ -466,6 +503,8 @@ mod tests {
         assert_eq!(response.deposits_executed, 3);
         assert_eq!(response.withdrawals_executed, 2);
         assert_eq!(response.submit_failures, 1);
+        assert_eq!(response.keeper_balance_low_count, 1);
+        assert_eq!(response.prices_stale_count, 0);
     }
 
     #[test]
