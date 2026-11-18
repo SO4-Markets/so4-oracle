@@ -56,6 +56,8 @@ The full list is defined in `oracle/src/config.rs` (`Config::from_lookup`). The 
 | `KEEPER_TX_FEE`                    |              | `2000000`                     | Inclusion fee (stroops) for keeper handler transactions                                                                         |
 | `PRICE_LOOP_MS`                    |              | `1000`                        | Interval between price-feed refresh cycles (ms)                                                                                 |
 | `KEEPER_LOOP_MS`                   |              | `1500`                        | Interval between keeper execution cycles (ms)                                                                                   |
+| `RUST_LOG`                         |              | `info`                        | Log filter (tracing `EnvFilter` syntax), e.g. `oracle=debug,tower_http=debug`                                                   |
+| `LOG_FORMAT`                       |              | `json`                        | `json` for structured log pipelines, `pretty` for human-readable local output                                                   |
 
 **Run locally**
 

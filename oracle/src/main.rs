@@ -149,6 +149,13 @@ enum BackgroundTask {
     Keeper,
 }
 
+/// `LOG_FORMAT=pretty` switches to human-readable output for local
+/// development (#1457). Anything else, including unset, keeps JSON, which is
+/// what the deployed log pipelines parse.
+fn use_pretty_logs(log_format: Option<&str>) -> bool {
+    log_format.is_some_and(|value| value.trim().eq_ignore_ascii_case("pretty"))
+}
+
 fn init_tracing() {
     let (filter, invalid_rust_log) = match std::env::var("RUST_LOG") {
         Ok(raw) => match EnvFilter::try_new(&raw) {
@@ -158,12 +165,16 @@ fn init_tracing() {
         Err(_) => (EnvFilter::new("info"), None),
     };
 
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(filter)
-        .with_current_span(true)
-        .with_span_list(true)
-        .init();
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    if use_pretty_logs(std::env::var("LOG_FORMAT").ok().as_deref()) {
+        builder.pretty().init();
+    } else {
+        builder
+            .json()
+            .with_current_span(true)
+            .with_span_list(true)
+            .init();
+    }
 
     if let Some((raw, error)) = invalid_rust_log {
         tracing::warn!(
@@ -204,4 +215,24 @@ async fn shutdown_signal(token: CancellationToken) {
     }
 
     token.cancel();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::use_pretty_logs;
+
+    #[test]
+    fn log_format_defaults_to_json() {
+        assert!(!use_pretty_logs(None));
+        assert!(!use_pretty_logs(Some("")));
+        assert!(!use_pretty_logs(Some("json")));
+        assert!(!use_pretty_logs(Some("something-else")));
+    }
+
+    #[test]
+    fn log_format_pretty_is_case_insensitive() {
+        assert!(use_pretty_logs(Some("pretty")));
+        assert!(use_pretty_logs(Some("PRETTY")));
+        assert!(use_pretty_logs(Some(" Pretty ")));
+    }
 }

@@ -44,6 +44,7 @@ pub async fn check_keeper_balance(
         let was_below = below_min.swap(true, Ordering::Relaxed);
         if was_below {
             tracing::debug!(
+                event = "keeper_balance_still_low",
                 balance_xlm = spendable_xlm,
                 min_balance_xlm = cfg.min_balance_xlm,
                 account_id = cfg.account_id,
@@ -51,6 +52,7 @@ pub async fn check_keeper_balance(
             );
         } else {
             tracing::error!(
+                event = "keeper_balance_low",
                 balance_xlm = spendable_xlm,
                 min_balance_xlm = cfg.min_balance_xlm,
                 account_id = cfg.account_id,
@@ -66,6 +68,7 @@ pub async fn check_keeper_balance(
 
     if below_min.swap(false, Ordering::Relaxed) {
         tracing::info!(
+            event = "keeper_balance_recovered",
             balance_xlm = spendable_xlm,
             min_balance_xlm = cfg.min_balance_xlm,
             "keeper balance recovered above minimum"
