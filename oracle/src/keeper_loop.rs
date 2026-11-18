@@ -2369,3 +2369,71 @@ mod tests {
         assert!(move_exceeds_bps(i128::MAX, i128::MIN, 10));
     }
 }
+
+#[cfg(test)]
+mod keeper_tx_tests {
+    use super::*;
+    use crate::config::{Config, SecretString};
+    use std::sync::Arc;
+
+    // #1410 — table-test the three substring spellings, case variants and a
+    // negative so a regression in any of them is caught.
+    #[test]
+    fn test_is_bad_sequence_error_matches_known_spellings() {
+        for input in [
+            "bad_sequence",
+            "tx_bad_seq",
+            "badseq",
+            "BAD_SEQUENCE",
+            "Tx_Bad_Seq",
+            "submission rejected: tx_bad_seq",
+        ] {
+            assert!(is_bad_sequence_error(input), "{input:?} must match");
+        }
+        for input in ["tx_too_late", "tx_insufficient_fee", "connection reset by peer"] {
+            assert!(!is_bad_sequence_error(input), "{input:?} must not match");
+        }
+    }
+
+    fn dummy_tx() -> stellar_xdr::Transaction {
+        stellar_xdr::Transaction {
+            source_account: stellar_xdr::MuxedAccount::Ed25519(stellar_xdr::Uint256([7u8; 32])),
+            fee: 100,
+            seq_num: stellar_xdr::SequenceNumber(1),
+            cond: stellar_xdr::Preconditions::None,
+            memo: stellar_xdr::Memo::None,
+            operations: stellar_xdr::VecM::default(),
+            ext: stellar_xdr::TransactionExt::V0,
+        }
+    }
+
+    // #1411 — a cached SigningKey must sign identically to the per-call decode.
+    #[test]
+    fn sign_keeper_tx_uses_cached_key_when_present() {
+        let mut config = Config::default_for_tests();
+        config.keeper_secret_key = SecretString::new("22".repeat(32));
+        let state = AppState::new(Arc::new(config));
+        assert!(state.tx_signing_key.is_some());
+
+        let tx = dummy_tx();
+        let got = sign_keeper_tx(&state, &tx).expect("cached-key signing succeeds");
+        let expected = crate::chain::tx_builder::sign_transaction(
+            &tx,
+            state.config.keeper_secret_key.as_str(),
+            &state.config.network_passphrase,
+        )
+        .expect("string-key signing succeeds");
+        assert_eq!(got, expected, "signature must be byte-identical");
+    }
+
+    // #1411 — no cached key falls back so the decode error surfaces instead
+    // of panicking or returning an empty signature.
+    #[test]
+    fn sign_keeper_tx_reports_key_error_without_cached_key() {
+        let state = AppState::new(Arc::new(Config::default_for_tests()));
+        assert!(state.tx_signing_key.is_none());
+
+        let err = sign_keeper_tx(&state, &dummy_tx()).expect_err("must not panic or sign");
+        assert!(!err.is_empty(), "error message must not be empty");
+    }
+}
