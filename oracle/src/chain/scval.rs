@@ -42,7 +42,17 @@ pub fn encode_signed_price(price: &CachedPrice) -> Result<ScVal, String> {
     Ok(ScVal::Map(Some(sc_map)))
 }
 
+/// Largest `set_prices` batch the oracle contract accepts; it rejects any
+/// larger vector (#1424). Mirrors the contract's own `MAX_PRICE_BATCH_SIZE`.
+pub const MAX_PRICE_BATCH_SIZE: usize = 20;
+
 pub fn encode_prices_vec(prices: &[&CachedPrice]) -> Result<ScVal, String> {
+    if prices.len() > MAX_PRICE_BATCH_SIZE {
+        return Err(format!(
+            "set_prices batch of {} exceeds MAX_PRICE_BATCH_SIZE ({MAX_PRICE_BATCH_SIZE})",
+            prices.len()
+        ));
+    }
     let encoded: Result<Vec<ScVal>, String> =
         prices.iter().map(|p| encode_signed_price(p)).collect();
     let vals = encoded?;
@@ -353,6 +363,17 @@ mod tests {
             }
             _ => panic!("expected ScVal::Vec"),
         }
+
+        // #1424 — exactly the contract's limit encodes; one more is rejected
+        // before it can reach the chain.
+        let full = [&price; MAX_PRICE_BATCH_SIZE];
+        match encode_prices_vec(&full).unwrap() {
+            ScVal::Vec(Some(vec)) => assert_eq!(vec.0.len(), MAX_PRICE_BATCH_SIZE),
+            _ => panic!("expected ScVal::Vec"),
+        }
+        let over = [&price; MAX_PRICE_BATCH_SIZE + 1];
+        let err = encode_prices_vec(&over).unwrap_err();
+        assert!(err.contains("MAX_PRICE_BATCH_SIZE"), "got: {err}");
     }
 
     #[test]

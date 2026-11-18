@@ -22,6 +22,14 @@ pub const MAX_STALE_AFTER_SECONDS: u64 = 270;
 pub const DEFAULT_SET_PRICES_TX_FEE: u32 = 1_000_000;
 /// Default inclusion fee (stroops) for keeper handler transactions.
 pub const DEFAULT_KEEPER_TX_FEE: u32 = 2_000_000;
+/// Highest inclusion fee accepted for `SET_PRICES_TX_FEE` or `KEEPER_TX_FEE`:
+/// 1 XLM per transaction (#1463). The vars are `u32` stroops, so without a
+/// bound a mistyped extra three zeros is a 1000x fee accepted at boot and paid
+/// on every submission at keeper-loop cadence.
+pub const MAX_TX_FEE_STROOPS: u32 = 10_000_000;
+/// A fee above this multiple of its default is accepted but logged at
+/// startup, so a deliberate raise is visible in the boot logs (#1463).
+const TX_FEE_WARN_MULTIPLIER: u32 = 2;
 /// Default timeout in seconds for graceful shutdown of background tasks.
 pub const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
@@ -42,11 +50,41 @@ pub enum Network {
 }
 
 impl Network {
+    pub const ALL: [Network; 2] = [Network::Testnet, Network::Mainnet];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Network::Testnet => "testnet",
             Network::Mainnet => "mainnet",
         }
+    }
+}
+
+impl fmt::Display for Network {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Network {
+    type Err = EnvError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Network::ALL
+            .iter()
+            .find(|network| network.as_str() == s)
+            .cloned()
+            .ok_or_else(|| EnvError::InvalidVar {
+                var: "STELLAR_NETWORK",
+                reason: format!(
+                    "unknown network '{s}'; expected {}",
+                    Network::ALL
+                        .iter()
+                        .map(|network| format!("'{}'", network.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                ),
+            })
     }
 }
 
@@ -67,6 +105,24 @@ impl SecretString {
 impl fmt::Debug for SecretString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("<redacted>")
+    }
+}
+
+impl fmt::Display for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl PartialEq for SecretString {
+    fn eq(&self, other: &Self) -> bool {
+        crate::auth::constant_time_eq(self.0.as_bytes(), other.0.as_bytes())
+    }
+}
+
+impl serde::Serialize for SecretString {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str("<redacted>")
     }
 }
 
@@ -96,10 +152,15 @@ pub struct Config {
     pub withdrawal_handler_contract_id: String,
     /// On-chain reader contract address. Env: `READER`.
     pub reader_contract_id: String,
-    /// Keeper ed25519 private key (hex-encoded 32 bytes). Env: `KEEPER_PRIVATE_KEY`.
-    pub keeper_private_key: SecretString,
-    /// Keeper Stellar strkey secret seed (S-prefixed). Env: `KEEPER_SECRET_KEY`.
-    pub keeper_secret_key: SecretString,
+    /// `KEEPER_PRIVATE_KEY` (hex-encoded 32-byte ed25519 seed) decoded once at
+    /// config load (#1472, #1473). `None` when unset; an undecodable value is
+    /// a boot failure naming the underlying error. The raw string is dropped
+    /// inside `from_lookup`, so the decoded key is the only copy in memory.
+    pub keeper_private_key: Option<std::sync::Arc<ed25519_dalek::SigningKey>>,
+    /// `KEEPER_SECRET_KEY` (S-prefixed strkey) decoded once at config load
+    /// (#1472, #1473). `None` when unset; an undecodable value is a boot
+    /// failure naming the underlying error.
+    pub keeper_secret_key: Option<std::sync::Arc<ed25519_dalek::SigningKey>>,
     /// Keeper Stellar account ID (G-prefixed strkey). Env: `KEEPER_ACCOUNT_ID`.
     pub keeper_account_id: String,
     /// Index of this keeper instance, used only to label which keeper signed a
@@ -218,17 +279,10 @@ impl Config {
         }
 
         let network_raw = lookup("STELLAR_NETWORK").unwrap_or_else(|| "testnet".to_string());
-        let network = match network_raw.as_str() {
-            "testnet" => Network::Testnet,
-            "mainnet" => Network::Mainnet,
-            other => {
-                errors.push(EnvError::InvalidVar {
-                    var: "STELLAR_NETWORK",
-                    reason: format!("unknown network '{other}'; expected 'testnet' or 'mainnet'"),
-                });
-                Network::Testnet
-            }
-        };
+        let network = network_raw.parse().unwrap_or_else(|error| {
+            errors.push(error);
+            Network::Testnet
+        });
 
         let bind_addr = collect_or_default!(
             parse_or_default(&mut lookup, "BIND_ADDR", DEFAULT_BIND_ADDR),
@@ -275,28 +329,49 @@ impl Config {
         let reader_contract_id =
             collect_or_default!(required(&mut lookup, "READER"), String::new());
 
+        // Decode the keys at load rather than only shape-checking them: a value
+        // that cannot produce a `SigningKey` (e.g. an S-strkey with a bad
+        // CRC16) is a boot failure naming the underlying error, never a silent
+        // per-signature fallback (#1473). Only the decoded key is kept — the
+        // raw string is dropped here (#1472).
         let keeper_private_key_raw =
             collect_or_default!(required(&mut lookup, "KEEPER_PRIVATE_KEY"), String::new());
         let keeper_private_key = if !keeper_private_key_raw.is_empty() {
             collect_or_default!(
-                validate_hex_key("KEEPER_PRIVATE_KEY", keeper_private_key_raw, 32)
-                    .map(SecretString::new),
-                SecretString::new(String::new())
+                (|| {
+                    let value =
+                        validate_hex_key("KEEPER_PRIVATE_KEY", keeper_private_key_raw, 32)?;
+                    crate::signing::signing_key_from_hex(&value)
+                        .map(|key| Some(std::sync::Arc::new(key)))
+                        .map_err(|err| EnvError::InvalidVar {
+                            var: "KEEPER_PRIVATE_KEY",
+                            reason: err.to_string(),
+                        })
+                })(),
+                None
             )
         } else {
-            SecretString::new(String::new())
+            None
         };
 
         let keeper_secret_key_raw =
             collect_or_default!(required(&mut lookup, "KEEPER_SECRET_KEY"), String::new());
         let keeper_secret_key = if !keeper_secret_key_raw.is_empty() {
             collect_or_default!(
-                validate_strkey("KEEPER_SECRET_KEY", keeper_secret_key_raw, 'S')
-                    .map(SecretString::new),
-                SecretString::new(String::new())
+                (|| {
+                    let value =
+                        validate_strkey("KEEPER_SECRET_KEY", keeper_secret_key_raw, 'S')?;
+                    crate::chain::tx_builder::signing_key_from_secret(&value)
+                        .map(|key| Some(std::sync::Arc::new(key)))
+                        .map_err(|err| EnvError::InvalidVar {
+                            var: "KEEPER_SECRET_KEY",
+                            reason: err.to_string(),
+                        })
+                })(),
+                None
             )
         } else {
-            SecretString::new(String::new())
+            None
         };
 
         let keeper_account_id_raw =
@@ -346,6 +421,14 @@ impl Config {
             })(),
             DEFAULT_MIN_KEEPER_BALANCE_XLM
         );
+        if balance_gate_disabled(min_keeper_balance_xlm) {
+            tracing::warn!(
+                min_keeper_balance_xlm,
+                "MIN_KEEPER_BALANCE_XLM=0 disables the keeper balance gate: no low-balance \
+                 error, /ready gate or metric will fire before submissions fail for \
+                 insufficient funds — use only for local testing"
+            );
+        }
 
         let set_prices_tx_fee: u32 = collect_or_default!(
             (|| {
@@ -354,15 +437,14 @@ impl Config {
                     "SET_PRICES_TX_FEE",
                     &DEFAULT_SET_PRICES_TX_FEE.to_string(),
                 )?;
-                if fee == 0 {
-                    return Err(EnvError::InvalidVar {
-                        var: "SET_PRICES_TX_FEE",
-                        reason: "must be greater than 0".to_string(),
-                    });
-                }
-                Ok(fee)
+                validate_tx_fee("SET_PRICES_TX_FEE", fee)
             })(),
             DEFAULT_SET_PRICES_TX_FEE
+        );
+        warn_if_tx_fee_high(
+            "SET_PRICES_TX_FEE",
+            set_prices_tx_fee,
+            DEFAULT_SET_PRICES_TX_FEE,
         );
 
         let keeper_tx_fee: u32 = collect_or_default!(
@@ -372,16 +454,11 @@ impl Config {
                     "KEEPER_TX_FEE",
                     &DEFAULT_KEEPER_TX_FEE.to_string(),
                 )?;
-                if fee == 0 {
-                    return Err(EnvError::InvalidVar {
-                        var: "KEEPER_TX_FEE",
-                        reason: "must be greater than 0".to_string(),
-                    });
-                }
-                Ok(fee)
+                validate_tx_fee("KEEPER_TX_FEE", fee)
             })(),
             DEFAULT_KEEPER_TX_FEE
         );
+        warn_if_tx_fee_high("KEEPER_TX_FEE", keeper_tx_fee, DEFAULT_KEEPER_TX_FEE);
 
         let price_loop_interval = collect_or_default!(
             (|| {
@@ -503,6 +580,50 @@ impl Config {
             binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         })
     }
+}
+
+/// Rejects a zero fee and a fee above [`MAX_TX_FEE_STROOPS`] (#1463).
+fn validate_tx_fee(var: &'static str, fee: u32) -> Result<u32, EnvError> {
+    if fee == 0 {
+        return Err(EnvError::InvalidVar {
+            var,
+            reason: "must be greater than 0".to_string(),
+        });
+    }
+    if fee > MAX_TX_FEE_STROOPS {
+        return Err(EnvError::InvalidVar {
+            var,
+            reason: format!(
+                "must be at most {MAX_TX_FEE_STROOPS} stroops (1 XLM) per transaction, got {fee}"
+            ),
+        });
+    }
+    Ok(fee)
+}
+
+/// True when an accepted fee is still far enough above its default that it
+/// should be visible in the boot logs (#1463).
+fn tx_fee_is_unusually_high(fee: u32, default: u32) -> bool {
+    fee > default.saturating_mul(TX_FEE_WARN_MULTIPLIER)
+}
+
+fn warn_if_tx_fee_high(var: &'static str, fee: u32, default: u32) {
+    if tx_fee_is_unusually_high(fee, default) {
+        tracing::warn!(
+            var,
+            fee_stroops = fee,
+            default_stroops = default,
+            multiplier = TX_FEE_WARN_MULTIPLIER,
+            "inclusion fee is well above its default; it is paid on every submission"
+        );
+    }
+}
+
+/// `MIN_KEEPER_BALANCE_XLM=0` is accepted for local testing, but it turns the
+/// balance gate off entirely: `spendable < 0` is false for any funded account
+/// (#1462). Only `0` reaches here, since negative values are rejected.
+fn balance_gate_disabled(min_keeper_balance_xlm: f64) -> bool {
+    min_keeper_balance_xlm <= 0.0
 }
 
 fn required(
@@ -765,8 +886,8 @@ impl Config {
             deposit_handler_contract_id: String::new(),
             withdrawal_handler_contract_id: String::new(),
             reader_contract_id: String::new(),
-            keeper_private_key: SecretString::new(String::new()),
-            keeper_secret_key: SecretString::new(String::new()),
+            keeper_private_key: None,
+            keeper_secret_key: None,
             keeper_account_id: String::new(),
             keeper_index: 0,
             admin_api_token: None,
@@ -798,6 +919,16 @@ mod tests {
     fn network_as_str_returns_expected_wire_values() {
         assert_eq!(Network::Testnet.as_str(), "testnet");
         assert_eq!(Network::Mainnet.as_str(), "mainnet");
+    }
+
+    #[test]
+    fn secret_string_never_leaks_through_debug_display_or_serde() {
+        let secret = "SCVXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        let value = SecretString::new(secret.to_string());
+
+        assert!(!format!("{:?}", value).contains(secret));
+        assert!(!format!("{}", value).contains(secret));
+        assert!(!serde_json::to_string(&value).unwrap().contains(secret));
     }
 
     #[test]
@@ -962,6 +1093,48 @@ mod tests {
     fn embedded_tokens_json_has_valid_contract_addresses() {
         parse_price_feed_config(include_str!("../../config/tokens.json"))
             .expect("config/tokens.json must parse with valid contract strkeys");
+    }
+
+    /// #1443 — the committed tokens.json is the price-feed fallback whenever
+    /// PRICE_FEED_CONFIG is unset, and is only parsed at boot. These are the
+    /// invariants a bad edit would break while still compiling cleanly.
+    #[test]
+    fn embedded_tokens_json_invariants() {
+        let config = parse_price_feed_config(include_str!("../../config/tokens.json"))
+            .expect("config/tokens.json must parse");
+        assert!(!config.tokens.is_empty(), "tokens.json lists no tokens");
+
+        let mut symbols = std::collections::HashSet::new();
+        let mut addresses = std::collections::HashSet::new();
+        for token in &config.tokens {
+            let symbol = &token.symbol;
+            assert!(symbols.insert(symbol.clone()), "duplicate symbol {symbol}");
+            assert!(
+                addresses.insert(token.stellar_address.clone()),
+                "duplicate stellar_address for {symbol}"
+            );
+            assert!(
+                token.min_sources >= 1 && token.min_sources <= token.sources.len(),
+                "{symbol}: min_sources {} must be between 1 and its {} sources",
+                token.min_sources,
+                token.sources.len()
+            );
+
+            if token.sources.iter().any(|source| source == "fixed") {
+                let Some(raw) = token.fixed_price.as_deref() else {
+                    panic!("{symbol}: uses the fixed source but has no fixed_price");
+                };
+                let price: i128 = raw.parse().expect("fixed_price must be an integer");
+                // 1e30 precision: anything outside $0.000001..$1,000,000 is a
+                // wrong number of zeros, not a real price.
+                let min = crate::FLOAT_PRECISION / 1_000_000;
+                let max = crate::FLOAT_PRECISION * 1_000_000;
+                assert!(
+                    (min..=max).contains(&price),
+                    "{symbol}: fixed_price {raw} is outside the expected 1e30-scaled range"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1723,5 +1896,56 @@ mod tests {
             "expected a token-config error, got: {err}"
         );
         assert!(err.to_string().contains("PRICE_LOOP_MS"), "{err}");
+    // #1463 — a mistyped extra three zeros must fail at boot, naming the limit.
+    #[test]
+    fn config_from_lookup_rejects_tx_fees_above_the_cap() {
+        for var in ["SET_PRICES_TX_FEE", "KEEPER_TX_FEE"] {
+            let mut env = valid_env();
+            env.insert(var, (MAX_TX_FEE_STROOPS + 1).to_string());
+
+            let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+            let EnvError::InvalidVar { var: got, reason } = &err.0[0] else {
+                panic!("{var}: expected InvalidVar, got {err}");
+            };
+            assert_eq!(*got, var);
+            assert!(reason.contains("10000000"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn config_from_lookup_accepts_tx_fees_at_the_cap() {
+        let mut env = valid_env();
+        env.insert("SET_PRICES_TX_FEE", MAX_TX_FEE_STROOPS.to_string());
+        env.insert("KEEPER_TX_FEE", MAX_TX_FEE_STROOPS.to_string());
+
+        let config = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(config.set_prices_tx_fee, MAX_TX_FEE_STROOPS);
+        assert_eq!(config.keeper_tx_fee, MAX_TX_FEE_STROOPS);
+    }
+
+    #[test]
+    fn tx_fee_warning_threshold_is_relative_to_the_default() {
+        let (set, keeper) = (DEFAULT_SET_PRICES_TX_FEE, DEFAULT_KEEPER_TX_FEE);
+
+        assert!(!tx_fee_is_unusually_high(set, set));
+        assert!(!tx_fee_is_unusually_high(keeper * 2, keeper));
+        assert!(tx_fee_is_unusually_high(keeper * 2 + 1, keeper));
+        assert!(tx_fee_is_unusually_high(MAX_TX_FEE_STROOPS, set));
+    }
+
+    // #1462 — 0 stays accepted for local testing, but is recognised as
+    // disabling the gate so boot logs a warning naming it.
+    #[test]
+    fn zero_min_keeper_balance_is_accepted_and_flagged_as_disabling_the_gate() {
+        let mut env = valid_env();
+        env.insert("MIN_KEEPER_BALANCE_XLM", "0".to_string());
+
+        let config = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert!(balance_gate_disabled(config.min_keeper_balance_xlm));
+        assert!(!balance_gate_disabled(DEFAULT_MIN_KEEPER_BALANCE_XLM));
+        assert!(!balance_gate_disabled(0.5));
     }
 }

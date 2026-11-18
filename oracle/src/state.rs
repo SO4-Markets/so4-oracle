@@ -79,6 +79,10 @@ pub struct FailedSubmission {
     pub network: String,
     pub token: String,
     pub symbol: String,
+    /// Price source that failed (`binance`, `coinbase`, ...), for per-source
+    /// fetch failures; `None` for failures not tied to one source (#1450).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(serialize_with = "ser_i128_str")]
     pub min: i128,
     #[serde(serialize_with = "ser_i128_str")]
@@ -229,11 +233,17 @@ pub struct AppState {
     /// crossed its two sequential lock reads and retry, rather than returning a
     /// torn `keeper_status` / `cycle_status` pair (#797).
     pub keeper_cycle_generation: Arc<AtomicU64>,
+    /// `KEEPER_PRIVATE_KEY` decoded once at config load (#1226, #1473).
+    /// `SigningKey` zeroises its seed on drop. `None` when unset; an
+    /// undecodable key is a boot failure, not a per-signature fallback.
+    /// Last startup preflight result, exposed on `/oracle/status` (#1468).
+    pub preflight_result: Arc<RwLock<Option<crate::preflight::PreflightResult>>>,
     /// `KEEPER_PRIVATE_KEY` decoded once at startup for price signing (#1226).
     /// `SigningKey` zeroises its seed on drop. `None` if unset or invalid, in
     /// which case signing falls back to the string key and reports the error.
     pub price_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
-    /// `KEEPER_SECRET_KEY` decoded once at startup for transaction signing (#1226).
+    /// `KEEPER_SECRET_KEY` decoded once at config load (#1226, #1473).
+    /// `None` when unset; an undecodable key is a boot failure.
     pub tx_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     /// Throttles repeated failed admin-token attempts per client (#1214).
     pub admin_auth_limiter: Arc<AdminAuthLimiter>,
@@ -245,14 +255,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: Arc<Config>) -> Self {
-        let price_signing_key =
-            crate::signing::signing_key_from_hex(config.keeper_private_key.as_str())
-                .ok()
-                .map(Arc::new);
-        let tx_signing_key =
-            crate::chain::tx_builder::signing_key_from_secret(config.keeper_secret_key.as_str())
-                .ok()
-                .map(Arc::new);
+        // Keys were decoded (and the raw strings dropped) at config load
+        // (#1472, #1473); AppState just carries the Arc'd decoded keys.
+        let price_signing_key = config.keeper_private_key.clone();
+        let tx_signing_key = config.keeper_secret_key.clone();
         Self {
             config,
             http: crate::http::client().clone(),
@@ -269,6 +275,7 @@ impl AppState {
             execution_failure_counts: Arc::new(Mutex::new(HashMap::new())),
             keeper_balance_below_min: Arc::new(AtomicBool::new(false)),
             keeper_cycle_generation: Arc::new(AtomicU64::new(0)),
+            preflight_result: Arc::new(RwLock::new(None)),
             price_signing_key,
             tx_signing_key,
             admin_auth_limiter: Arc::new(AdminAuthLimiter::default()),
@@ -375,12 +382,19 @@ mod admin_auth_limiter_tests {
 mod signing_key_state_tests {
     use super::*;
 
-    // #1226 — keys are decoded once when AppState is built, not per signature.
+    // #1226/#1473 — keys are decoded at config load; AppState carries them.
     #[test]
-    fn app_state_decodes_valid_keys_once_and_skips_invalid_ones() {
+    fn app_state_carries_decoded_keys_from_config() {
         let mut config = Config::default_for_tests();
-        config.keeper_private_key = crate::config::SecretString::new("11".repeat(32));
-        config.keeper_secret_key = crate::config::SecretString::new("22".repeat(32));
+        config.keeper_private_key = Some(std::sync::Arc::new(
+            crate::signing::signing_key_from_hex(&"11".repeat(32)).unwrap(),
+        ));
+        config.keeper_secret_key = Some(std::sync::Arc::new(
+            crate::chain::tx_builder::signing_key_from_secret(
+                "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            )
+            .unwrap(),
+        ));
         let state = AppState::new(Arc::new(config));
         assert!(state.price_signing_key.is_some());
         assert!(state.tx_signing_key.is_some());
@@ -388,8 +402,77 @@ mod signing_key_state_tests {
         let state = AppState::new(Arc::new(Config::default_for_tests()));
         assert!(
             state.price_signing_key.is_none(),
-            "empty key must not decode"
+            "unset key must stay None"
         );
-        assert!(state.tx_signing_key.is_none(), "empty key must not decode");
+        assert!(state.tx_signing_key.is_none(), "unset key must stay None");
+    }
+}
+
+#[cfg(test)]
+mod keeper_status_snapshot_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    // #1408 (1): with a stable generation the pair is returned from the first read.
+    #[tokio::test]
+    async fn snapshot_returns_pair_when_generation_unchanged() {
+        let state = AppState::new(Arc::new(Config::default_for_tests()));
+        state.keeper_status.write().await.pending_orders = 3;
+        state.cycle_status.write().await.last_keeper_cycle_latency_ms = Some(7);
+
+        let (ks, cs) = state.keeper_status_snapshot().await;
+        assert_eq!(ks.pending_orders, 3);
+        assert_eq!(cs.last_keeper_cycle_latency_ms, Some(7));
+    }
+
+    // #1408 (2): a generation bump between the two reads forces a retry, so
+    // the returned keeper_status is re-read after the bump.
+    #[tokio::test]
+    async fn snapshot_retries_when_generation_bumps_between_reads() {
+        let state = Arc::new(AppState::new(Arc::new(Config::default_for_tests())));
+        state.keeper_status.write().await.pending_orders = 1;
+
+        // Hold the second lock so the snapshot stalls between its two reads.
+        let stall = state.cycle_status.write().await;
+        let reader = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { state.keeper_status_snapshot().await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        state.keeper_cycle_generation.fetch_add(1, Ordering::SeqCst);
+        state.keeper_status.write().await.pending_orders = 2;
+        drop(stall);
+
+        let (ks, _) = reader.await.unwrap();
+        assert_eq!(
+            ks.pending_orders, 2,
+            "snapshot must re-read after a generation bump"
+        );
+    }
+
+    // #1408 (3): under permanent generation flux every attempt collides and
+    // the call falls through to the best-effort pair instead of looping.
+    #[tokio::test]
+    async fn snapshot_falls_back_when_generation_never_settles() {
+        let state = Arc::new(AppState::new(Arc::new(Config::default_for_tests())));
+        state.keeper_status.write().await.pending_orders = 9;
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flux = {
+            let gen = Arc::clone(&state.keeper_cycle_generation);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    gen.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+
+        let (ks, _) = state.keeper_status_snapshot().await;
+        stop.store(true, Ordering::SeqCst);
+        flux.join().unwrap();
+        assert_eq!(ks.pending_orders, 9, "best-effort pair must still return");
     }
 }

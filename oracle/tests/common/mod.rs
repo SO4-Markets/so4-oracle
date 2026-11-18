@@ -35,12 +35,18 @@ pub fn test_config_with_tokens(
         withdrawal_handler_contract_id: "CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE"
             .to_string(),
         reader_contract_id: "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC".to_string(),
-        keeper_private_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_secret_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
+        keeper_private_key: Some(std::sync::Arc::new(
+            oracle::signing::signing_key_from_hex(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        )),
+        keeper_secret_key: Some(std::sync::Arc::new(
+            oracle::chain::tx_builder::signing_key_from_secret(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        )),
         keeper_account_id: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
         keeper_index: 0,
         admin_api_token: Some(SecretString::new("test-admin-token".to_string())),
@@ -96,6 +102,31 @@ pub fn bad_token(symbol: &str, address: &str) -> TokenConfig {
     }
 }
 
+/// Build the JSON-RPC response `getLedgerEntries` returns for an account
+/// ledger entry, using real XDR so the keeper's decoder is exercised (#1241).
+///
+/// `seq_num` is the account's last consumed sequence number; the keeper
+/// derives the next transaction sequence from it.
+pub fn account_entry_response(seq_num: i64) -> serde_json::Value {
+    use stellar_xdr::{AccountEntry, LedgerEntryData, Limits, SequenceNumber, WriteXdr};
+
+    let xdr = LedgerEntryData::Account(AccountEntry {
+        seq_num: SequenceNumber(seq_num),
+        ..Default::default()
+    })
+    .to_xdr_base64(Limits::none())
+    .expect("account entry XDR encodes");
+
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "entries": [{ "key": "", "xdr": xdr }],
+            "latestLedger": 12345
+        }
+    })
+}
+
 pub fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
     let config = Arc::new(Config {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
@@ -110,10 +141,13 @@ pub fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
         deposit_handler_contract_id: "CDEPOSIT".to_string(),
         withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
         reader_contract_id: "CREADER".to_string(),
-        keeper_private_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_secret_key: SecretString::new("SSECRET".to_string()),
+        keeper_private_key: Some(std::sync::Arc::new(
+            oracle::signing::signing_key_from_hex(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        )),
+        keeper_secret_key: None,
         keeper_account_id: "GACCOUNT".to_string(),
         keeper_index: 0,
         admin_api_token: None,

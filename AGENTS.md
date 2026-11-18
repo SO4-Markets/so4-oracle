@@ -4,19 +4,16 @@ Read and execute these instructions strictly before committing code or opening a
 
 ## 1. Project Orientation
 - **Binary**: This is an Axum service running the price loop, the keeper loop, and the HTTP API.
-- **Workspace Layout**: Core logic lives in `oracle/`, and shared configuration is in `shared/config/`.
-- **Integration Tests**: Located exclusively in `oracle/tests/`. **Never** create or use a root `tests/` directory—the root manifest is virtual and will silently ignore it.
+- **Workspace Layout**: Core logic lives in `oracle/`, and shared configuration is in `shared/config/`. `shared/config` holds the per-token `TokenConfig` schema and its token-list checks; `oracle::config` holds environment parsing and oracle-specific token checks. A new per-token field goes in `shared/config`, a new env var in `oracle::config` (#1460; see the crate doc in `shared/config/src/lib.rs`).
+- **Integration Tests**: Located exclusively in `oracle/tests/`. **Never** create or use a root `tests/` directory—the root `Cargo.toml` is a virtual manifest (`[workspace]` with no `[package]`), so Cargo builds no test target from it and silently ignores a root `tests/`. Integration tests belong to the `oracle` crate by choice: `shared/config` is covered by unit tests in `shared/config/src/lib.rs`, and if it ever needs an integration test it goes in `shared/config/tests/`, never the root.
+- **Docs**: `docs/KEEPER_STATE_MACHINE.md` documents the keeper failure state machine (constant names match the code); `docs/RUNBOOK.md` is the operator runbook.
 
 ## 2. The Verification Gate (Non-Negotiable)
-These commands MUST all exit 0 before any git commit is made, and again before a PR is opened or updated:
+`make verify` MUST exit 0 before any git commit is made, and again before a PR is opened or updated.
 
-`cargo fmt --all -- --check`
-`cargo clippy --all-targets --all-features --locked -- -D warnings`
-`RUSTFLAGS=-Dwarnings cargo test --all --locked`
-`cargo build --release --all --locked`
+The gate is defined once, in the `Makefile`, and CI's `rustfmt`, `clippy`, `cargo test` and `release build` jobs call the same targets, so the flags cannot drift between this file, the `Makefile` and CI. `make verify` runs `fmt-check`, `clippy`, `test` and `release`; see the `Makefile` for the exact commands.
 
-If the `Dockerfile` or dependencies changed, you must also run:
-`docker build -t so4-oracle .`
+If the `Dockerfile` or dependencies changed, you must also run `make docker`.
 
 **Explicit Rules:**
 - A local `cargo build` passing locally is not sufficient. CI sets `RUSTFLAGS="-Dwarnings"`, so a warning is a build failure there. Always reproduce with the flag set.
@@ -30,6 +27,7 @@ If the `Dockerfile` or dependencies changed, you must also run:
 - Use imperative, present-tense titles.
 - The PR body must cover: what changed, why, how it was verified (pasted command output), and the linked issue.
 - Every PR states which of the gate commands were run and their results. No PR is opened for work that has not been run.
+- Every PR that changes behaviour, configuration or deployment adds an entry under `[Unreleased]` in `CHANGELOG.md` (#1435).
 
 ## 4. Repository-Specific Traps
 - **Environment Variables**: Read verbatim by `Config::from_env()`. A near-miss like `ORDER_HANDLER_CONTRACT_ID` is silently ignored and the process exits.

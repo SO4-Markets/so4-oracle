@@ -3,10 +3,18 @@ use std::time::{Duration, Instant, SystemTime};
 
 use shared_config::TokenConfig;
 use tokio::time::{interval, timeout, MissedTickBehavior};
+use tracing::Instrument;
 
 use crate::prices::AggregatedPrice;
 use crate::retry::MAX_BACKOFF_DELAY_MS;
 use crate::state::{AppState, CachedPrice, FailedSubmission};
+
+/// Price with its observation timestamp for tracking staleness correctly.
+#[derive(Debug, Clone, Copy)]
+struct PriceWithObservationTime {
+    price: i128,
+    observation_time: u64,
+}
 
 const SOURCE_RETRY_ATTEMPTS: u32 = 3;
 const SOURCE_RETRY_BASE_DELAY_MS: u64 = 100;
@@ -25,6 +33,25 @@ pub enum PriceSourceError {
     Config(String),
     Unsupported(String),
 }
+
+/// A price-source failure tagged with the source and token it came from, set
+/// where the error is raised so the failure metric and the failure ring read
+/// one identity instead of a parallel argument list (#1450).
+#[derive(Debug, Clone)]
+pub struct SourceFailure {
+    pub source: String,
+    pub symbol: String,
+    pub token: String,
+    pub error: PriceSourceError,
+}
+
+impl std::fmt::Display for SourceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
+impl std::error::Error for SourceFailure {}
 
 impl CachedPrice {
     pub fn is_stale(&self, stale_after_seconds: u64, now: u64) -> bool {
@@ -94,7 +121,18 @@ pub async fn run_price_loop(state: Arc<AppState>) {
 /// Fetches the latest Stellar ledger sequence, iterates through configured tokens,
 /// builds and aggregates their prices, signs the results, and updates the cache.
 /// Never panics on individual errors; they are recorded as failure submissions.
+/// Runs one price cycle under a fresh cycle id (#1455): every log line in the
+/// cycle carries it as `cycle_id`, and outbound source/RPC calls send it as
+/// `x-request-id`, so one cycle's fetches can be grouped and traced.
 pub async fn run_price_cycle(state: Arc<AppState>) {
+    let cycle_id = crate::http::new_cycle_id();
+    let span = tracing::info_span!("price_cycle", cycle_id = %cycle_id);
+    crate::http::with_correlation_id(cycle_id, run_price_cycle_inner(state))
+        .instrument(span)
+        .await
+}
+
+async fn run_price_cycle_inner(state: Arc<AppState>) {
     let started = Instant::now();
     {
         let mut status = state.cycle_status.write().await;
@@ -119,6 +157,7 @@ pub async fn run_price_cycle(state: Arc<AppState>) {
             // (issue #1278).
             let total_tokens = state.config.price_feed.tokens.len();
             tracing::error!(
+                event = "price_cycle_timeout",
                 timeout_secs = PRICE_CYCLE_TIMEOUT_SECS,
                 tokens_failed = total_tokens,
                 "price cycle exceeded timeout budget"
@@ -168,6 +207,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
         Ok(ledger_seq) => ledger_seq,
         Err(error) => {
             tracing::error!(
+                event = "price_cycle_aborted",
                 error = %error,
                 rpc_url = %state.config.stellar_rpc_url,
                 "price cycle aborted: failed to fetch latest ledger sequence from RPC after retries"
@@ -288,6 +328,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
                 let ctx = ErrorContext {
                     token: token.stellar_address.clone(),
                     symbol: token.symbol.clone(),
+                    source: None,
                     ledger_seq,
                 };
                 record_error_with_context(&state, format!("price:{}", token.symbol), error, ctx)
@@ -367,6 +408,7 @@ async fn finish_cycle(
         .record_price_cycle(latency_ms, tokens_ok, tokens_failed);
 
     tracing::info!(
+        event = "price_cycle_complete",
         tokens_ok,
         tokens_failed,
         tokens_stale,
@@ -387,6 +429,7 @@ async fn build_cached_price(
 ) -> Result<CachedPrice, String> {
     let mut prices = Vec::new();
     let mut sources = Vec::new();
+    let mut observation_times = Vec::new();
 
     for source in &token.sources {
         match fetch_source_with_retry(
@@ -400,30 +443,27 @@ async fn build_cached_price(
         )
         .await
         {
-            Ok(price) => {
-                prices.push(price);
+            Ok(price_with_time) => {
+                prices.push(price_with_time.price);
+                observation_times.push(price_with_time.observation_time);
                 sources.push(source.clone());
             }
-            Err(error) => {
-                let error_str = error.to_string();
+            Err(failure) => {
+                let error_str = failure.to_string();
                 state.metrics.record_token_source_fetch_failure(
-                    &token.symbol,
-                    &token.stellar_address,
-                    source,
+                    &failure.symbol,
+                    &failure.token,
+                    &failure.source,
                 );
+                let operation = format!("source:{}:{}", failure.symbol, failure.source);
+                tracing::warn!(symbol = %failure.symbol, source = %failure.source, error = %error_str, "price source failed");
                 let ctx = ErrorContext {
-                    token: token.stellar_address.clone(),
-                    symbol: token.symbol.clone(),
+                    token: failure.token,
+                    symbol: failure.symbol,
+                    source: Some(failure.source),
                     ledger_seq,
                 };
-                record_error_with_context(
-                    state,
-                    format!("source:{}:{}", token.symbol, source),
-                    error_str.clone(),
-                    ctx,
-                )
-                .await;
-                tracing::warn!(symbol = %token.symbol, source = %source, error = %error_str, "price source failed");
+                record_error_with_context(state, operation, error_str, ctx).await;
             }
         }
     }
@@ -431,6 +471,7 @@ async fn build_cached_price(
     let aggregate = crate::prices::aggregate_prices(
         &prices,
         &sources,
+        &observation_times,
         token.min_sources,
         token.max_deviation_bps,
     )?;
@@ -464,7 +505,7 @@ async fn fetch_source_with_retry(
     pyth_batch_failed: bool,
     binance_prices: Option<&std::collections::HashMap<String, i128>>,
     coinbase_base_url: &str,
-) -> Result<i128, PriceSourceError> {
+) -> Result<PriceWithObservationTime, SourceFailure> {
     crate::retry::retry_with_backoff(
         || async {
             fetch_source_price(
@@ -483,6 +524,12 @@ async fn fetch_source_with_retry(
         MAX_BACKOFF_DELAY_MS,
     )
     .await
+    .map_err(|error| SourceFailure {
+        source: source.to_string(),
+        symbol: token.symbol.clone(),
+        token: token.stellar_address.clone(),
+        error,
+    })
 }
 
 async fn fetch_source_price(
@@ -493,7 +540,8 @@ async fn fetch_source_price(
     pyth_batch_failed: bool,
     binance_prices: Option<&std::collections::HashMap<String, i128>>,
     coinbase_base_url: &str,
-) -> Result<i128, PriceSourceError> {
+) -> Result<PriceWithObservationTime, PriceSourceError> {
+    let now = crate::current_timestamp_secs();
     match source {
         "binance" => {
             let symbol = token
@@ -501,7 +549,10 @@ async fn fetch_source_price(
                 .as_ref()
                 .ok_or_else(|| PriceSourceError::Config("missing binance_symbol".to_string()))?;
             if let Some(prices) = binance_prices {
-                prices.get(symbol).copied().ok_or_else(|| {
+                prices.get(symbol).copied().map(|price| PriceWithObservationTime {
+                    price,
+                    observation_time: now,
+                }).ok_or_else(|| {
                     PriceSourceError::Config(format!(
                         "binance symbol not returned in batch: {symbol}"
                     ))
@@ -515,7 +566,10 @@ async fn fetch_source_price(
                 results
                     .into_iter()
                     .find(|(got_symbol, _)| got_symbol == symbol)
-                    .map(|(_, price)| price)
+                    .map(|(_, price)| PriceWithObservationTime {
+                        price,
+                        observation_time: now,
+                    })
                     .ok_or_else(|| {
                         PriceSourceError::Config(format!("binance symbol not returned: {symbol}"))
                     })
@@ -528,6 +582,10 @@ async fn fetch_source_price(
                 .ok_or_else(|| PriceSourceError::Config("missing coinbase_symbol".to_string()))?;
             crate::coinbase::fetch_spot_price_with_url(coinbase_base_url, symbol)
                 .await
+                .map(|price| PriceWithObservationTime {
+                    price,
+                    observation_time: now,
+                })
                 .map_err(PriceSourceError::Coinbase)
         }
         "pyth" => {
@@ -538,10 +596,14 @@ async fn fetch_source_price(
             if let Some(feed) = pyth_prices.get(feed_id) {
                 crate::pyth::validate_pyth_price(
                     &feed.price,
-                    crate::current_timestamp_secs(),
+                    now,
                     token.stale_after_seconds,
                     token.pyth_max_confidence_bps,
                 )
+                .map(|result| PriceWithObservationTime {
+                    price: result.price,
+                    observation_time: result.observation_time,
+                })
             } else {
                 // If batch failed, we should not fall back to individual requests
                 // as this would create N requests when Hermes is unstable
@@ -573,15 +635,24 @@ async fn fetch_source_price(
                     .and_then(|feed| {
                         crate::pyth::validate_pyth_price(
                             &feed.price,
-                            crate::current_timestamp_secs(),
+                            now,
                             token.stale_after_seconds,
                             token.pyth_max_confidence_bps,
                         )
+                        .map(|result| PriceWithObservationTime {
+                            price: result.price,
+                            observation_time: result.observation_time,
+                        })
                     })
             }
             .map_err(PriceSourceError::Pyth)
         }
-        "fixed" => crate::fixed::fixed_price(token).map_err(PriceSourceError::Fixed),
+        "fixed" => crate::fixed::fixed_price(token)
+            .map(|price| PriceWithObservationTime {
+                price,
+                observation_time: now,
+            })
+            .map_err(PriceSourceError::Fixed),
         other => Err(PriceSourceError::Unsupported(other.to_string())),
     }
 }
@@ -594,9 +665,11 @@ fn signed_cached_price(
     ledger_seq: u32,
     aggregate: AggregatedPrice,
 ) -> Result<CachedPrice, String> {
-    let timestamp = crate::current_timestamp_secs();
-    // Sign with the key decoded once at startup (#1226); fall back to the
-    // string key only so a missing/invalid key still reports its error.
+    // Use the minimum observation time from all sources used, not the signing time.
+    // This ensures staleness is measured from the oldest contributing price.
+    let timestamp = aggregate.min_observation_time;
+    // Sign with the key decoded once at config load (#1226). Decoding failures
+    // are boot failures (#1473), so `None` means the key was never configured.
     let signature = match state.price_signing_key.as_deref() {
         Some(key) => crate::signing::sign_price_with_key(
             key,
@@ -607,16 +680,7 @@ fn signed_cached_price(
             aggregate.max,
             timestamp,
         ),
-        None => crate::signing::sign_price(
-            state.config.keeper_private_key.as_str(),
-            &state.config.network_passphrase,
-            ledger_seq,
-            &token.stellar_address,
-            aggregate.min,
-            aggregate.max,
-            timestamp,
-        )
-        .map_err(|err| err.to_string())?,
+        None => return Err("KEEPER_PRIVATE_KEY is not configured".to_string()),
     };
 
     Ok(CachedPrice {
@@ -637,6 +701,7 @@ fn signed_cached_price(
 struct ErrorContext {
     token: String,
     symbol: String,
+    source: Option<String>,
     /// Ledger sequence in scope when the failure was recorded, if any (#726).
     /// `0` for failures that occur before any ledger sequence is known for
     /// this cycle (e.g. the `get_latest_ledger` fetch itself failing).
@@ -655,6 +720,7 @@ async fn record_error(
         ErrorContext {
             token: String::new(),
             symbol: String::new(),
+            source: None,
             ledger_seq: 0,
         },
     )
@@ -673,6 +739,7 @@ async fn record_error_with_context(
         network: state.config.network.as_str().to_string(),
         token: ctx.token,
         symbol: ctx.symbol,
+        source: ctx.source,
         min: 0,
         max: 0,
         tx_hash: None,
@@ -685,7 +752,7 @@ async fn record_error_with_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, Network, PriceFeedConfig, SecretString};
+    use crate::config::{Config, Network, PriceFeedConfig};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Duration;
 
@@ -703,10 +770,13 @@ mod tests {
             deposit_handler_contract_id: "CDEPOSIT".to_string(),
             withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
             reader_contract_id: "CREADER".to_string(),
-            keeper_private_key: SecretString::new(
-                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-            ),
-            keeper_secret_key: SecretString::new("SSECRET".to_string()),
+            keeper_private_key: Some(std::sync::Arc::new(
+                crate::signing::signing_key_from_hex(
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .unwrap(),
+            )),
+            keeper_secret_key: None,
             keeper_account_id: "GACCOUNT".to_string(),
             keeper_index: 0,
             admin_api_token: None,
@@ -725,6 +795,210 @@ mod tests {
         Arc::new(AppState::new(Arc::new(config)))
     }
 
+    // #1449 — every variant is classified on purpose. `variant` has no
+    // wildcard arm, so a new variant fails to compile until it is listed, and
+    // the coverage check fails until it has a case.
+    #[test]
+    fn every_price_source_error_variant_is_classified() {
+        use crate::retry::Retryable;
+
+        fn variant(err: &PriceSourceError) -> &'static str {
+            match err {
+                PriceSourceError::Binance(_) => "Binance",
+                PriceSourceError::Coinbase(_) => "Coinbase",
+                PriceSourceError::Pyth(_) => "Pyth",
+                PriceSourceError::Fixed(_) => "Fixed",
+                PriceSourceError::Config(_) => "Config",
+                PriceSourceError::Unsupported(_) => "Unsupported",
+            }
+        }
+        let binance = crate::binance::BinancePriceError::NetworkError("x".into());
+        let coinbase = crate::coinbase::CoinbasePriceError::MissingUsdRate;
+        let pyth = crate::pyth::PythPriceError::JsonError("x".into());
+        let fixed = crate::fixed::FixedPriceError::MissingFixedPrice;
+        let cases = [
+            (PriceSourceError::Binance(binance), true),
+            (PriceSourceError::Coinbase(coinbase), false),
+            (PriceSourceError::Pyth(pyth), false),
+            (PriceSourceError::Fixed(fixed), false),
+            (PriceSourceError::Config("x".into()), false),
+            (PriceSourceError::Unsupported("x".into()), false),
+        ];
+        let seen: std::collections::HashSet<_> = cases.iter().map(|(e, _)| variant(e)).collect();
+        assert_eq!(seen.len(), 6);
+        for (err, expected) in &cases {
+            assert_eq!(err.is_retryable(), *expected, "{err:?}");
+        }
+    }
+
+    // #1450 — a source failure carries its own identity, and the failure ring
+    // entry is built from it rather than from a parallel argument list.
+    #[tokio::test]
+    async fn source_failure_identity_reaches_failure_ring() {
+        let token = TokenConfig {
+            symbol: "TUSDC".to_string(),
+            display_symbol: Some("USDC".to_string()),
+            stellar_address: "CTOKEN".to_string(),
+            sources: vec!["fixed".to_string()],
+            binance_symbol: None,
+            coinbase_symbol: None,
+            pyth_feed_id: None,
+            fixed_price: None,
+            min_sources: 1,
+            max_deviation_bps: 100,
+            stale_after_seconds: 60,
+            submit_threshold_bps: 10,
+            pyth_max_confidence_bps: 100,
+        };
+        let state = test_state(token.clone());
+        let no_pyth = std::collections::HashMap::new();
+
+        let failure = fetch_source_with_retry("fixed", &token, None, &no_pyth, false, None, "")
+            .await
+            .unwrap_err();
+        assert_eq!(failure.source, "fixed");
+        assert_eq!(failure.symbol, "TUSDC");
+        assert_eq!(failure.token, "CTOKEN");
+        assert!(matches!(
+            failure.error,
+            PriceSourceError::Fixed(crate::fixed::FixedPriceError::MissingFixedPrice)
+        ));
+
+        let built = build_cached_price(&state, &token, 7, &no_pyth, false, None).await;
+        assert!(built.is_err());
+        let failures = state.failures.lock().await;
+        let entry = failures.iter().next_back().expect("source failure recorded");
+        assert_eq!(entry.operation, "source:TUSDC:fixed");
+        assert_eq!(entry.source.as_deref(), Some("fixed"));
+        assert_eq!(entry.symbol, "TUSDC");
+        assert_eq!(entry.token, "CTOKEN");
+        assert_eq!(entry.ledger_seq, 7);
+    }
+
+    // ── #1416: unit coverage for the pure parts of the price path ───────────
+
+    fn unit_token(sources: &[&str]) -> TokenConfig {
+        TokenConfig {
+            symbol: "TUSDC".to_string(),
+            display_symbol: Some("USDC".to_string()),
+            stellar_address: "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES".to_string(),
+            sources: sources.iter().map(|s| s.to_string()).collect(),
+            binance_symbol: None,
+            coinbase_symbol: None,
+            pyth_feed_id: Some("feed-1".to_string()),
+            fixed_price: None,
+            min_sources: 1,
+            max_deviation_bps: 100,
+            stale_after_seconds: 60,
+            submit_threshold_bps: 10,
+            pyth_max_confidence_bps: 100,
+        }
+    }
+
+    fn unit_aggregate() -> AggregatedPrice {
+        AggregatedPrice {
+            min: 990,
+            max: 1_010,
+            median: 1_000,
+            sources_used: vec!["fixed".to_string()],
+            rejected_sources: Vec::new(),
+            min_observation_time: 1_700_000_000,
+        }
+    }
+
+    // The signature in a CachedPrice must verify against build_price_message
+    // for exactly the values placed in that CachedPrice.
+    #[test]
+    fn signed_cached_price_signature_matches_its_own_fields() {
+        use ed25519_dalek::Verifier;
+
+        let token = unit_token(&["fixed"]);
+        let state = test_state(token.clone());
+        let result = signed_cached_price(&state, &token, 42, unit_aggregate());
+        let cached = result.unwrap();
+
+        // The timestamp is the oldest contributing observation, not signing time.
+        assert_eq!(cached.timestamp, 1_700_000_000);
+        assert_eq!(cached.min, 990);
+        assert_eq!(cached.max, 1_010);
+        assert_eq!(cached.median, 1_000);
+        assert_eq!(cached.ledger_seq, 42);
+
+        let message = crate::signing::build_price_message(
+            &state.config.network_passphrase,
+            cached.ledger_seq,
+            &cached.token_address,
+            cached.min,
+            cached.max,
+            cached.timestamp,
+        );
+        let raw = hex::decode(&cached.signature).unwrap();
+        let bytes: [u8; 64] = raw.try_into().unwrap();
+        let signature = ed25519_dalek::Signature::from_bytes(&bytes);
+        let key = state.price_signing_key.as_ref().unwrap().verifying_key();
+        assert!(key.verify(&message, &signature).is_ok());
+    }
+
+    #[test]
+    fn signed_cached_price_errors_without_a_signing_key() {
+        let token = unit_token(&["fixed"]);
+        let state = Arc::new(AppState::new(Arc::new(Config::default_for_tests())));
+        let result = signed_cached_price(&state, &token, 42, unit_aggregate());
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn finish_cycle_records_counters_and_clears_running_flag() {
+        let state = test_state(unit_token(&["fixed"]));
+        state.cycle_status.write().await.price_cycle_running = true;
+
+        finish_cycle(&state, Instant::now(), 3, 2, 1).await;
+        finish_cycle(&state, Instant::now(), 1, 0, 0).await;
+
+        let metrics = state.metrics.to_response();
+        assert_eq!(metrics.price_cycle_count, 2);
+        assert_eq!(metrics.token_fetch_ok, 4);
+        assert_eq!(metrics.token_fetch_failures, 2);
+        let status = state.cycle_status.read().await;
+        assert!(!status.price_cycle_running);
+        assert!(status.last_price_cycle_at.is_some());
+    }
+
+    // A permanent error returns on the first attempt: no backoff sleep runs,
+    // so the paused clock never advances.
+    #[tokio::test(start_paused = true)]
+    async fn fetch_source_with_retry_does_not_retry_a_permanent_error() {
+        let token = unit_token(&["nope"]);
+        let no_pyth = std::collections::HashMap::new();
+        let started = tokio::time::Instant::now();
+
+        let failure = fetch_source_with_retry("nope", &token, None, &no_pyth, false, None, "")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(failure.error, PriceSourceError::Unsupported(_)));
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    // A transient error is retried with backoff before giving up.
+    #[tokio::test(start_paused = true)]
+    async fn fetch_source_with_retry_backs_off_on_a_transient_error() {
+        let token = unit_token(&["pyth"]);
+        let no_pyth = std::collections::HashMap::new();
+        let started = tokio::time::Instant::now();
+
+        // Batch failed and the feed is absent: a retryable network error.
+        let failure = fetch_source_with_retry("pyth", &token, None, &no_pyth, true, None, "")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            failure.error,
+            PriceSourceError::Pyth(crate::pyth::PythPriceError::NetworkError(_))
+        ));
+        assert!(started.elapsed() > Duration::ZERO, "backoff expected");
+    }
+
     // ── #512: run_price_loop shutdown coverage ───────────────────────────────
 
     fn shutdown_test_state() -> Arc<AppState> {
@@ -741,10 +1015,13 @@ mod tests {
             deposit_handler_contract_id: "CDEPOSIT".to_string(),
             withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
             reader_contract_id: "CREADER".to_string(),
-            keeper_private_key: SecretString::new(
-                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-            ),
-            keeper_secret_key: SecretString::new("SSECRET".to_string()),
+            keeper_private_key: Some(std::sync::Arc::new(
+                crate::signing::signing_key_from_hex(
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .unwrap(),
+            )),
+            keeper_secret_key: None,
             keeper_account_id: "GACCOUNT".to_string(),
             keeper_index: 0,
             admin_api_token: None,

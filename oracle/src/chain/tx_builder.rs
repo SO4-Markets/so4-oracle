@@ -3,13 +3,20 @@ use sha2::{Digest, Sha256};
 use stellar_xdr::{
     DecoratedSignature, InvokeContractArgs, InvokeHostFunctionOp, Limits, Memo, Operation,
     OperationBody, Preconditions, ScSymbol, ScVal, SequenceNumber, Signature, SignatureHint,
-    SorobanTransactionData, Transaction, TransactionEnvelope, TransactionExt,
-    TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
+    SorobanTransactionData, TimeBounds, TimePoint, Transaction, TransactionEnvelope,
+    TransactionExt, TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
     TransactionV1Envelope, VecM, WriteXdr,
 };
 
 use crate::chain::scval::{account_strkey_to_muxed, strkey_to_sc_address};
 
+/// Seconds added to the current Unix timestamp when the caller wants a hard
+/// expiry on keeper transactions (#1236). A timed-out transaction is
+/// guaranteed `tx_too_late` before the key is retried.
+pub const TX_MAX_TIME_SECS: u64 = 60;
+
+/// `max_time`: Unix timestamp of the transaction's hard deadline.
+/// Pass `0` to omit time bounds (e.g. for simulation calls where sequence is 0).
 pub fn build_invoke_tx(
     source_account: &str,
     contract_id: &str,
@@ -18,6 +25,7 @@ pub fn build_invoke_tx(
     fee: u32,
     sequence: u64,
     soroban_data: Option<SorobanTransactionData>,
+    max_time: u64,
 ) -> Result<Transaction, String> {
     let source_muxed = account_strkey_to_muxed(source_account)?;
     let contract_addr = strkey_to_sc_address(contract_id)?;
@@ -53,11 +61,20 @@ pub fn build_invoke_tx(
         None => TransactionExt::V0,
     };
 
+    let cond = if max_time > 0 {
+        Preconditions::Time(TimeBounds {
+            min_time: TimePoint(0),
+            max_time: TimePoint(max_time),
+        })
+    } else {
+        Preconditions::None
+    };
+
     Ok(Transaction {
         source_account: source_muxed,
         fee,
         seq_num: SequenceNumber(sequence as i64),
-        cond: Preconditions::None,
+        cond,
         memo: Memo::None,
         operations,
         ext,
@@ -189,12 +206,38 @@ mod tests {
             100,
             1,
             None,
+            0,
         )
         .unwrap();
 
         assert_eq!(tx.fee, 100);
         assert_eq!(tx.seq_num.0, 1);
         assert_eq!(tx.operations.len(), 1);
+        assert_eq!(tx.cond, Preconditions::None);
+    }
+
+    #[test]
+    fn test_build_invoke_tx_sets_time_bounds_when_max_time_nonzero() {
+        let max_time = 9_999_999_999u64;
+        let tx = build_invoke_tx(
+            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY",
+            "set_prices",
+            vec![ScVal::Void],
+            100,
+            1,
+            None,
+            max_time,
+        )
+        .unwrap();
+
+        assert_eq!(
+            tx.cond,
+            Preconditions::Time(TimeBounds {
+                min_time: TimePoint(0),
+                max_time: TimePoint(max_time),
+            })
+        );
     }
 
     #[test]
@@ -209,6 +252,7 @@ mod tests {
             100,
             1,
             None,
+            0,
         )
         .unwrap();
 
@@ -236,6 +280,7 @@ mod tests {
             100,
             1,
             None,
+            0,
         );
         assert!(err.is_err());
     }

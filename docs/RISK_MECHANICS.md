@@ -15,7 +15,7 @@
 > `so4-oracle` returns zero matches for all of them.
 >
 > **This service performs no liquidation monitoring, no ADL execution, and no
-> insurance-fund accounting.** The keeper cycle in
+> insurance-fund accounting** (see #1262). The keeper cycle in
 > [`oracle/src/keeper_loop.rs`](../oracle/src/keeper_loop.rs) invokes exactly
 > five contract entrypoints — `set_prices`, `execute_order`, `freeze_order`,
 > `execute_deposit`, `execute_withdrawal` — and never reads liquidation or ADL

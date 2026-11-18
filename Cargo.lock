@@ -1159,6 +1159,7 @@ dependencies = [
  "shared-config",
  "stellar-strkey 0.0.18",
  "stellar-xdr",
+ "subtle",
  "tokio",
  "tokio-util",
  "tower",

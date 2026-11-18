@@ -56,6 +56,8 @@ stellar-strkey = "0.0.18"
 base64 = "0.22"
 sha2 = "0.10"
 digest = "0.10"
+# Constant-time token comparison (#1444); already in Cargo.lock via ed25519-dalek.
+subtle = "2.6"
 
 [dev-dependencies]
 base64 = "0.22"

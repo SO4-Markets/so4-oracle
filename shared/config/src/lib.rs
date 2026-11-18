@@ -1,7 +1,29 @@
 //! Shared token configuration for the so4-oracle workspace.
 //!
-//! The oracle Worker consumes `TokenConfig` through `PRICE_FEED_CONFIG`.
-//! `config/tokens.json` remains as a checked-in example for local setup.
+//! # What lives here, and what lives in `oracle::config` (#1460)
+//!
+//! This crate owns the **per-token** feed definition: the [`TokenConfig`]
+//! struct, its serde shape (the JSON in `PRICE_FEED_CONFIG` and
+//! `config/tokens.json`), and every check that depends only on the token list
+//! itself — [`parse_token_configs`] rejects duplicates, unsupported sources,
+//! malformed source symbols and out-of-range tuning fields, with its own
+//! [`ConfigError`].
+//!
+//! `oracle::config` owns the **process** configuration: environment-variable
+//! parsing (`Config::from_env`), contract IDs, keys, fees and loop intervals,
+//! plus the token checks that need oracle knowledge, in
+//! `oracle::config::parse_price_feed_config` (e.g. that `min_sources` does not
+//! exceed `sources.len()`, and the warning when it is too low for outlier
+//! rejection). It re-exports [`TokenConfig`] as `TokenFeedConfig` and wraps
+//! [`ConfigError`] in its `EnvError` via a `From` impl.
+//!
+//! The split exists so the token schema has one definition that a second
+//! consumer — the on-chain contracts' tooling or a future API-only service —
+//! can depend on without pulling in the oracle's runtime. Today the oracle is
+//! the only consumer in this repository. A new per-token field goes here
+//! (struct, default, range check, docs); a new environment variable goes in
+//! `oracle::config`. Field units, ranges and interactions are documented on
+//! each field below and tabulated in `docs/ENVIRONMENT.md` (#1461).
 
 use serde::Deserialize;
 
@@ -40,20 +62,37 @@ pub struct TokenConfig {
     pub coinbase_symbol: Option<String>,
     /// Optional Pyth feed ID.
     pub pyth_feed_id: Option<String>,
-    /// Fixed price in 1e30 precision, encoded as a decimal integer string.
+    /// Fixed price in 1e30 precision, encoded as a decimal integer string
+    /// (`"1000000000000000000000000000000"` is 1.0). Read only by the `fixed`
+    /// source; must be a positive integer.
     pub fixed_price: Option<String>,
-    /// Minimum source count required after source fetches and outlier filtering.
+    /// Minimum number of sources that must survive fetching and outlier
+    /// filtering for a price to be produced. Default `2`; range 1 to
+    /// `sources.len()` (the upper bound is checked by
+    /// `oracle::config::parse_price_feed_config`). At or below half of
+    /// `sources`, a single responding source can set the price with no
+    /// cross-source check; above the number of healthy sources, the token
+    /// stops pricing whenever one source is down.
     pub min_sources: usize,
-    /// Maximum allowed source deviation from the median in basis points.
-    /// Used for both outlier rejection during price aggregation and to
-    /// widen the returned price band (min/max) around the percentile-based
-    /// or median-based center.
+    /// Maximum allowed source deviation from the median, in basis points.
+    /// Default `100`; range 1 to 10000. Used for outlier rejection during
+    /// aggregation and to widen the returned min/max band around the center.
+    /// It also sets the cluster tolerance, floored at 500 bps
+    /// (`DEFAULT_CLUSTER_TOLERANCE_BPS` in `oracle/src/prices.rs`), so a value
+    /// below 500 tightens the band and outlier cut but not the clustering.
     pub max_deviation_bps: u32,
-    /// Source freshness limit.
+    /// Seconds after which a cached price is stale and is not submitted.
+    /// Default `60`; must be at least 1. Keep it well above `PRICE_LOOP_MS`
+    /// (and within the contract's own freshness window), or prices go stale
+    /// between cycles and submissions stop.
     pub stale_after_seconds: u64,
-    /// Minimum movement before on-chain submission, in basis points.
+    /// Minimum price movement, in basis points, before a new on-chain
+    /// `set_prices` is submitted. Default `10`; range 0 to 10000. `0` submits
+    /// every cycle, which maximises fee spend.
     pub submit_threshold_bps: u32,
-    /// Maximum allowed Pyth confidence interval width in basis points.
+    /// Widest Pyth confidence interval accepted, in basis points of the
+    /// price. Default `50`; range 0 to 10000. A Pyth reading wider than this
+    /// is rejected for the cycle rather than averaged in.
     pub pyth_max_confidence_bps: u32,
 }
 

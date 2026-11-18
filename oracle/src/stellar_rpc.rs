@@ -1,4 +1,8 @@
 use serde::{Deserialize, Serialize};
+use stellar_xdr::{
+    AccountId, LedgerEntryData, LedgerKey, LedgerKeyAccount, Limits, PublicKey, ReadXdr, Uint256,
+    WriteXdr,
+};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum RpcError {
@@ -29,7 +33,7 @@ impl crate::retry::Retryable for RpcError {
     fn is_retryable(&self) -> bool {
         match self {
             RpcError::NetworkError(_) => true,
-            RpcError::HttpError { status, .. } => *status >= 500 || *status == 429,
+            RpcError::HttpError { status, .. } => crate::retry::is_transient_http_status(*status),
             RpcError::JsonError(_) => false,
             RpcError::RpcFault { .. } => false,
             RpcError::BalanceBelowMinimum { .. } => false,
@@ -145,8 +149,7 @@ pub async fn get_latest_ledger_sequence(rpc_url: &str) -> Result<u32, RpcError> 
 
 /// Low-level helper: POST a JSON string to the RPC URL, return the response body.
 pub(crate) async fn rpc_post(rpc_url: &str, payload: String) -> Result<String, RpcError> {
-    let response = crate::http::client()
-        .post(rpc_url)
+    let response = crate::http::with_correlation(crate::http::client().post(rpc_url))
         .header("Content-Type", "application/json")
         .body(payload)
         .send()
@@ -169,6 +172,96 @@ pub(crate) async fn rpc_post(rpc_url: &str, payload: String) -> Result<String, R
     Ok(body)
 }
 
+// ── Account sequence (getLedgerEntries) ─────────────────────────────────────
+
+/// Encode `account_id` as the base64 XDR of a `LedgerKey::Account`.
+///
+/// Stellar RPC has no `getAccount` method (that is an SDK-side convenience
+/// built on top of `getLedgerEntries`), so the account's sequence number has
+/// to be fetched by looking up its ledger entry directly (#1241).
+fn account_ledger_key_xdr(account_id: &str) -> Result<String, RpcError> {
+    let public_key = stellar_strkey::ed25519::PublicKey::from_string(account_id)
+        .map_err(|e| RpcError::JsonError(format!("invalid account id '{account_id}': {e}")))?;
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(public_key.0.as_ref());
+
+    LedgerKey::Account(LedgerKeyAccount {
+        account_id: AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(bytes))),
+    })
+    .to_xdr_base64(Limits::none())
+    .map_err(|e| RpcError::JsonError(format!("failed to encode account ledger key: {e}")))
+}
+
+#[derive(Debug, Deserialize)]
+struct GetLedgerEntriesResult {
+    entries: Vec<LedgerEntryResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LedgerEntryResult {
+    xdr: String,
+}
+
+/// Parse the raw JSON body returned by a `getLedgerEntries` call for an
+/// account and return the sequence number the *next* transaction must use.
+///
+/// The on-chain `seqNum` is the last sequence number consumed, so it is
+/// incremented by one (matching the previous `getAccount` behaviour).
+pub fn parse_account_sequence_response(body: &str) -> Result<u64, RpcError> {
+    let resp: JsonRpcResponse<GetLedgerEntriesResult> =
+        serde_json::from_str(body).map_err(|e| RpcError::JsonError(e.to_string()))?;
+
+    if let Some(fault) = resp.error {
+        return Err(RpcError::RpcFault {
+            code: fault.code,
+            message: fault.message,
+        });
+    }
+
+    let result = resp
+        .result
+        .ok_or_else(|| RpcError::JsonError("missing 'result' field".to_string()))?;
+
+    let entry = result
+        .entries
+        .into_iter()
+        .next()
+        .ok_or_else(|| RpcError::JsonError("account ledger entry not found".to_string()))?;
+
+    let data = LedgerEntryData::from_xdr_base64(&entry.xdr, Limits::none())
+        .map_err(|e| RpcError::JsonError(format!("invalid ledger entry XDR: {e}")))?;
+
+    match data {
+        LedgerEntryData::Account(account) => {
+            let sequence = u64::try_from(account.seq_num.0).map_err(|_| {
+                RpcError::JsonError(format!(
+                    "account sequence number {} is negative",
+                    account.seq_num.0
+                ))
+            })?;
+            Ok(sequence.saturating_add(1))
+        }
+        _ => Err(RpcError::JsonError(
+            "ledger entry is not an account".to_string(),
+        )),
+    }
+}
+
+/// Fetch the keeper account's next sequence number from Stellar RPC using
+/// `getLedgerEntries` with a `LedgerKey::Account` (#1241).
+pub async fn get_account_sequence(rpc_url: &str, account_id: &str) -> Result<u64, RpcError> {
+    let payload = serde_json::to_string(&JsonRpcRequest {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getLedgerEntries",
+        params: serde_json::json!({ "keys": [account_ledger_key_xdr(account_id)?] }),
+    })
+    .map_err(|e| RpcError::JsonError(e.to_string()))?;
+
+    let body = rpc_post(rpc_url, payload).await?;
+    parse_account_sequence_response(&body)
+}
+
 // ── Account balance (Horizon REST) ──────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -180,12 +273,22 @@ struct HorizonBalanceEntry {
 #[derive(Debug, Deserialize)]
 struct HorizonAccountResponse {
     balances: Vec<HorizonBalanceEntry>,
+    /// Trustlines, offers, data entries and extra signers; each raises the
+    /// account's locked reserve (#1446). Absent is read as zero.
+    #[serde(default)]
+    subentry_count: u32,
+}
+
+/// The parts of a Horizon account the keeper's balance check needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountBalance {
+    /// Native (XLM) balance in stroops.
+    pub balance_stroops: i64,
+    pub subentry_count: u32,
 }
 
 /// Parse the JSON body returned by `GET /accounts/{id}` on a Horizon server.
-///
-/// Returns the native (XLM) balance in stroops (1 XLM = 10_000_000 stroops).
-pub fn parse_account_balance_response(body: &str) -> Result<i64, RpcError> {
+pub fn parse_account_response(body: &str) -> Result<AccountBalance, RpcError> {
     let resp: HorizonAccountResponse =
         serde_json::from_str(body).map_err(|e| RpcError::JsonError(e.to_string()))?;
 
@@ -195,7 +298,17 @@ pub fn parse_account_balance_response(body: &str) -> Result<i64, RpcError> {
         .find(|b| b.asset_type == "native")
         .ok_or_else(|| RpcError::JsonError("no native balance entry".to_string()))?;
 
-    parse_xlm_balance_to_stroops(&native.balance)
+    Ok(AccountBalance {
+        balance_stroops: parse_xlm_balance_to_stroops(&native.balance)?,
+        subentry_count: resp.subentry_count,
+    })
+}
+
+/// Parse the JSON body returned by `GET /accounts/{id}` on a Horizon server.
+///
+/// Returns the native (XLM) balance in stroops (1 XLM = 10_000_000 stroops).
+pub fn parse_account_balance_response(body: &str) -> Result<i64, RpcError> {
+    parse_account_response(body).map(|account| account.balance_stroops)
 }
 
 /// Stroops in one XLM: 1 XLM = 10^7 stroops.
@@ -247,16 +360,15 @@ fn parse_xlm_balance_to_stroops(balance: &str) -> Result<i64, RpcError> {
         .ok_or_else(unparseable)
 }
 
-/// Fetch the XLM balance for `account_id` from the Horizon server at
-/// `horizon_url`.  Returns the balance in stroops.
-pub async fn get_account_balance_stroops(
+/// Fetch the XLM balance and subentry count for `account_id` from the Horizon
+/// server at `horizon_url`.
+pub async fn get_account_balance(
     horizon_url: &str,
     account_id: &str,
-) -> Result<i64, RpcError> {
+) -> Result<AccountBalance, RpcError> {
     let url = format!("{horizon_url}/accounts/{account_id}");
 
-    let response = crate::http::client()
-        .get(&url)
+    let response = crate::http::with_correlation(crate::http::client().get(&url))
         .send()
         .await
         .map_err(|e| RpcError::NetworkError(e.to_string()))?;
@@ -280,12 +392,110 @@ pub async fn get_account_balance_stroops(
         });
     }
 
-    parse_account_balance_response(&body)
+    parse_account_response(&body)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #1412 — the exact integer parser is tested directly, with exact stroop
+    // values, instead of only through `parse_account_balance_response`.
+    #[test]
+    fn parse_xlm_balance_to_stroops_exact_values() {
+        let cases = [
+            ("100.0000000", 1_000_000_000),
+            ("0.0000001", 1),
+            ("0.0000000", 0),
+            ("1.5", 15_000_000),
+            ("1.", 10_000_000),
+            ("42", 420_000_000),
+            ("1.12345678", 11_234_567),
+            (" 2.5 ", 25_000_000),
+            ("922337203685.4775807", i64::MAX),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_xlm_balance_to_stroops(input),
+                Ok(expected),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_xlm_balance_to_stroops_rejects_malformed_input() {
+        let cases = [
+            "",
+            "abc",
+            "1.2.3",
+            "+1",
+            "-1",
+            ".5",
+            "1e7",
+            "1,5",
+            "922337203685.4775808",
+            "922337203686",
+            "99999999999999999999",
+        ];
+        for input in cases {
+            assert!(
+                matches!(
+                    parse_xlm_balance_to_stroops(input),
+                    Err(RpcError::JsonError(_))
+                ),
+                "{input:?} should be rejected"
+            );
+        }
+    }
+
+    // #1449 — every variant is classified on purpose. `variant` has no
+    // wildcard arm, so a new variant fails to compile until it is listed, and
+    // the coverage check fails until it has a case.
+    #[test]
+    fn every_rpc_error_variant_is_classified() {
+        use crate::retry::Retryable;
+
+        fn variant(err: &RpcError) -> &'static str {
+            match err {
+                RpcError::NetworkError(_) => "NetworkError",
+                RpcError::UnfundedAccount(_) => "UnfundedAccount",
+                RpcError::HttpError { .. } => "HttpError",
+                RpcError::JsonError(_) => "JsonError",
+                RpcError::RpcFault { .. } => "RpcFault",
+                RpcError::BalanceBelowMinimum { .. } => "BalanceBelowMinimum",
+            }
+        }
+        let http = |status| RpcError::HttpError {
+            status,
+            body: String::new(),
+        };
+        let fault = RpcError::RpcFault {
+            code: -32600,
+            message: "x".into(),
+        };
+        let low_balance = RpcError::BalanceBelowMinimum {
+            balance_stroops: 1,
+            balance_xlm: 0.0000001,
+            min_xlm: 1.0,
+        };
+        let cases = [
+            (RpcError::NetworkError("x".into()), true),
+            (RpcError::UnfundedAccount("x".into()), false),
+            (http(408), true),
+            (http(429), true),
+            (http(503), true),
+            (http(404), false),
+            (RpcError::JsonError("x".into()), false),
+            (fault, false),
+            (low_balance, false),
+        ];
+        let seen: std::collections::HashSet<_> = cases.iter().map(|(e, _)| variant(e)).collect();
+        assert_eq!(seen.len(), 6);
+        for (err, expected) in &cases {
+            assert_eq!(err.is_retryable(), *expected, "{err:?}");
+        }
+    }
 
     /// Verifies that a valid `getLatestLedger` RPC response is parsed correctly
     /// and the sequence number is extracted. Closes #409.
@@ -327,6 +537,92 @@ mod tests {
     fn parse_missing_result_field() {
         let body = r#"{"jsonrpc":"2.0","id":1}"#;
         let err = parse_latest_ledger_response(body).unwrap_err();
+        assert!(matches!(err, RpcError::JsonError(_)));
+    }
+
+    // ── account sequence (getLedgerEntries) ─────────────────────────────────
+
+    fn account_entry_xdr(seq: i64) -> String {
+        LedgerEntryData::Account(stellar_xdr::AccountEntry {
+            seq_num: stellar_xdr::SequenceNumber(seq),
+            ..Default::default()
+        })
+        .to_xdr_base64(Limits::none())
+        .expect("account entry encodes")
+    }
+
+    /// #1241 — the sequence comes from a real `LedgerEntryData::Account`
+    /// (`getLedgerEntries`), not a non-existent `getAccount` method, and the
+    /// returned value is the next usable sequence number.
+    #[test]
+    fn parse_account_sequence_from_ledger_entry() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "entries": [{"key": "", "xdr": account_entry_xdr(100)}],
+                "latestLedger": 12345
+            }
+        })
+        .to_string();
+
+        assert_eq!(parse_account_sequence_response(&body).unwrap(), 101);
+    }
+
+    #[test]
+    fn parse_account_sequence_missing_entry() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"entries":[]}}"#;
+        let err = parse_account_sequence_response(body).unwrap_err();
+        assert!(matches!(err, RpcError::JsonError(ref m) if m.contains("not found")));
+    }
+
+    #[test]
+    fn parse_account_sequence_invalid_xdr() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"entries":[{"xdr":"not-base64"}]}}"#;
+        let err = parse_account_sequence_response(body).unwrap_err();
+        assert!(
+            matches!(err, RpcError::JsonError(ref m) if m.contains("invalid ledger entry XDR"))
+        );
+    }
+
+    #[test]
+    fn parse_account_sequence_rpc_fault() {
+        let body = r#"{
+            "jsonrpc":"2.0","id":1,
+            "error":{"code":-32601,"message":"method not found"}
+        }"#;
+        let err = parse_account_sequence_response(body).unwrap_err();
+        assert_eq!(
+            err,
+            RpcError::RpcFault {
+                code: -32601,
+                message: "method not found".to_string(),
+            }
+        );
+    }
+
+    /// The key sent to `getLedgerEntries` must decode as a `LedgerKey::Account`
+    /// for the requested account (#1241).
+    #[test]
+    fn account_ledger_key_encodes_as_account_key() {
+        let account = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let encoded = account_ledger_key_xdr(account).unwrap();
+        let decoded = LedgerKey::from_xdr_base64(&encoded, Limits::none()).unwrap();
+
+        match decoded {
+            LedgerKey::Account(key) => {
+                let stellar_xdr::PublicKey::PublicKeyTypeEd25519(stellar_xdr::Uint256(bytes)) =
+                    key.account_id.0;
+                let expected = stellar_strkey::ed25519::PublicKey::from_string(account).unwrap();
+                assert_eq!(bytes, expected.0);
+            }
+            other => panic!("expected LedgerKey::Account, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn account_ledger_key_rejects_invalid_account() {
+        let err = account_ledger_key_xdr("not-an-account").unwrap_err();
         assert!(matches!(err, RpcError::JsonError(_)));
     }
 
@@ -453,10 +749,10 @@ mod tests {
         assert!(matches!(err, RpcError::JsonError(_)));
     }
 
-    // ── get_account_balance_stroops — HTTP-level tests (#404) ────────────────
+    // ── get_account_balance — HTTP-level tests (#404) ────────────────────────
 
     #[tokio::test]
-    async fn get_account_balance_stroops_200_returns_stroops() {
+    async fn get_account_balance_200_returns_stroops() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -474,12 +770,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        let result = get_account_balance_stroops(&server.uri(), "GABC").await;
-        assert_eq!(result.unwrap(), 500_000_000); // 50 XLM in stroops
+        let result = get_account_balance(&server.uri(), "GABC").await;
+        assert_eq!(result.unwrap().balance_stroops, 500_000_000); // 50 XLM in stroops
     }
 
     #[tokio::test]
-    async fn get_account_balance_stroops_404_returns_http_error() {
+    async fn get_account_balance_404_returns_unfunded_account() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -491,14 +787,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = get_account_balance_stroops(&server.uri(), "GNOT_FOUND")
+        let err = get_account_balance(&server.uri(), "GNOT_FOUND")
             .await
             .unwrap_err();
-        assert!(matches!(err, RpcError::HttpError { status: 404, .. }));
+        // An unfunded keeper is reported distinctly from an HTTP error (#1216).
+        assert!(matches!(err, RpcError::UnfundedAccount(_)));
     }
 
     #[tokio::test]
-    async fn get_account_balance_stroops_500_returns_http_error() {
+    async fn get_account_balance_500_returns_http_error() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -510,7 +807,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = get_account_balance_stroops(&server.uri(), "GABC")
+        let err = get_account_balance(&server.uri(), "GABC")
             .await
             .unwrap_err();
         assert!(matches!(err, RpcError::HttpError { status: 500, .. }));

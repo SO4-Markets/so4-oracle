@@ -579,3 +579,24 @@ mod tests {
         assert!(output.contains("oracle_http_requests_total{route=\"/unmatched\",method=\"GET\",status_class=\"4xx\"} 2"));
     }
 }
+
+#[cfg(test)]
+mod escape_label_value_tests {
+    use super::*;
+
+    // #1409 — exact output locks the escape ORDER (backslash first) and
+    // documents that \r is left untouched.
+    #[test]
+    fn test_escape_label_value_escapes_backslash_newline_and_quote() {
+        let cases = [
+            (r"a\b", r"a\\b"),
+            ("a\"b", "a\\\"b"),
+            ("a\nb", "a\\nb"),
+            ("a\r\nb", "a\r\\nb"),
+            ("a\\b\"c\nd", "a\\\\b\\\"c\\nd"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(escape_label_value(input), expected, "input {input:?}");
+        }
+    }
+}
