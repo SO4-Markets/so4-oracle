@@ -79,6 +79,10 @@ pub struct FailedSubmission {
     pub network: String,
     pub token: String,
     pub symbol: String,
+    /// Price source that failed (`binance`, `coinbase`, ...), for per-source
+    /// fetch failures; `None` for failures not tied to one source (#1450).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(serialize_with = "ser_i128_str")]
     pub min: i128,
     #[serde(serialize_with = "ser_i128_str")]

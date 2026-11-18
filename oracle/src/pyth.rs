@@ -72,14 +72,12 @@ impl std::error::Error for PythPriceError {}
 impl crate::retry::Retryable for PythPriceError {
     fn is_retryable(&self) -> bool {
         match self {
-            // Network errors, 5xx HTTP errors, and 429 rate limits are
-            // transient. Hermes answers an over-rate-limited client with 429,
-            // which is < 500 and would otherwise be classified as a permanent
-            // failure — dropping the Pyth source for the rest of the cycle
-            // instead of backing off (#708). Matches RpcError's
-            // classification in stellar_rpc.rs.
+            // Network errors and transient HTTP statuses (408/425/429/5xx)
+            // are retried. Hermes answers an over-rate-limited client with
+            // 429 (#708); the status table is shared with every other source
+            // via is_transient_http_status (#1448).
             Self::NetworkError(_) => true,
-            Self::HttpError { status, .. } => *status >= 500 || *status == 429,
+            Self::HttpError { status, .. } => crate::retry::is_transient_http_status(*status),
             // Stale prices might become fresh on retry
             Self::StalePrice { .. } => true,
             // Parse/JSON/config/validation errors are permanent failures
@@ -332,6 +330,56 @@ pub async fn fetch_pyth_prices(
 mod tests {
     use super::*;
     use crate::retry::Retryable;
+
+    // #1449 — every variant is classified on purpose. `variant` has no
+    // wildcard arm, so a new variant fails to compile until it is listed, and
+    // the coverage check fails until it has a case.
+    #[test]
+    fn every_variant_is_classified() {
+        fn variant(err: &PythPriceError) -> &'static str {
+            match err {
+                PythPriceError::NetworkError(_) => "NetworkError",
+                PythPriceError::HttpError { .. } => "HttpError",
+                PythPriceError::JsonError(_) => "JsonError",
+                PythPriceError::PriceParseError(_) => "PriceParseError",
+                PythPriceError::MissingFeedId(_) => "MissingFeedId",
+                PythPriceError::StalePrice { .. } => "StalePrice",
+                PythPriceError::ConfidenceTooWide { .. } => "ConfidenceTooWide",
+                PythPriceError::MissingPublishTime => "MissingPublishTime",
+                PythPriceError::InvalidPublishTime(_) => "InvalidPublishTime",
+            }
+        }
+        let http = |status| PythPriceError::HttpError {
+            status,
+            body: String::new(),
+        };
+        let stale = PythPriceError::StalePrice {
+            age_seconds: 120,
+            max_age_seconds: 60,
+        };
+        let wide = PythPriceError::ConfidenceTooWide {
+            confidence_bps: 500.0,
+            max_bps: 100,
+        };
+        let cases = [
+            (PythPriceError::NetworkError("x".into()), true),
+            (http(429), true),
+            (http(503), true),
+            (http(404), false),
+            (PythPriceError::JsonError("x".into()), false),
+            (PythPriceError::PriceParseError("x".into()), false),
+            (PythPriceError::MissingFeedId("x".into()), false),
+            (stale, true),
+            (wide, false),
+            (PythPriceError::MissingPublishTime, false),
+            (PythPriceError::InvalidPublishTime(-1), false),
+        ];
+        let seen: std::collections::HashSet<_> = cases.iter().map(|(e, _)| variant(e)).collect();
+        assert_eq!(seen.len(), 9);
+        for (err, expected) in &cases {
+            assert_eq!(err.is_retryable(), *expected, "{err:?}");
+        }
+    }
 
     // #708 — a 429 from Hermes means "slow down", not "give up". It must be
     // retried with backoff instead of being classified as a permanent failure.

@@ -33,7 +33,7 @@ impl crate::retry::Retryable for RpcError {
     fn is_retryable(&self) -> bool {
         match self {
             RpcError::NetworkError(_) => true,
-            RpcError::HttpError { status, .. } => *status >= 500 || *status == 429,
+            RpcError::HttpError { status, .. } => crate::retry::is_transient_http_status(*status),
             RpcError::JsonError(_) => false,
             RpcError::RpcFault { .. } => false,
             RpcError::BalanceBelowMinimum { .. } => false,
@@ -380,6 +380,54 @@ pub async fn get_account_balance_stroops(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #1449 — every variant is classified on purpose. `variant` has no
+    // wildcard arm, so a new variant fails to compile until it is listed, and
+    // the coverage check fails until it has a case.
+    #[test]
+    fn every_rpc_error_variant_is_classified() {
+        use crate::retry::Retryable;
+
+        fn variant(err: &RpcError) -> &'static str {
+            match err {
+                RpcError::NetworkError(_) => "NetworkError",
+                RpcError::UnfundedAccount(_) => "UnfundedAccount",
+                RpcError::HttpError { .. } => "HttpError",
+                RpcError::JsonError(_) => "JsonError",
+                RpcError::RpcFault { .. } => "RpcFault",
+                RpcError::BalanceBelowMinimum { .. } => "BalanceBelowMinimum",
+            }
+        }
+        let http = |status| RpcError::HttpError {
+            status,
+            body: String::new(),
+        };
+        let fault = RpcError::RpcFault {
+            code: -32600,
+            message: "x".into(),
+        };
+        let low_balance = RpcError::BalanceBelowMinimum {
+            balance_stroops: 1,
+            balance_xlm: 0.0000001,
+            min_xlm: 1.0,
+        };
+        let cases = [
+            (RpcError::NetworkError("x".into()), true),
+            (RpcError::UnfundedAccount("x".into()), false),
+            (http(408), true),
+            (http(429), true),
+            (http(503), true),
+            (http(404), false),
+            (RpcError::JsonError("x".into()), false),
+            (fault, false),
+            (low_balance, false),
+        ];
+        let seen: std::collections::HashSet<_> = cases.iter().map(|(e, _)| variant(e)).collect();
+        assert_eq!(seen.len(), 6);
+        for (err, expected) in &cases {
+            assert_eq!(err.is_retryable(), *expected, "{err:?}");
+        }
+    }
 
     /// Verifies that a valid `getLatestLedger` RPC response is parsed correctly
     /// and the sequence number is extracted. Closes #409.

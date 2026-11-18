@@ -1797,6 +1797,7 @@ async fn record_error(
         network: state.config.network.as_str().to_string(),
         token: String::new(),
         symbol: String::new(),
+        source: None,
         min: 0,
         max: 0,
         // Carry the hash whenever the failure happened *after* submission
@@ -1840,6 +1841,57 @@ async fn record_execution(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #1449 — every variant is classified on purpose. `variant` has no
+    // wildcard arm, so a new variant fails to compile until it is listed, and
+    // the coverage check fails until it has a case.
+    #[test]
+    fn every_sequence_fetch_error_variant_is_classified() {
+        use crate::retry::Retryable;
+
+        fn variant(err: &SequenceFetchError) -> &'static str {
+            match err {
+                SequenceFetchError::Network(_) => "Network",
+                SequenceFetchError::MissingOrInvalid(_) => "MissingOrInvalid",
+            }
+        }
+        let cases = [
+            (SequenceFetchError::Network("x".into()), true),
+            (SequenceFetchError::MissingOrInvalid("x".into()), false),
+        ];
+        let seen: std::collections::HashSet<_> = cases.iter().map(|(e, _)| variant(e)).collect();
+        assert_eq!(seen.len(), 2);
+        for (err, expected) in &cases {
+            assert_eq!(err.is_retryable(), *expected, "{err:?}");
+        }
+    }
+
+    #[test]
+    fn every_simulate_error_variant_is_classified() {
+        use crate::retry::Retryable;
+        use crate::stellar_rpc::RpcError;
+
+        fn variant(err: &SimulateError) -> &'static str {
+            match err {
+                SimulateError::Build(_) => "Build",
+                SimulateError::Transport(_) => "Transport",
+                SimulateError::Response(_) => "Response",
+                SimulateError::Simulation(_) => "Simulation",
+            }
+        }
+        let cases = [
+            (SimulateError::Build("x".into()), false),
+            (SimulateError::Transport(RpcError::NetworkError("x".into())), true),
+            (SimulateError::Transport(RpcError::JsonError("x".into())), false),
+            (SimulateError::Response("x".into()), false),
+            (SimulateError::Simulation("x".into()), false),
+        ];
+        let seen: std::collections::HashSet<_> = cases.iter().map(|(e, _)| variant(e)).collect();
+        assert_eq!(seen.len(), 4);
+        for (err, expected) in &cases {
+            assert_eq!(err.is_retryable(), *expected, "{err:?}");
+        }
+    }
 
     #[test]
     fn post_set_prices_settle_stays_small_fraction_of_cycle_budget() {
