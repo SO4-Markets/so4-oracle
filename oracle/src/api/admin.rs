@@ -20,6 +20,11 @@ use crate::state::{AppState, CachedPrice, FailedSubmission};
 const KEEPER_BALANCE_RETRY_ATTEMPTS: u32 = 3;
 const KEEPER_BALANCE_RETRY_BASE_DELAY_MS: u64 = 100;
 
+/// Upper bound on the external (Horizon) work an admin handler does, retries
+/// included (#1452). Below the global request timeout, so the handler — not
+/// the outer 408 layer — decides what the caller sees when upstream is slow.
+pub(crate) const ADMIN_EXTERNAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[derive(Debug, Serialize)]
 pub struct OracleStatusResponse {
     pub last_cycle_time: Option<u64>,
@@ -103,15 +108,24 @@ pub async fn oracle_status(
         min_balance_xlm: state.config.min_keeper_balance_xlm,
     };
 
-    let keeper_balance = crate::retry::retry_with_backoff(
+    let lookup = crate::retry::retry_with_backoff(
         || crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min),
         KEEPER_BALANCE_RETRY_ATTEMPTS,
         KEEPER_BALANCE_RETRY_BASE_DELAY_MS,
         crate::retry::MAX_BACKOFF_DELAY_MS,
+    );
+    // Over budget is reported like any other lookup failure: no balance.
+    let keeper_balance = tokio::time::timeout(ADMIN_EXTERNAL_BUDGET, lookup)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|stroops| stroops as f64 / crate::keeper::XLM_IN_STROOPS as f64);
     )
     .await
     .ok()
-    .map(|stroops| stroops as f64 / crate::keeper::XLM_IN_STROOPS as f64);
+    // Spendable balance, net of the account reserve, the same figure
+    // /keeper/balance reports and the minimum is checked against (#1447).
+    .map(|balance| crate::keeper::stroops_to_xlm(balance.spendable_stroops));
 
     Json(OracleStatusResponse {
         last_cycle_time,
@@ -317,17 +331,23 @@ pub async fn keeper_balance(
         min_balance_xlm: state.config.min_keeper_balance_xlm,
     };
 
-    let result = crate::retry::retry_with_backoff(
+    let lookup = crate::retry::retry_with_backoff(
         || crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min),
         KEEPER_BALANCE_RETRY_ATTEMPTS,
         KEEPER_BALANCE_RETRY_BASE_DELAY_MS,
         crate::retry::MAX_BACKOFF_DELAY_MS,
-    )
-    .await;
+    );
+    let Ok(result) = tokio::time::timeout(ADMIN_EXTERNAL_BUDGET, lookup).await else {
+        tracing::warn!(
+            budget_secs = ADMIN_EXTERNAL_BUDGET.as_secs(),
+            "keeper balance lookup exceeded its budget"
+        );
+        return Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"));
+    };
 
     match result {
-        Ok(stroops) => {
-            let response = crate::keeper::build_balance_response(&keeper_cfg, stroops);
+        Ok(balance) => {
+            let response = crate::keeper::build_balance_response(&keeper_cfg, balance);
             Ok(Json(BalanceResponse {
                 account_id: response.account_id,
                 balance_stroops: response.balance_stroops,
@@ -405,5 +425,160 @@ mod tests {
         assert!(body.is_funded);
         assert_eq!(body.balance_stroops, 200_000_000);
         assert_eq!(request_count.load(Ordering::SeqCst), 2);
+    }
+
+    // ── #1414: handler-level coverage ────────────────────────────────────
+
+    /// State whose Horizon URL refuses connections immediately, so handlers
+    /// that check the keeper balance fail fast instead of reaching a network.
+    fn offline_state() -> Arc<AppState> {
+        let mut config = Config::default_for_tests();
+        config.horizon_url = "http://127.0.0.1:9".to_string();
+        Arc::new(AppState::new(Arc::new(config)))
+    }
+
+    fn failure(operation: String) -> FailedSubmission {
+        FailedSubmission {
+            at: SystemTime::now(),
+            operation,
+            network: "testnet".to_string(),
+            token: String::new(),
+            symbol: String::new(),
+            source: None,
+            min: 0,
+            max: 0,
+            tx_hash: None,
+            error: "boom".to_string(),
+            timestamp: 0,
+            ledger_seq: 0,
+        }
+    }
+
+    fn execution(key: String) -> crate::state::KeeperExecution {
+        crate::state::KeeperExecution {
+            timestamp: SystemTime::now(),
+            operation: "execute_order".to_string(),
+            key,
+            tx_hash: None,
+            success: true,
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn oracle_status_caps_recent_errors_newest_first_and_reports_counters() {
+        let state = offline_state();
+        {
+            let mut failures = state.failures.lock().await;
+            for i in 0..25 {
+                failures.push(failure(format!("op-{i}")));
+            }
+        }
+        state.metrics.record_price_cycle(10, 1, 0);
+        state.metrics.record_submit_failure();
+
+        let Json(body) = oracle_status(AdminAuth, State(Arc::clone(&state))).await;
+
+        assert_eq!(body.recent_errors.len(), 20);
+        assert_eq!(body.recent_errors[0].operation, "op-24");
+        assert_eq!(body.recent_errors[19].operation, "op-5");
+        assert_eq!(body.price_cycle_count, 1);
+        assert_eq!(body.submit_failures, 1);
+        assert_eq!(body.keeper_balance, None, "Horizon is unreachable");
+    }
+
+    #[tokio::test]
+    async fn keeper_status_caps_executions_and_lists_blacklisted_keys() {
+        let state = offline_state();
+        {
+            let mut status = state.keeper_status.write().await;
+            for i in 0..60 {
+                let entry = execution(format!("k-{i}"));
+                status.last_executions.push_back(entry);
+            }
+        }
+        state
+            .frozen_order_blacklist
+            .lock()
+            .await
+            .insert("stuck".to_string(), 3);
+
+        let Json(body) = keeper_status(AdminAuth, State(Arc::clone(&state))).await;
+
+        assert_eq!(body.last_executions.len(), 50);
+        assert_eq!(body.last_executions[0].key, "k-59");
+        assert_eq!(body.blacklisted_keys.len(), 1);
+        assert_eq!(body.blacklisted_keys[0].key, "stuck");
+        assert_eq!(body.blacklisted_keys[0].consecutive_failures, 3);
+    }
+
+    #[tokio::test]
+    async fn clear_blacklisted_key_404s_for_an_unknown_key() {
+        let state = offline_state();
+
+        let path = Path("nope".to_string());
+        let result = clear_blacklisted_key(AdminAuth, State(state), path).await;
+
+        let error = result.expect_err("unknown key must not be cleared");
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.message, "key_not_blacklisted");
+    }
+
+    // #887 — clearing must reset all three per-key maps, or the key is
+    // re-blacklisted after a single further failure.
+    #[tokio::test]
+    async fn clear_blacklisted_key_clears_all_three_maps() {
+        let state = offline_state();
+        let key = "order-1".to_string();
+        {
+            let mut blacklist = state.frozen_order_blacklist.lock().await;
+            blacklist.insert(key.clone(), 5);
+            let mut freezes = state.freeze_failure_counts.lock().await;
+            freezes.insert(key.clone(), 5);
+            let mut executions = state.execution_failure_counts.lock().await;
+            executions.insert(key.clone(), 2);
+        }
+
+        let handler_state = State(Arc::clone(&state));
+        let path = Path(key.clone());
+        let result = clear_blacklisted_key(AdminAuth, handler_state, path).await;
+        let Json(body) = result.expect("blacklisted key clears");
+
+        assert!(body.cleared);
+        assert_eq!(body.key, key);
+        let blacklist = state.frozen_order_blacklist.lock().await;
+        let freezes = state.freeze_failure_counts.lock().await;
+        let executions = state.execution_failure_counts.lock().await;
+        assert!(!blacklist.contains_key(&key));
+        assert!(!freezes.contains_key(&key));
+        assert!(!executions.contains_key(&key));
+    }
+
+    // #1267 — the gauges appended after `to_prometheus` are part of the
+    // endpoint's contract, as is the Prometheus text content type.
+    #[tokio::test]
+    async fn metrics_sets_content_type_and_appends_state_gauges() {
+        let state = offline_state();
+
+        let response = metrics(AdminAuth, State(state)).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        for gauge in [
+            "oracle_keeper_balance_below_min 0",
+            "oracle_last_set_prices_timestamp_seconds 0",
+            "oracle_pending_keys{kind=\"orders\"} 0",
+            "oracle_in_flight_keys 0",
+            "oracle_blacklisted_keys 0",
+        ] {
+            assert!(body.contains(gauge), "missing {gauge:?} in:\n{body}");
+        }
     }
 }

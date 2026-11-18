@@ -96,64 +96,21 @@ NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 STELLAR_RPC_URL=https://soroban-testnet.stellar.org
 ```
 
-## Required Environment Variables.
+## Required Environment Variables
 
-The names below are the exact names the binary reads at startup via
-`Config::from_env()`. Using any other name (e.g. `ORDER_HANDLER_CONTRACT_ID`)
-will silently be ignored and the process will exit with a "required env var
-not set" error (#499).
+Every variable the binary reads — name, whether it is required, its default
+and what it does — is listed in **[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)**,
+the single reference (CI checks it against the code). Start from
+`.env.example`:
 
 ```bash
-# Network configuration
-STELLAR_NETWORK=testnet           # "testnet" (default) or "mainnet"
-STELLAR_RPC_URL=https://soroban-testnet.stellar.org  # required on mainnet; optional on testnet
-HORIZON_URL=https://horizon-testnet.stellar.org      # optional; defaults to network default
-
-# Contract IDs — use the short names exactly as shown
-ORACLE_CONTRACT_ID=CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY
-ORDER_HANDLER=CC35OFZVWUTAZPV3B6UKSDVAVORZEWUUMOMTHO33H4YR4C5FKPEFODKY
-DEPOSIT_HANDLER=CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C
-WITHDRAWAL_HANDLER=CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE
-READER=CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC
-DATA_STORE=CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J
-ROLE_STORE=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q
-
-# Keeper configuration
-KEEPER_PRIVATE_KEY=<64-hex-char ed25519 private key>
-KEEPER_SECRET_KEY=<S...-strkey seed>
-KEEPER_ACCOUNT_ID=<G...-public key>
-KEEPER_INDEX=0
-MIN_KEEPER_BALANCE_XLM=10
-# Optional inclusion fees (stroops); defaults match historical hardcoded values
-SET_PRICES_TX_FEE=1000000
-KEEPER_TX_FEE=2000000
-
-# API configuration
-BIND_ADDR=0.0.0.0:8080
-ADMIN_API_TOKEN=<optional admin token>
-
-# Loop intervals (milliseconds)
-PRICE_LOOP_MS=1000
-KEEPER_LOOP_MS=1500
-
-# Logging (optional)
-RUST_LOG=info                     # tracing EnvFilter, e.g. oracle=debug,tower_http=debug
-LOG_FORMAT=json                   # "json" (default) or "pretty" for local development
-
-# Price feed configuration (optional; falls back to embedded config/tokens.json).
-# Must be an inline JSON string — NOT a file path. Pass the JSON directly or
-# read a file at startup:
-#   PRICE_FEED_CONFIG="$(cat /path/to/tokens.json)"
-# Example with a single token entry:
-PRICE_FEED_CONFIG='[{"symbol":"TUSDC","display_symbol":"USDC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES"}]'
-
-# Pyth authentication (optional now, mandatory once Pyth enforces auth)
-# PYTH_API_KEY=<your-pyth-api-key>
+cp .env.example .env   # then fill in the contract IDs and keeper keys
 ```
 
-> **Note:** `NETWORK_PASSPHRASE` is not read by the binary — the correct
-> passphrase is selected automatically based on `STELLAR_NETWORK`. You do
-> not need to set it.
+Names are read verbatim: a near-miss such as `ORDER_HANDLER_CONTRACT_ID` is
+silently ignored and the process exits with a "required env var not set"
+error (#499). `NETWORK_PASSPHRASE` is not read — the passphrase follows
+`STELLAR_NETWORK`.
 
 ## Development
 
@@ -260,12 +217,24 @@ fly deploy
 Non-secret settings (network, contract IDs, `KEEPER_ACCOUNT_ID`, loop
 intervals, fees) live in `fly.toml`'s `[env]`; edit the `YOUR_…` placeholders there.
 
+> **Both manifests must be edited before the first deploy (#1427).** Every
+> `YOUR_…` value in `fly.toml` and `railway.json` is a placeholder that
+> `Config::from_env()` rejects (`STELLAR_NETWORK` must be `testnet` or
+> `mainnet`, contract IDs and `KEEPER_ACCOUNT_ID` must be valid strkeys), so
+> deploying a manifest as committed starts a container that exits at boot and
+> is restarted in a loop (`min_machines_running = 1` on Fly,
+> `restartPolicyMaxRetries: 100` on Railway). The boot log names the first
+> invalid variable.
+
 ### Railway
 
 ```bash
 # Deploy to Railway
 railway up
 ```
+
+Replace every `YOUR_…` placeholder in `railway.json`'s `variables` first (or
+override it in the dashboard) — see the boot-loop note under Fly.io above.
 
 `railway.json` only carries non-secret variables. Add `KEEPER_PRIVATE_KEY`,
 `KEEPER_SECRET_KEY`, `ADMIN_API_TOKEN` (and optionally `PYTH_API_KEY`) in the
@@ -279,6 +248,8 @@ to `railway.json`, which is committed to the repo.
 
 ## Documentation
 
+- [docs/README.md](docs/README.md) — index of everything under `docs/`
+- [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) — every environment variable, its default and whether it is required
 - [docs/RUNBOOK.md](docs/RUNBOOK.md) — operator runbook: symptoms, diagnosis, remediation
 - [docs/KEEPER_STATE_MACHINE.md](docs/KEEPER_STATE_MACHINE.md) — the keeper failure state machine
 - [docs/RISK_MECHANICS.md](docs/RISK_MECHANICS.md) — design-only reference for the external liquidation/ADL/insurance-fund contracts (not implemented in this service)

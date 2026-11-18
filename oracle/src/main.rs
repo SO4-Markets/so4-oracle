@@ -23,6 +23,11 @@ async fn main() {
             tracing::warn!(%error, "failed to load .env file; using process environment only");
         }
     }
+    // `oracle --health-check` is the Docker HEALTHCHECK (#1431), so the
+    // runtime image needs no curl. It only probes the running instance.
+    if std::env::args().nth(1).as_deref() == Some("--health-check") {
+        std::process::exit(health_check().await);
+    }
     init_tracing();
 
     let config = match Config::from_env() {
@@ -263,9 +268,42 @@ async fn shutdown_signal(token: CancellationToken) {
     token.cancel();
 }
 
+/// URL the `--health-check` probe calls: `/health` on loopback at the
+/// `BIND_ADDR` port, falling back to the default port when unset or invalid.
+fn health_check_url(bind_addr: Option<&str>) -> String {
+    let port = bind_addr
+        .unwrap_or(oracle::config::DEFAULT_BIND_ADDR)
+        .parse::<std::net::SocketAddr>()
+        .map_or(8080, |addr| addr.port());
+    format!("http://127.0.0.1:{port}/health")
+}
+
+/// Exit code for `--health-check`: 0 when `/health` answers 2xx, 1 otherwise.
+async fn health_check() -> i32 {
+    let url = health_check_url(std::env::var("BIND_ADDR").ok().as_deref());
+    match oracle::http::client().get(&url).send().await {
+        Ok(response) if response.status().is_success() => 0,
+        _ => 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{drain_background_tasks, drain_timeout, use_pretty_logs, BackgroundTask};
+    use super::{health_check_url, use_pretty_logs};
+
+    #[test]
+    fn health_check_targets_loopback_on_the_bind_port() {
+        assert_eq!(health_check_url(None), "http://127.0.0.1:8080/health");
+        assert_eq!(
+            health_check_url(Some("0.0.0.0:9090")),
+            "http://127.0.0.1:9090/health"
+        );
+        assert_eq!(
+            health_check_url(Some("not-an-addr")),
+            "http://127.0.0.1:8080/health"
+        );
+    }
 
     #[test]
     fn log_format_defaults_to_json() {

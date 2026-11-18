@@ -1,5 +1,6 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
+  "_comment": "SECRETS ARE NOT SET HERE (#1232, #1428). This file is committed to git and shown in the Railway dashboard, so the keeper signing keys (KEEPER_PRIVATE_KEY, KEEPER_SECRET_KEY), the admin token (ADMIN_API_TOKEN) and the optional PYTH_API_KEY are dashboard-only: add them under the service Variables tab and mark each one Sealed (README.md, Deployment > Railway). CI's manifest-secrets job fails if any of them is assigned under variables. Railway ignores this key.",
   "build": {
     "builder": "DOCKERFILE",
     "dockerfilePath": "Dockerfile"

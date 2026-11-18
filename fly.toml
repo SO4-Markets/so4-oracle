@@ -6,6 +6,9 @@ primary_region = 'iad'
 
 [env]
   BIND_ADDR = '0.0.0.0:8080'
+  # Every 'YOUR_...' value below is a placeholder the config layer rejects:
+  # deploying this file unedited boot-loops the machine (#1427). Replace them
+  # all before the first `fly deploy`.
   # REQUIRED: override this for your target network before deploying.
   # The network passphrase is derived automatically from STELLAR_NETWORK
   # (see oracle/src/config.rs) — it is not read from the environment.
@@ -48,7 +51,12 @@ primary_region = 'iad'
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = true
+  # Never stop this Machine (#1429). Fly's autostop is driven by inbound HTTP
+  # concurrency, but this service's real work — the price and keeper loops —
+  # makes no inbound requests at all. A stop/start would also wipe the
+  # keeper's in-process state (in_flight_keys, freeze/blacklist counters), so
+  # the Machine must be long-lived, not suspended between health checks.
+  auto_stop_machines = false
   auto_start_machines = true
   # This only guarantees at least one machine stays up (so autostop doesn't
   # suspend it to zero) — it does NOT cap the count. Do not run

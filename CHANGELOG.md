@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+No version has been released or tagged yet (#1435). `version = "0.1.0"` in
+`Cargo.toml` is the pre-release placeholder, not a published release; the
+first tag should be cut from a commit whose CI is green. Until then every
+entry below is on `main` but unreleased.
+
+Each PR that changes behaviour, configuration or deployment adds a line here
+under `[Unreleased]` (see `AGENTS.md` §3).
+
 ## [Unreleased]
 
 ### Added
@@ -19,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `oracle_http_request_duration_seconds` histogram, which were recorded but
   never emitted
 - `SubmitError::may_still_confirm` and `SubmitError::diagnostic_events`
+- `docs/ENVIRONMENT.md`, the single environment-variable reference, and the `env-docs` CI job (`scripts/check-env-docs.sh`) that checks it against the code (#1432)
+- `docs/README.md` index linked from `README.md`; plan documents carry a `Status:` line and `plan.md` moved to `docs/REWRITE_PLAN.md` (#1433, #1434)
 
 ### Fixed
 - The keeper's in-flight-key decision now branches on the `SubmitError`
@@ -34,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (RUSTSEC-2026-0258); `cargo deny check advisories` is now clean
 - `oracle` crate declares its license, so `cargo deny check licenses` passes
 - `ConfigError` derives `Clone`/`Eq` so it can be embedded in `EnvError`
+- `keeper_loop::record_error` now records the transaction hash for post-submission failures (poll timeouts) instead of always storing `None`, so `/oracle/failed-submissions` exposes a hash to look up on a block explorer for ambiguous outcomes (#721)
+- Binance, Coinbase, and Pyth HTTP 429 responses are now classified as retryable (matching `RpcError`), so a rate limit triggers backoff and a retry instead of permanently abandoning the price source for the cycle (#708)
+- `oracle.service` start limit raised from 3 restarts per 60s to 50 per 300s and moved to the `[Unit]` section, so a crash loop no longer leaves the oracle permanently down pending a manual `systemctl reset-failed` (#544)
 
 ### Changed
 - `TokenConfig.min` and `TokenConfig.max` removed. They were documented as
@@ -46,30 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Metrics::record_keeper_cycle` takes a `KeeperCycleTally` instead of seven
   positional arguments
 
-### Fixed
-- `keeper_loop::record_error` now records the transaction hash for post-submission failures (poll timeouts) instead of always storing `None`, so `/oracle/failed-submissions` exposes a hash to look up on a block explorer for ambiguous outcomes (#721)
-- Binance, Coinbase, and Pyth HTTP 429 responses are now classified as retryable (matching `RpcError`), so a rate limit triggers backoff and a retry instead of permanently abandoning the price source for the cycle (#708)
-- `oracle.service` start limit raised from 3 restarts per 60s to 50 per 300s and moved to the `[Unit]` section, so a crash loop no longer leaves the oracle permanently down pending a manual `systemctl reset-failed` (#544)
-
 ### Tests
 - Added coverage for `validate_pyth_price` rejecting a malformed (non-numeric) `conf` field, previously unexercised (#712)
 - Added coverage for 429/5xx/4xx retry classification in `BinancePriceError`, `CoinbasePriceError`, and `PythPriceError`, plus poll-timeout hash recovery and `record_error` hash storage in the keeper loop (#708, #721)
-
-## [0.1.0] - 2026-09-25
-
-### Added
-- Initial release of SO4 Oracle
-- Price fetching and aggregation from multiple sources (Binance, Coinbase, Pyth)
-- Keeper loop for executing pending orders, deposits, and withdrawals on-chain
-- HTTP API for price feeds and operational endpoints
-- Structured JSON request logging with request IDs
-- Prometheus metrics at `/metrics`
-- Admin API with optional bearer-token authentication (`ADMIN_API_TOKEN`)
-- Docker, systemd, Fly.io, and Railway deployment support
-
-### Fixed
-- Keeper retry and restart logic
-- Price aggregation edge cases
-
-[Unreleased]: https://github.com/SO4-Markets/so4-oracle/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/SO4-Markets/so4-oracle/releases/tag/v0.1.0

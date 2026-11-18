@@ -997,6 +997,48 @@ mod tests {
             .expect("config/tokens.json must parse with valid contract strkeys");
     }
 
+    /// #1443 — the committed tokens.json is the price-feed fallback whenever
+    /// PRICE_FEED_CONFIG is unset, and is only parsed at boot. These are the
+    /// invariants a bad edit would break while still compiling cleanly.
+    #[test]
+    fn embedded_tokens_json_invariants() {
+        let config = parse_price_feed_config(include_str!("../../config/tokens.json"))
+            .expect("config/tokens.json must parse");
+        assert!(!config.tokens.is_empty(), "tokens.json lists no tokens");
+
+        let mut symbols = std::collections::HashSet::new();
+        let mut addresses = std::collections::HashSet::new();
+        for token in &config.tokens {
+            let symbol = &token.symbol;
+            assert!(symbols.insert(symbol.clone()), "duplicate symbol {symbol}");
+            assert!(
+                addresses.insert(token.stellar_address.clone()),
+                "duplicate stellar_address for {symbol}"
+            );
+            assert!(
+                token.min_sources >= 1 && token.min_sources <= token.sources.len(),
+                "{symbol}: min_sources {} must be between 1 and its {} sources",
+                token.min_sources,
+                token.sources.len()
+            );
+
+            if token.sources.iter().any(|source| source == "fixed") {
+                let Some(raw) = token.fixed_price.as_deref() else {
+                    panic!("{symbol}: uses the fixed source but has no fixed_price");
+                };
+                let price: i128 = raw.parse().expect("fixed_price must be an integer");
+                // 1e30 precision: anything outside $0.000001..$1,000,000 is a
+                // wrong number of zeros, not a real price.
+                let min = crate::FLOAT_PRECISION / 1_000_000;
+                let max = crate::FLOAT_PRECISION * 1_000_000;
+                assert!(
+                    (min..=max).contains(&price),
+                    "{symbol}: fixed_price {raw} is outside the expected 1e30-scaled range"
+                );
+            }
+        }
+    }
+
     #[test]
     fn reject_token_with_empty_sources() {
         let json = r#"[{"symbol":"BTC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":[]}]"#;

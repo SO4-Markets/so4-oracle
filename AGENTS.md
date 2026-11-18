@@ -31,6 +31,7 @@ If the `Dockerfile` or dependencies changed, you must also run:
 - Use imperative, present-tense titles.
 - The PR body must cover: what changed, why, how it was verified (pasted command output), and the linked issue.
 - Every PR states which of the gate commands were run and their results. No PR is opened for work that has not been run.
+- Every PR that changes behaviour, configuration or deployment adds an entry under `[Unreleased]` in `CHANGELOG.md` (#1435).
 
 ## 4. Repository-Specific Traps
 - **Environment Variables**: Read verbatim by `Config::from_env()`. A near-miss like `ORDER_HANDLER_CONTRACT_ID` is silently ignored and the process exits.

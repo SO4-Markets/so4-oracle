@@ -136,8 +136,7 @@ pub(crate) async fn fetch_spot_prices_with_url(
     symbols: &[String],
 ) -> Result<Vec<(String, i128)>, BinancePriceError> {
     let url = build_spot_price_url_for(base_url, symbols);
-    let response = crate::http::client()
-        .get(&url)
+    let response = crate::http::with_correlation(crate::http::client().get(&url))
         .send()
         .await
         .map_err(|err| BinancePriceError::NetworkError(err.to_string()))?;

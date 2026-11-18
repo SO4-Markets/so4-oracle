@@ -12,41 +12,8 @@ variable name.
 
 ## Required Environment
 
-- `ORACLE_CONTRACT_ID` or `ORACLE`
-- `ROLE_STORE`
-- `DATA_STORE`
-- `ORDER_HANDLER`
-- `DEPOSIT_HANDLER`
-- `WITHDRAWAL_HANDLER`
-- `READER`
-- `KEEPER_PRIVATE_KEY`
-- `KEEPER_SECRET_KEY`
-- `KEEPER_ACCOUNT_ID`
-
-Optional defaults:
-
-- `ADMIN_API_TOKEN` — when unset, admin-only endpoints (e.g.
-  `/oracle/failed-submissions`) respond `503`; when set, they require
-  `Authorization: Bearer <token>`. Must be at least 32 characters (the
-  `.env.example` placeholder is rejected at startup); repeated failed attempts
-  from one client are throttled with `429`
-- `PYTH_API_KEY` — optional API key for Pyth price feeds
-
-- `BIND_ADDR=0.0.0.0:8080`
-- `STELLAR_NETWORK=testnet`
-- `STELLAR_RPC_URL=https://soroban-testnet.stellar.org` on testnet
-- `HORIZON_URL=https://horizon-testnet.stellar.org` on testnet
-- `PRICE_LOOP_MS=1000`
-- `KEEPER_LOOP_MS=1500`
-- `KEEPER_INDEX=0`
-- `MIN_KEEPER_BALANCE_XLM=10`
-- `SET_PRICES_TX_FEE=1000000` — inclusion fee (stroops) for set_prices transactions
-- `KEEPER_TX_FEE=2000000` — inclusion fee (stroops) for keeper execution transactions
-- `PRICE_FEED_CONFIG`, otherwise `config/tokens.json` is embedded
-- `RUST_LOG=info` — tracing `EnvFilter`; e.g. `oracle=debug,tower_http=debug`
-  turns on the balance and health-probe `debug!` lines
-- `LOG_FORMAT=json` — set `pretty` for human-readable output when running locally
-
+Every variable, its default and whether it is required is listed in
+[docs/ENVIRONMENT.md](../docs/ENVIRONMENT.md), the single reference (#1432).
 For mainnet, `STELLAR_RPC_URL` and `ORACLE_CONTRACT_ID` must be explicit.
 
 ## Endpoints
@@ -75,6 +42,30 @@ filtered by operation-name prefix when `?operation=` is given, at most
 The `readme_endpoint_table_covers_every_route` test in `oracle/src/api/mod.rs`
 parses this table and fails if any route registered in `build_router` is
 missing from it.
+
+### Timeouts and limits
+
+Request deadlines nest, innermost first (#1452). Platform health-check
+timeouts (`fly.toml`, `railway.json`) should sit above the probe's own budget
+and at or below the global timeout, so the handler's answer is the one the
+platform sees:
+
+| Scope                          | Budget | Where                                                                                                   |
+| ------------------------------ | ------ | ------------------------------------------------------------------------------------------------------- |
+| `/ready` external checks       | 15s    | `READY_CHECK_TIMEOUT_SECS` (`api/prices.rs`)                                                            |
+| Admin Horizon lookups, retries | 20s    | `ADMIN_EXTERNAL_BUDGET` (`api/admin.rs`); `/keeper/balance` answers `504 {"error":"upstream_timeout"}` |
+| Every request                  | 30s    | `REQUEST_TIMEOUT` (`api/mod.rs`); `408` when exceeded                                                   |
+
+The global timeout is checked at compile time to stay above both budgets.
+`/health` and `/ready` sit outside the concurrency limit (512 in-flight
+requests) and are not recorded in the HTTP request metrics, so a load spike or
+a probe flood cannot take the liveness probe down or contend on the metrics
+lock (#1453, #1454).
+
+Every response carries an `x-request-id`, and the outbound RPC, Horizon and
+price-source calls made while serving it send the same id. Background price
+and keeper cycles generate their own `cycle_id`, record it on every log line
+of the cycle, and send that instead (#1455).
 
 ## Smoke Check
 
