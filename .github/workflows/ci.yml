@@ -29,6 +29,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Prove the check can fail before trusting a pass (#1439).
+      - run: bash scripts/check-manifest-secrets.sh --self-test
       - run: bash scripts/check-manifest-secrets.sh
       - run: bash scripts/check-manifest-env.sh
 
@@ -86,7 +88,8 @@ jobs:
           toolchain: ${{ env.MSRV }}
           components: rustfmt
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo fmt --all -- --check
+      # Gate commands are defined once, in the Makefile (#1437).
+      - run: make fmt-check
 
   clippy:
     name: clippy
@@ -99,7 +102,7 @@ jobs:
           toolchain: ${{ env.MSRV }}
           components: clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: make clippy
 
   test:
     name: cargo test
@@ -120,7 +123,7 @@ jobs:
           wget -q https://github.com/prometheus/prometheus/releases/download/v2.53.1/prometheus-2.53.1.linux-amd64.tar.gz
           tar xzf prometheus-2.53.1.linux-amd64.tar.gz
           sudo cp prometheus-2.53.1.linux-amd64/promtool /usr/local/bin/
-      - run: cargo test --all --locked
+      - run: make test
 
   build:
     name: release build
@@ -132,7 +135,7 @@ jobs:
         with:
           toolchain: ${{ env.MSRV }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo build --release --all --locked
+      - run: make release
 
   audit:
     name: cargo audit
