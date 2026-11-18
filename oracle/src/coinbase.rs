@@ -43,14 +43,12 @@ impl std::error::Error for CoinbasePriceError {}
 impl crate::retry::Retryable for CoinbasePriceError {
     fn is_retryable(&self) -> bool {
         match self {
-            // Network errors, 5xx HTTP errors, and 429 rate limits are
-            // transient. Coinbase rate-limits aggressively and signals it
-            // with 429, which is < 500 and would otherwise be classified as a
-            // permanent failure — giving up on the source for the rest of the
-            // cycle instead of backing off (#708). Matches RpcError's
-            // classification in stellar_rpc.rs.
+            // Network errors and transient HTTP statuses (408/425/429/5xx)
+            // are retried. Coinbase rate-limits aggressively with 429 (#708);
+            // the status table is shared with every other source via
+            // is_transient_http_status (#1448).
             Self::NetworkError(_) => true,
-            Self::HttpError { status, .. } => *status >= 500 || *status == 429,
+            Self::HttpError { status, .. } => crate::retry::is_transient_http_status(*status),
             // Parse/JSON/config errors are permanent failures
             Self::JsonError(_) | Self::PriceParseError(_) | Self::MissingUsdRate => false,
             // Currency mismatch should not be retried - it's a data integrity issue
@@ -191,6 +189,46 @@ mod tests {
     use super::*;
     use crate::binance::FLOAT_PRECISION;
     use crate::retry::Retryable;
+
+    // #1449 — every variant is classified on purpose. `variant` has no
+    // wildcard arm, so a new variant fails to compile until it is listed, and
+    // the coverage check fails until it has a case.
+    #[test]
+    fn every_variant_is_classified() {
+        fn variant(err: &CoinbasePriceError) -> &'static str {
+            match err {
+                CoinbasePriceError::NetworkError(_) => "NetworkError",
+                CoinbasePriceError::HttpError { .. } => "HttpError",
+                CoinbasePriceError::JsonError(_) => "JsonError",
+                CoinbasePriceError::PriceParseError(_) => "PriceParseError",
+                CoinbasePriceError::MissingUsdRate => "MissingUsdRate",
+                CoinbasePriceError::CurrencyMismatch { .. } => "CurrencyMismatch",
+            }
+        }
+        let http = |status| CoinbasePriceError::HttpError {
+            status,
+            body: String::new(),
+        };
+        let mismatch = CoinbasePriceError::CurrencyMismatch {
+            expected: "BTC".into(),
+            got: "ETH".into(),
+        };
+        let cases = [
+            (CoinbasePriceError::NetworkError("x".into()), true),
+            (http(429), true),
+            (http(503), true),
+            (http(404), false),
+            (CoinbasePriceError::JsonError("x".into()), false),
+            (CoinbasePriceError::PriceParseError("x".into()), false),
+            (CoinbasePriceError::MissingUsdRate, false),
+            (mismatch, false),
+        ];
+        let seen: std::collections::HashSet<_> = cases.iter().map(|(e, _)| variant(e)).collect();
+        assert_eq!(seen.len(), 6);
+        for (err, expected) in &cases {
+            assert_eq!(err.is_retryable(), *expected, "{err:?}");
+        }
+    }
 
     // #708 — a 429 from Coinbase means "slow down", not "give up". It must be
     // retried with backoff instead of being classified as a permanent failure.

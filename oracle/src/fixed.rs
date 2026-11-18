@@ -42,6 +42,30 @@ pub fn fixed_price(token: &TokenConfig) -> Result<i128, FixedPriceError> {
 mod tests {
     use super::*;
 
+    // #1449 — every variant is classified on purpose. `variant` has no
+    // wildcard arm, so a new variant fails to compile until it is listed, and
+    // the coverage check fails until it has a case.
+    #[test]
+    fn every_variant_is_classified() {
+        use crate::retry::Retryable;
+
+        fn variant(err: &FixedPriceError) -> &'static str {
+            match err {
+                FixedPriceError::MissingFixedPrice => "MissingFixedPrice",
+                FixedPriceError::InvalidFixedPrice(_) => "InvalidFixedPrice",
+            }
+        }
+        let cases = [
+            (FixedPriceError::MissingFixedPrice, false),
+            (FixedPriceError::InvalidFixedPrice("x".into()), false),
+        ];
+        let seen: std::collections::HashSet<_> = cases.iter().map(|(e, _)| variant(e)).collect();
+        assert_eq!(seen.len(), 2);
+        for (err, expected) in &cases {
+            assert_eq!(err.is_retryable(), *expected, "{err:?}");
+        }
+    }
+
     fn token_with_fixed_price(fixed_price: Option<&str>) -> TokenConfig {
         TokenConfig {
             symbol: "TUSDC".to_string(),

@@ -33,6 +33,25 @@ pub enum PriceSourceError {
     Unsupported(String),
 }
 
+/// A price-source failure tagged with the source and token it came from, set
+/// where the error is raised so the failure metric and the failure ring read
+/// one identity instead of a parallel argument list (#1450).
+#[derive(Debug, Clone)]
+pub struct SourceFailure {
+    pub source: String,
+    pub symbol: String,
+    pub token: String,
+    pub error: PriceSourceError,
+}
+
+impl std::fmt::Display for SourceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
+impl std::error::Error for SourceFailure {}
+
 impl CachedPrice {
     pub fn is_stale(&self, stale_after_seconds: u64, now: u64) -> bool {
         // #1041 — when the wall clock moves backward relative to the cached
@@ -292,6 +311,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
                 let ctx = ErrorContext {
                     token: token.stellar_address.clone(),
                     symbol: token.symbol.clone(),
+                    source: None,
                     ledger_seq,
                 };
                 record_error_with_context(&state, format!("price:{}", token.symbol), error, ctx)
@@ -411,26 +431,22 @@ async fn build_cached_price(
                 observation_times.push(price_with_time.observation_time);
                 sources.push(source.clone());
             }
-            Err(error) => {
-                let error_str = error.to_string();
+            Err(failure) => {
+                let error_str = failure.to_string();
                 state.metrics.record_token_source_fetch_failure(
-                    &token.symbol,
-                    &token.stellar_address,
-                    source,
+                    &failure.symbol,
+                    &failure.token,
+                    &failure.source,
                 );
+                let operation = format!("source:{}:{}", failure.symbol, failure.source);
+                tracing::warn!(symbol = %failure.symbol, source = %failure.source, error = %error_str, "price source failed");
                 let ctx = ErrorContext {
-                    token: token.stellar_address.clone(),
-                    symbol: token.symbol.clone(),
+                    token: failure.token,
+                    symbol: failure.symbol,
+                    source: Some(failure.source),
                     ledger_seq,
                 };
-                record_error_with_context(
-                    state,
-                    format!("source:{}:{}", token.symbol, source),
-                    error_str.clone(),
-                    ctx,
-                )
-                .await;
-                tracing::warn!(symbol = %token.symbol, source = %source, error = %error_str, "price source failed");
+                record_error_with_context(state, operation, error_str, ctx).await;
             }
         }
     }
@@ -472,7 +488,7 @@ async fn fetch_source_with_retry(
     pyth_batch_failed: bool,
     binance_prices: Option<&std::collections::HashMap<String, i128>>,
     coinbase_base_url: &str,
-) -> Result<PriceWithObservationTime, PriceSourceError> {
+) -> Result<PriceWithObservationTime, SourceFailure> {
     crate::retry::retry_with_backoff(
         || async {
             fetch_source_price(
@@ -491,6 +507,12 @@ async fn fetch_source_with_retry(
         MAX_BACKOFF_DELAY_MS,
     )
     .await
+    .map_err(|error| SourceFailure {
+        source: source.to_string(),
+        symbol: token.symbol.clone(),
+        token: token.stellar_address.clone(),
+        error,
+    })
 }
 
 async fn fetch_source_price(
@@ -671,6 +693,7 @@ fn signed_cached_price(
 struct ErrorContext {
     token: String,
     symbol: String,
+    source: Option<String>,
     /// Ledger sequence in scope when the failure was recorded, if any (#726).
     /// `0` for failures that occur before any ledger sequence is known for
     /// this cycle (e.g. the `get_latest_ledger` fetch itself failing).
@@ -689,6 +712,7 @@ async fn record_error(
         ErrorContext {
             token: String::new(),
             symbol: String::new(),
+            source: None,
             ledger_seq: 0,
         },
     )
@@ -707,6 +731,7 @@ async fn record_error_with_context(
         network: state.config.network.as_str().to_string(),
         token: ctx.token,
         symbol: ctx.symbol,
+        source: ctx.source,
         min: 0,
         max: 0,
         tx_hash: None,
@@ -755,6 +780,86 @@ mod tests {
             },
         };
         Arc::new(AppState::new(Arc::new(config)))
+    }
+
+    // #1449 — every variant is classified on purpose. `variant` has no
+    // wildcard arm, so a new variant fails to compile until it is listed, and
+    // the coverage check fails until it has a case.
+    #[test]
+    fn every_price_source_error_variant_is_classified() {
+        use crate::retry::Retryable;
+
+        fn variant(err: &PriceSourceError) -> &'static str {
+            match err {
+                PriceSourceError::Binance(_) => "Binance",
+                PriceSourceError::Coinbase(_) => "Coinbase",
+                PriceSourceError::Pyth(_) => "Pyth",
+                PriceSourceError::Fixed(_) => "Fixed",
+                PriceSourceError::Config(_) => "Config",
+                PriceSourceError::Unsupported(_) => "Unsupported",
+            }
+        }
+        let binance = crate::binance::BinancePriceError::NetworkError("x".into());
+        let coinbase = crate::coinbase::CoinbasePriceError::MissingUsdRate;
+        let pyth = crate::pyth::PythPriceError::JsonError("x".into());
+        let fixed = crate::fixed::FixedPriceError::MissingFixedPrice;
+        let cases = [
+            (PriceSourceError::Binance(binance), true),
+            (PriceSourceError::Coinbase(coinbase), false),
+            (PriceSourceError::Pyth(pyth), false),
+            (PriceSourceError::Fixed(fixed), false),
+            (PriceSourceError::Config("x".into()), false),
+            (PriceSourceError::Unsupported("x".into()), false),
+        ];
+        let seen: std::collections::HashSet<_> = cases.iter().map(|(e, _)| variant(e)).collect();
+        assert_eq!(seen.len(), 6);
+        for (err, expected) in &cases {
+            assert_eq!(err.is_retryable(), *expected, "{err:?}");
+        }
+    }
+
+    // #1450 — a source failure carries its own identity, and the failure ring
+    // entry is built from it rather than from a parallel argument list.
+    #[tokio::test]
+    async fn source_failure_identity_reaches_failure_ring() {
+        let token = TokenConfig {
+            symbol: "TUSDC".to_string(),
+            display_symbol: Some("USDC".to_string()),
+            stellar_address: "CTOKEN".to_string(),
+            sources: vec!["fixed".to_string()],
+            binance_symbol: None,
+            coinbase_symbol: None,
+            pyth_feed_id: None,
+            fixed_price: None,
+            min_sources: 1,
+            max_deviation_bps: 100,
+            stale_after_seconds: 60,
+            submit_threshold_bps: 10,
+            pyth_max_confidence_bps: 100,
+        };
+        let state = test_state(token.clone());
+        let no_pyth = std::collections::HashMap::new();
+
+        let failure = fetch_source_with_retry("fixed", &token, None, &no_pyth, false, None, "")
+            .await
+            .unwrap_err();
+        assert_eq!(failure.source, "fixed");
+        assert_eq!(failure.symbol, "TUSDC");
+        assert_eq!(failure.token, "CTOKEN");
+        assert!(matches!(
+            failure.error,
+            PriceSourceError::Fixed(crate::fixed::FixedPriceError::MissingFixedPrice)
+        ));
+
+        let built = build_cached_price(&state, &token, 7, &no_pyth, false, None).await;
+        assert!(built.is_err());
+        let failures = state.failures.lock().await;
+        let entry = failures.iter().next_back().expect("source failure recorded");
+        assert_eq!(entry.operation, "source:TUSDC:fixed");
+        assert_eq!(entry.source.as_deref(), Some("fixed"));
+        assert_eq!(entry.symbol, "TUSDC");
+        assert_eq!(entry.token, "CTOKEN");
+        assert_eq!(entry.ledger_seq, 7);
     }
 
     // ── #512: run_price_loop shutdown coverage ───────────────────────────────
