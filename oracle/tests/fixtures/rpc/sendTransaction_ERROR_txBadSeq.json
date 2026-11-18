@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "status": "ERROR",
+    "hash": "d8ec9b68780314ffdfdfc2194b1b35dd27d7303c3bceaef6447e31631a1419dc",
+    "errorResultXdr": "AAAAAAAAAGT////7AAAAAA==",
+    "latestLedger": 2553980,
+    "latestLedgerCloseTime": "1700159347"
+  }
+}

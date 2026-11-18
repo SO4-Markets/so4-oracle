@@ -1,0 +1,16 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "status": "SUCCESS",
+    "txHash": "d8ec9b68780314ffdfdfc2194b1b35dd27d7303c3bceaef6447e31631a1419dc",
+    "latestLedger": 2540076,
+    "latestLedgerCloseTime": "1700086333",
+    "oldestLedger": 2538637,
+    "oldestLedgerCloseTime": "1700078796",
+    "applicationOrder": 1,
+    "feeBump": false,
+    "ledger": 2540076,
+    "createdAt": "1700086333"
+  }
+}
