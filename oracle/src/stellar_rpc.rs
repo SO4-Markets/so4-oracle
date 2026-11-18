@@ -149,8 +149,7 @@ pub async fn get_latest_ledger_sequence(rpc_url: &str) -> Result<u32, RpcError> 
 
 /// Low-level helper: POST a JSON string to the RPC URL, return the response body.
 pub(crate) async fn rpc_post(rpc_url: &str, payload: String) -> Result<String, RpcError> {
-    let response = crate::http::client()
-        .post(rpc_url)
+    let response = crate::http::with_correlation(crate::http::client().post(rpc_url))
         .header("Content-Type", "application/json")
         .body(payload)
         .send()
@@ -349,8 +348,7 @@ pub async fn get_account_balance_stroops(
 ) -> Result<i64, RpcError> {
     let url = format!("{horizon_url}/accounts/{account_id}");
 
-    let response = crate::http::client()
-        .get(&url)
+    let response = crate::http::with_correlation(crate::http::client().get(&url))
         .send()
         .await
         .map_err(|e| RpcError::NetworkError(e.to_string()))?;

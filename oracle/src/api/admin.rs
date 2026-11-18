@@ -20,6 +20,11 @@ use crate::state::{AppState, CachedPrice, FailedSubmission};
 const KEEPER_BALANCE_RETRY_ATTEMPTS: u32 = 3;
 const KEEPER_BALANCE_RETRY_BASE_DELAY_MS: u64 = 100;
 
+/// Upper bound on the external (Horizon) work an admin handler does, retries
+/// included (#1452). Below the global request timeout, so the handler — not
+/// the outer 408 layer — decides what the caller sees when upstream is slow.
+pub(crate) const ADMIN_EXTERNAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[derive(Debug, Serialize)]
 pub struct OracleStatusResponse {
     pub last_cycle_time: Option<u64>,
@@ -103,15 +108,18 @@ pub async fn oracle_status(
         min_balance_xlm: state.config.min_keeper_balance_xlm,
     };
 
-    let keeper_balance = crate::retry::retry_with_backoff(
+    let lookup = crate::retry::retry_with_backoff(
         || crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min),
         KEEPER_BALANCE_RETRY_ATTEMPTS,
         KEEPER_BALANCE_RETRY_BASE_DELAY_MS,
         crate::retry::MAX_BACKOFF_DELAY_MS,
-    )
-    .await
-    .ok()
-    .map(|stroops| stroops as f64 / crate::keeper::XLM_IN_STROOPS as f64);
+    );
+    // Over budget is reported like any other lookup failure: no balance.
+    let keeper_balance = tokio::time::timeout(ADMIN_EXTERNAL_BUDGET, lookup)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|stroops| stroops as f64 / crate::keeper::XLM_IN_STROOPS as f64);
 
     Json(OracleStatusResponse {
         last_cycle_time,
@@ -317,13 +325,19 @@ pub async fn keeper_balance(
         min_balance_xlm: state.config.min_keeper_balance_xlm,
     };
 
-    let result = crate::retry::retry_with_backoff(
+    let lookup = crate::retry::retry_with_backoff(
         || crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min),
         KEEPER_BALANCE_RETRY_ATTEMPTS,
         KEEPER_BALANCE_RETRY_BASE_DELAY_MS,
         crate::retry::MAX_BACKOFF_DELAY_MS,
-    )
-    .await;
+    );
+    let Ok(result) = tokio::time::timeout(ADMIN_EXTERNAL_BUDGET, lookup).await else {
+        tracing::warn!(
+            budget_secs = ADMIN_EXTERNAL_BUDGET.as_secs(),
+            "keeper balance lookup exceeded its budget"
+        );
+        return Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"));
+    };
 
     match result {
         Ok(stroops) => {

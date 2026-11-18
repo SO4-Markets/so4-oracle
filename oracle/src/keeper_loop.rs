@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::time::{interval, timeout, MissedTickBehavior};
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument};
 
 use crate::chain::scval;
 use crate::chain::tx_builder;
@@ -145,7 +145,17 @@ pub async fn run_keeper_loop(state: Arc<AppState>) {
     }
 }
 
+/// Runs one keeper cycle under a fresh cycle id (#1455), recorded on every log
+/// line as `cycle_id` and sent as `x-request-id` on outbound RPC calls.
 pub async fn run_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, String> {
+    let cycle_id = crate::http::new_cycle_id();
+    let span = tracing::info_span!("keeper_cycle", cycle_id = %cycle_id);
+    crate::http::with_correlation_id(cycle_id, run_keeper_cycle_inner(state))
+        .instrument(span)
+        .await
+}
+
+async fn run_keeper_cycle_inner(state: Arc<AppState>) -> Result<CycleSummary, String> {
     let started = Instant::now();
     // Open a keeper-cycle generation window. `keeper_status` and `cycle_status`
     // are both updated below (in different critical sections); bumping here and
