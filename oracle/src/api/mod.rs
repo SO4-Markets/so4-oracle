@@ -123,6 +123,7 @@ impl FromRequestParts<Arc<AppState>> for AdminAuth {
                     .unwrap_or("");
 
                 tracing::warn!(
+                    event = "admin_auth_failure",
                     route = route,
                     request_id = request_id,
                     "unauthorized admin access attempt"
@@ -134,8 +135,21 @@ impl FromRequestParts<Arc<AppState>> for AdminAuth {
     }
 }
 
-#[derive(Clone)]
-struct RouteExt(String);
+/// Response marker set by a layer on the `/health` and `/ready` routes
+/// themselves (#1459). A route-level layer is always innermost, so whether the
+/// trace layer logs a probe at `debug` no longer depends on how the outer
+/// middleware layers are ordered, and no route string is compared.
+#[derive(Clone, Copy)]
+struct ProbeRoute;
+
+async fn mark_probe_response<B>(mut response: Response<B>) -> Response<B> {
+    response.extensions_mut().insert(ProbeRoute);
+    response
+}
+
+fn is_probe_response<B>(response: &Response<B>) -> bool {
+    response.extensions().get::<ProbeRoute>().is_some()
+}
 
 async fn track_metrics(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
@@ -152,7 +166,7 @@ async fn track_metrics(
     state.metrics.inc_http_in_flight();
     let start = std::time::Instant::now();
 
-    let mut response = next.run(request).await;
+    let response = next.run(request).await;
 
     let latency = start.elapsed();
     state.metrics.dec_http_in_flight();
@@ -163,7 +177,6 @@ async fn track_metrics(
         latency.as_millis() as u64,
     );
 
-    response.extensions_mut().insert(RouteExt(path));
     response
 }
 
@@ -207,6 +220,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/prices", get(prices::prices))
         .layer(cors);
 
+    let probes = Router::new()
+        .route("/health", get(prices::health))
+        .route("/ready", get(prices::ready))
+        .layer(axum::middleware::map_response(mark_probe_response));
+
     let trace_layer = TraceLayer::new_for_http()
         .make_span_with(|request: &axum::http::Request<_>| {
             let matched_path = request
@@ -237,13 +255,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 span.record("status", status);
                 span.record("latency_ms", latency_ms);
 
-                let is_health = response
-                    .extensions()
-                    .get::<RouteExt>()
-                    .map(|ext| ext.0 == "/health" || ext.0 == "/ready")
-                    .unwrap_or(false);
-
-                if is_health {
+                if is_probe_response(response) {
                     tracing::debug!("request completed");
                 } else {
                     tracing::info!("request completed");
@@ -259,8 +271,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         );
 
     Router::new()
-        .route("/health", get(prices::health))
-        .route("/ready", get(prices::ready))
+        .merge(probes)
         .merge(public)
         .route("/oracle/status", get(admin::oracle_status))
         .route("/keeper/status", get(admin::keeper_status))
@@ -397,6 +408,26 @@ mod tests {
             response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none(),
             "admin route must not carry CORS headers"
         );
+    // #1459 — the trace layer logs a request at `debug` exactly when its
+    // response carries the probe marker. The marker must survive every outer
+    // middleware layer on /health and /ready, and appear on no other route.
+    #[tokio::test]
+    async fn only_probe_routes_are_logged_below_info() {
+        let config = Arc::new(Config::default_for_tests());
+        let state = Arc::new(AppState::new(config));
+        let app = super::build_router(state);
+
+        for (uri, is_probe) in [
+            ("/health", true),
+            ("/ready", true),
+            ("/prices", false),
+            ("/metrics", false),
+            ("/does-not-exist", false),
+        ] {
+            let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(super::is_probe_response(&response), is_probe, "{uri}");
+        }
     }
 
     // #1214 — repeated wrong admin tokens from one client are throttled with

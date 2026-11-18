@@ -145,6 +145,7 @@ pub async fn run_price_cycle(state: Arc<AppState>) {
             // (issue #1278).
             let total_tokens = state.config.price_feed.tokens.len();
             tracing::error!(
+                event = "price_cycle_timeout",
                 timeout_secs = PRICE_CYCLE_TIMEOUT_SECS,
                 tokens_failed = total_tokens,
                 "price cycle exceeded timeout budget"
@@ -194,6 +195,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
         Ok(ledger_seq) => ledger_seq,
         Err(error) => {
             tracing::error!(
+                event = "price_cycle_aborted",
                 error = %error,
                 rpc_url = %state.config.stellar_rpc_url,
                 "price cycle aborted: failed to fetch latest ledger sequence from RPC after retries"
@@ -389,6 +391,7 @@ async fn finish_cycle(
         .record_price_cycle(latency_ms, tokens_ok, tokens_failed);
 
     tracing::info!(
+        event = "price_cycle_complete",
         tokens_ok,
         tokens_failed,
         tokens_stale,

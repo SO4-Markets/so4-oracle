@@ -183,6 +183,7 @@ pub async fn run_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     match &result {
         Ok(summary) => {
             info!(
+                event = "keeper_cycle_complete",
                 latency_ms,
                 orders = summary.orders_executed,
                 deposits = summary.deposits_executed,
@@ -205,7 +206,12 @@ pub async fn run_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
             );
         }
         Err(error) => {
-            error!(latency_ms, %error, "keeper_cycle_failed");
+            error!(
+                event = "keeper_cycle_failed",
+                latency_ms,
+                %error,
+                "keeper_cycle_failed"
+            );
             record_error(&state, "keeper_cycle", error, None).await;
             state.metrics.record_submit_failure();
         }
