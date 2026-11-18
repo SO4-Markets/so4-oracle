@@ -48,6 +48,15 @@ jobs:
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check bans licenses sources
 
+  # -- Environment variable reference (#1432) ---------------------------
+  env-docs:
+    name: Env var reference matches the code
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: bash scripts/check-env-docs.sh
+
   # -- MSRV enforcement ---------------------------------------------------
   msrv:
     name: MSRV check

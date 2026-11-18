@@ -1,5 +1,10 @@
 # Branch protection
 
+> **Current status: not applied.** These settings are the intended configuration
+> for `main`; they are not enforced today (tracked in #1441, which covers
+> `.github/settings.yml` not being applied either). Until they are, PRs can
+> merge on failing CI. Update this note when the settings are turned on.
+
 ## Required settings for `main`
 
 The following branch-protection rules must be enabled on
