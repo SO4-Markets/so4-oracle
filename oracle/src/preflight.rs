@@ -115,13 +115,13 @@ async fn check_keeper_balance(config: &Config) -> PreflightCheck {
     };
     let below_min = Arc::new(AtomicBool::new(false));
     match crate::keeper::check_keeper_balance(&balance_config, &below_min).await {
-        Ok(stroops) => PreflightCheck {
+        Ok(balance) => PreflightCheck {
             name: NAME,
             ok: true,
             hard: false,
             detail: format!(
-                "keeper balance {stroops} stroops is at or above minimum {} XLM",
-                config.min_keeper_balance_xlm
+                "keeper spendable balance {} stroops is at or above minimum {} XLM",
+                balance.spendable_stroops, config.min_keeper_balance_xlm
             ),
         },
         Err(error) => PreflightCheck {

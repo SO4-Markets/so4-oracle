@@ -486,7 +486,10 @@ async fn keeper_balance_returns_200_when_horizon_healthy() {
     assert!(json.get("balance_xlm").is_some());
     assert!(json.get("min_balance_xlm").is_some());
     assert!(json.get("is_funded").is_some());
-    assert_eq!(json["balance_xlm"], 100.5);
+    // Spendable: 100.5 XLM total minus the 1 XLM reserve of an account with no
+    // subentries (#1215, #1446).
+    assert_eq!(json["balance_xlm"], 99.5);
+    assert_eq!(json["balance_stroops"], 1_005_000_000i64);
     assert_eq!(json["is_funded"], true);
 }
 
@@ -523,6 +526,6 @@ async fn keeper_balance_reports_unfunded_when_below_minimum() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["balance_xlm"], 3.0);
+    assert_eq!(json["balance_xlm"], 2.0);
     assert_eq!(json["is_funded"], false);
 }

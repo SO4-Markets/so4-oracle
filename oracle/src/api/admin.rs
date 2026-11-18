@@ -111,7 +111,9 @@ pub async fn oracle_status(
     )
     .await
     .ok()
-    .map(|stroops| stroops as f64 / crate::keeper::XLM_IN_STROOPS as f64);
+    // Spendable balance, net of the account reserve, the same figure
+    // /keeper/balance reports and the minimum is checked against (#1447).
+    .map(|balance| crate::keeper::stroops_to_xlm(balance.spendable_stroops));
 
     Json(OracleStatusResponse {
         last_cycle_time,
@@ -326,8 +328,8 @@ pub async fn keeper_balance(
     .await;
 
     match result {
-        Ok(stroops) => {
-            let response = crate::keeper::build_balance_response(&keeper_cfg, stroops);
+        Ok(balance) => {
+            let response = crate::keeper::build_balance_response(&keeper_cfg, balance);
             Ok(Json(BalanceResponse {
                 account_id: response.account_id,
                 balance_stroops: response.balance_stroops,
