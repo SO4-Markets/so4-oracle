@@ -1,3 +1,5 @@
+**Status:** superseded by the Axum/Tokio rewrite ([REWRITE_PLAN.md](REWRITE_PLAN.md)) — describes the retired Cloudflare Worker design. Status reviewed 2026-11-18 (#1433).
+
 > **HISTORICAL — SUPERSEDED (#501)**
 > This document describes an earlier Cloudflare Worker architecture that has since been replaced by a long-running Axum/Tokio binary. File paths, crate names, and KV references below do not correspond to anything in the current repository. It is retained for historical context only; do not follow any instructions here.
 
