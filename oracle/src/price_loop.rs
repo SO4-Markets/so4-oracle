@@ -868,6 +868,130 @@ mod tests {
         assert_eq!(entry.ledger_seq, 7);
     }
 
+    // ── #1416: unit coverage for the pure parts of the price path ───────────
+
+    fn unit_token(sources: &[&str]) -> TokenConfig {
+        TokenConfig {
+            symbol: "TUSDC".to_string(),
+            display_symbol: Some("USDC".to_string()),
+            stellar_address: "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES".to_string(),
+            sources: sources.iter().map(|s| s.to_string()).collect(),
+            binance_symbol: None,
+            coinbase_symbol: None,
+            pyth_feed_id: Some("feed-1".to_string()),
+            fixed_price: None,
+            min_sources: 1,
+            max_deviation_bps: 100,
+            stale_after_seconds: 60,
+            submit_threshold_bps: 10,
+            pyth_max_confidence_bps: 100,
+        }
+    }
+
+    fn unit_aggregate() -> AggregatedPrice {
+        AggregatedPrice {
+            min: 990,
+            max: 1_010,
+            median: 1_000,
+            sources_used: vec!["fixed".to_string()],
+            rejected_sources: Vec::new(),
+            min_observation_time: 1_700_000_000,
+        }
+    }
+
+    // The signature in a CachedPrice must verify against build_price_message
+    // for exactly the values placed in that CachedPrice.
+    #[test]
+    fn signed_cached_price_signature_matches_its_own_fields() {
+        use ed25519_dalek::Verifier;
+
+        let token = unit_token(&["fixed"]);
+        let state = test_state(token.clone());
+        let result = signed_cached_price(&state, &token, 42, unit_aggregate());
+        let cached = result.unwrap();
+
+        // The timestamp is the oldest contributing observation, not signing time.
+        assert_eq!(cached.timestamp, 1_700_000_000);
+        assert_eq!(cached.min, 990);
+        assert_eq!(cached.max, 1_010);
+        assert_eq!(cached.median, 1_000);
+        assert_eq!(cached.ledger_seq, 42);
+
+        let message = crate::signing::build_price_message(
+            &state.config.network_passphrase,
+            cached.ledger_seq,
+            &cached.token_address,
+            cached.min,
+            cached.max,
+            cached.timestamp,
+        );
+        let raw = hex::decode(&cached.signature).unwrap();
+        let bytes: [u8; 64] = raw.try_into().unwrap();
+        let signature = ed25519_dalek::Signature::from_bytes(&bytes);
+        let key = state.price_signing_key.as_ref().unwrap().verifying_key();
+        assert!(key.verify(&message, &signature).is_ok());
+    }
+
+    #[test]
+    fn signed_cached_price_errors_without_a_signing_key() {
+        let token = unit_token(&["fixed"]);
+        let state = Arc::new(AppState::new(Arc::new(Config::default_for_tests())));
+        let result = signed_cached_price(&state, &token, 42, unit_aggregate());
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn finish_cycle_records_counters_and_clears_running_flag() {
+        let state = test_state(unit_token(&["fixed"]));
+        state.cycle_status.write().await.price_cycle_running = true;
+
+        finish_cycle(&state, Instant::now(), 3, 2, 1).await;
+        finish_cycle(&state, Instant::now(), 1, 0, 0).await;
+
+        let metrics = state.metrics.to_response();
+        assert_eq!(metrics.price_cycle_count, 2);
+        assert_eq!(metrics.token_fetch_ok, 4);
+        assert_eq!(metrics.token_fetch_failures, 2);
+        let status = state.cycle_status.read().await;
+        assert!(!status.price_cycle_running);
+        assert!(status.last_price_cycle_at.is_some());
+    }
+
+    // A permanent error returns on the first attempt: no backoff sleep runs,
+    // so the paused clock never advances.
+    #[tokio::test(start_paused = true)]
+    async fn fetch_source_with_retry_does_not_retry_a_permanent_error() {
+        let token = unit_token(&["nope"]);
+        let no_pyth = std::collections::HashMap::new();
+        let started = tokio::time::Instant::now();
+
+        let failure = fetch_source_with_retry("nope", &token, None, &no_pyth, false, None, "")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(failure.error, PriceSourceError::Unsupported(_)));
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    // A transient error is retried with backoff before giving up.
+    #[tokio::test(start_paused = true)]
+    async fn fetch_source_with_retry_backs_off_on_a_transient_error() {
+        let token = unit_token(&["pyth"]);
+        let no_pyth = std::collections::HashMap::new();
+        let started = tokio::time::Instant::now();
+
+        // Batch failed and the feed is absent: a retryable network error.
+        let failure = fetch_source_with_retry("pyth", &token, None, &no_pyth, true, None, "")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            failure.error,
+            PriceSourceError::Pyth(crate::pyth::PythPriceError::NetworkError(_))
+        ));
+        assert!(started.elapsed() > Duration::ZERO, "backoff expected");
+    }
+
     // ── #512: run_price_loop shutdown coverage ───────────────────────────────
 
     fn shutdown_test_state() -> Arc<AppState> {

@@ -584,7 +584,7 @@ mod tests {
 mod escape_label_value_tests {
     use super::*;
 
-    // #1409 — exact output locks the escape ORDER (backslash first) and
+    // #1409 â€” exact output locks the escape ORDER (backslash first) and
     // documents that \r is left untouched.
     #[test]
     fn test_escape_label_value_escapes_backslash_newline_and_quote() {

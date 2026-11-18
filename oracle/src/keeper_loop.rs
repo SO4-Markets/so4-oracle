@@ -142,13 +142,20 @@ pub async fn run_keeper_loop(state: Arc<AppState>) {
                 break;
             }
         }
-        was_idle = matches!(
-            cycle_result,
-            Some(Ok(ref s)) if s.orders_executed == 0
-                && s.deposits_executed == 0
-                && s.withdrawals_executed == 0
-        );
+        was_idle = cycle_result.as_ref().is_some_and(is_idle_cycle);
     }
+}
+
+/// Whether a finished cycle found no pending work, so the loop should add the
+/// idle backoff before the next one (#1281). A failed cycle is never idle: it
+/// retries at the normal cadence rather than backing off (#1417).
+fn is_idle_cycle(result: &Result<CycleSummary, String>) -> bool {
+    matches!(
+        result,
+        Ok(s) if s.orders_executed == 0
+            && s.deposits_executed == 0
+            && s.withdrawals_executed == 0
+    )
 }
 
 /// Runs one keeper cycle under a fresh cycle id (#1455), recorded on every log
@@ -1967,6 +1974,54 @@ mod tests {
         }
     }
 
+    // ── #1417: pure decision logic ──────────────────────────────────────────
+
+    fn summary(orders: usize, deposits: usize, withdrawals: usize) -> CycleSummary {
+        CycleSummary {
+            orders_executed: orders,
+            deposits_executed: deposits,
+            withdrawals_executed: withdrawals,
+            errors: 0,
+            prices_stale: false,
+            keeper_balance_low: false,
+        }
+    }
+
+    #[test]
+    fn idle_cycle_classification() {
+        assert!(is_idle_cycle(&Ok(summary(0, 0, 0))));
+        assert!(!is_idle_cycle(&Ok(summary(1, 0, 0))));
+        assert!(!is_idle_cycle(&Ok(summary(0, 1, 0))));
+        assert!(!is_idle_cycle(&Ok(summary(0, 0, 1))));
+        // A gated cycle executed nothing, so it backs off like any idle one.
+        assert!(is_idle_cycle(&Ok(CycleSummary::skipped(true, true))));
+        // A failed cycle is not idle: it must not add the backoff.
+        assert!(!is_idle_cycle(&Err("rpc down".to_string())));
+    }
+
+    #[test]
+    fn skipped_summary_records_both_gates_and_no_work() {
+        for stale in [false, true] {
+            for low in [false, true] {
+                let s = CycleSummary::skipped(stale, low);
+                assert_eq!(s.prices_stale, stale);
+                assert_eq!(s.keeper_balance_low, low);
+                let work = s.orders_executed + s.deposits_executed + s.withdrawals_executed;
+                assert_eq!(work, 0);
+                assert_eq!(s.errors, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn market_paused_is_matched_on_the_contract_error_text() {
+        let paused = HandlerError::local(format!("execute_order: {MARKET_PAUSED_PATTERN}"));
+        assert!(is_market_paused_error(&paused));
+
+        let other = HandlerError::local("execute_order: ContractError #1");
+        assert!(!is_market_paused_error(&other));
+    }
+
     #[test]
     fn post_set_prices_settle_stays_small_fraction_of_cycle_budget() {
         // #956 — the settle delay must not eat a meaningful share of the cycle timeout.
@@ -2520,7 +2575,7 @@ mod keeper_tx_tests {
     use crate::config::{Config, SecretString};
     use std::sync::Arc;
 
-    // #1410 � table-test the three substring spellings, case variants and a
+    // #1410 — table-test the three substring spellings, case variants and a
     // negative so a regression in any of them is caught.
     #[test]
     fn test_is_bad_sequence_error_matches_known_spellings() {
@@ -2551,7 +2606,7 @@ mod keeper_tx_tests {
         }
     }
 
-    // #1411 � a cached SigningKey must sign identically to the per-call decode.
+    // #1411 — a cached SigningKey must sign identically to the per-call decode.
     #[test]
     fn sign_keeper_tx_uses_cached_key_when_present() {
         let mut config = Config::default_for_tests();
@@ -2570,7 +2625,7 @@ mod keeper_tx_tests {
         assert_eq!(got, expected, "signature must be byte-identical");
     }
 
-    // #1411 � no cached key falls back so the decode error surfaces instead
+    // #1411 — no cached key falls back so the decode error surfaces instead
     // of panicking or returning an empty signature.
     #[test]
     fn sign_keeper_tx_reports_key_error_without_cached_key() {
