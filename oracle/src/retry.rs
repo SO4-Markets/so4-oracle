@@ -86,6 +86,14 @@ pub trait Retryable {
     fn is_retryable(&self) -> bool;
 }
 
+/// Shared HTTP status classification for every `Retryable` impl that wraps an
+/// HTTP response (#1448), so the RPC client and the price sources cannot
+/// drift apart again: request timeout (408), too early (425), rate limited
+/// (429), and every 5xx are transient; every other status is permanent.
+pub fn is_transient_http_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429) || status >= 500
+}
+
 fn log_retry_failure<E: std::fmt::Debug>(
     attempt: u32,
     max_attempts: u32,
@@ -93,6 +101,7 @@ fn log_retry_failure<E: std::fmt::Debug>(
     retryable: bool,
 ) {
     tracing::warn!(
+        event = "retry_attempt_failed",
         attempt,
         max_attempts,
         retryable,
@@ -125,6 +134,16 @@ mod tests {
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
         futures::executor::block_on(f)
+    }
+
+    #[test]
+    fn transient_http_statuses() {
+        for status in [408, 425, 429, 500, 502, 503, 504, 599] {
+            assert!(is_transient_http_status(status), "{status} should retry");
+        }
+        for status in [200, 301, 400, 401, 403, 404, 409, 422, 499] {
+            assert!(!is_transient_http_status(status), "{status} should not retry");
+        }
     }
 
     #[test]

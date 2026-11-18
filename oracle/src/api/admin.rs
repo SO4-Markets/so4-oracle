@@ -26,6 +26,7 @@ pub struct OracleStatusResponse {
     pub keeper_balance: Option<f64>,
     pub prices: Vec<CachedPrice>,
     pub recent_errors: Vec<FailedSubmission>,
+    pub preflight: Option<crate::preflight::PreflightResult>,
     pub price_cycle_count: u64,
     pub keeper_cycle_count: u64,
     pub token_fetch_failures: u64,
@@ -83,6 +84,8 @@ pub async fn oracle_status(
         .values()
         .cloned()
         .collect();
+    let recent_errors = state.failures.lock().await.iter().rev().cloned().collect();
+    let preflight = state.preflight_result.read().await.clone();
     let recent_errors: Vec<_> = state
         .failures
         .lock()
@@ -115,6 +118,7 @@ pub async fn oracle_status(
         keeper_balance,
         prices,
         recent_errors,
+        preflight,
         price_cycle_count: metrics.price_cycle_count,
         keeper_cycle_count: metrics.keeper_cycle_count,
         token_fetch_failures: metrics.token_fetch_failures,

@@ -136,6 +136,10 @@ ADMIN_API_TOKEN=<optional admin token>
 PRICE_LOOP_MS=1000
 KEEPER_LOOP_MS=1500
 
+# Logging (optional)
+RUST_LOG=info                     # tracing EnvFilter, e.g. oracle=debug,tower_http=debug
+LOG_FORMAT=json                   # "json" (default) or "pretty" for local development
+
 # Price feed configuration (optional; falls back to embedded config/tokens.json).
 # Must be an inline JSON string — NOT a file path. Pass the JSON directly or
 # read a file at startup:

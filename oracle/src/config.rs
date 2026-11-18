@@ -37,11 +37,41 @@ pub enum Network {
 }
 
 impl Network {
+    pub const ALL: [Network; 2] = [Network::Testnet, Network::Mainnet];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Network::Testnet => "testnet",
             Network::Mainnet => "mainnet",
         }
+    }
+}
+
+impl fmt::Display for Network {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Network {
+    type Err = EnvError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Network::ALL
+            .iter()
+            .find(|network| network.as_str() == s)
+            .cloned()
+            .ok_or_else(|| EnvError::InvalidVar {
+                var: "STELLAR_NETWORK",
+                reason: format!(
+                    "unknown network '{s}'; expected {}",
+                    Network::ALL
+                        .iter()
+                        .map(|network| format!("'{}'", network.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                ),
+            })
     }
 }
 
@@ -62,6 +92,24 @@ impl SecretString {
 impl fmt::Debug for SecretString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("<redacted>")
+    }
+}
+
+impl fmt::Display for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl PartialEq for SecretString {
+    fn eq(&self, other: &Self) -> bool {
+        crate::auth::constant_time_eq(self.0.as_bytes(), other.0.as_bytes())
+    }
+}
+
+impl serde::Serialize for SecretString {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str("<redacted>")
     }
 }
 
@@ -218,17 +266,10 @@ impl Config {
         }
 
         let network_raw = lookup("STELLAR_NETWORK").unwrap_or_else(|| "testnet".to_string());
-        let network = match network_raw.as_str() {
-            "testnet" => Network::Testnet,
-            "mainnet" => Network::Mainnet,
-            other => {
-                errors.push(EnvError::InvalidVar {
-                    var: "STELLAR_NETWORK",
-                    reason: format!("unknown network '{other}'; expected 'testnet' or 'mainnet'"),
-                });
-                Network::Testnet
-            }
-        };
+        let network = network_raw.parse().unwrap_or_else(|error| {
+            errors.push(error);
+            Network::Testnet
+        });
 
         let bind_addr = collect_or_default!(
             parse_or_default(&mut lookup, "BIND_ADDR", DEFAULT_BIND_ADDR),
@@ -780,6 +821,16 @@ mod tests {
     fn network_as_str_returns_expected_wire_values() {
         assert_eq!(Network::Testnet.as_str(), "testnet");
         assert_eq!(Network::Mainnet.as_str(), "mainnet");
+    }
+
+    #[test]
+    fn secret_string_never_leaks_through_debug_display_or_serde() {
+        let secret = "SCVXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+        let value = SecretString::new(secret.to_string());
+
+        assert!(!format!("{:?}", value).contains(secret));
+        assert!(!format!("{}", value).contains(secret));
+        assert!(!serde_json::to_string(&value).unwrap().contains(secret));
     }
 
     #[test]

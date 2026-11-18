@@ -79,6 +79,10 @@ pub struct FailedSubmission {
     pub network: String,
     pub token: String,
     pub symbol: String,
+    /// Price source that failed (`binance`, `coinbase`, ...), for per-source
+    /// fetch failures; `None` for failures not tied to one source (#1450).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(serialize_with = "ser_i128_str")]
     pub min: i128,
     #[serde(serialize_with = "ser_i128_str")]
@@ -232,6 +236,11 @@ pub struct AppState {
     /// `KEEPER_PRIVATE_KEY` decoded once at config load (#1226, #1473).
     /// `SigningKey` zeroises its seed on drop. `None` when unset; an
     /// undecodable key is a boot failure, not a per-signature fallback.
+    /// Last startup preflight result, exposed on `/oracle/status` (#1468).
+    pub preflight_result: Arc<RwLock<Option<crate::preflight::PreflightResult>>>,
+    /// `KEEPER_PRIVATE_KEY` decoded once at startup for price signing (#1226).
+    /// `SigningKey` zeroises its seed on drop. `None` if unset or invalid, in
+    /// which case signing falls back to the string key and reports the error.
     pub price_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     /// `KEEPER_SECRET_KEY` decoded once at config load (#1226, #1473).
     /// `None` when unset; an undecodable key is a boot failure.
@@ -266,6 +275,7 @@ impl AppState {
             execution_failure_counts: Arc::new(Mutex::new(HashMap::new())),
             keeper_balance_below_min: Arc::new(AtomicBool::new(false)),
             keeper_cycle_generation: Arc::new(AtomicU64::new(0)),
+            preflight_result: Arc::new(RwLock::new(None)),
             price_signing_key,
             tx_signing_key,
             admin_auth_limiter: Arc::new(AdminAuthLimiter::default()),

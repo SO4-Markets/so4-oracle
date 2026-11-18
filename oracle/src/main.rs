@@ -1,9 +1,14 @@
 use std::sync::Arc;
 
-use oracle::{api, AppState, Config};
+use oracle::{api, preflight, AppState, Config};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
+
+/// Exit code for configuration errors, distinct from transient runtime
+/// failures so an orchestrator restart policy can avoid retrying a
+/// misconfigured deployment (railway.json `restartPolicyMaxRetries`).
+const CONFIG_ERROR_EXIT_CODE: i32 = 78;
 
 #[tokio::main]
 async fn main() {
@@ -23,15 +28,28 @@ async fn main() {
     let config = match Config::from_env() {
         Ok(config) => Arc::new(config),
         Err(errors) => {
-            for error in &errors.0 {
-                tracing::error!(%error, "configuration failed");
-            }
-            std::process::exit(1);
+            tracing::error!(
+                "configuration failed: {} errors\n{}",
+                errors.0.len(),
+                errors
+            );
+            std::process::exit(CONFIG_ERROR_EXIT_CODE);
         }
     };
 
     let bind_addr = config.bind_addr;
     let state = Arc::new(AppState::new(Arc::clone(&config)));
+
+    if std::env::var("SKIP_PREFLIGHT").as_deref() == Ok("true") {
+        tracing::warn!("SKIP_PREFLIGHT=true set; skipping startup preflight checks");
+    } else {
+        let result = preflight::preflight(&config).await;
+        *state.preflight_result.write().await = Some(result.clone());
+        if result.hard_failed() {
+            tracing::error!("preflight hard checks failed; exiting");
+            std::process::exit(CONFIG_ERROR_EXIT_CODE);
+        }
+    }
     let app = api::build_router(Arc::clone(&state));
 
     let listener = match TcpListener::bind(bind_addr).await {
@@ -149,6 +167,13 @@ enum BackgroundTask {
     Keeper,
 }
 
+/// `LOG_FORMAT=pretty` switches to human-readable output for local
+/// development (#1457). Anything else, including unset, keeps JSON, which is
+/// what the deployed log pipelines parse.
+fn use_pretty_logs(log_format: Option<&str>) -> bool {
+    log_format.is_some_and(|value| value.trim().eq_ignore_ascii_case("pretty"))
+}
+
 fn init_tracing() {
     let (filter, invalid_rust_log) = match std::env::var("RUST_LOG") {
         Ok(raw) => match EnvFilter::try_new(&raw) {
@@ -158,12 +183,16 @@ fn init_tracing() {
         Err(_) => (EnvFilter::new("info"), None),
     };
 
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(filter)
-        .with_current_span(true)
-        .with_span_list(true)
-        .init();
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    if use_pretty_logs(std::env::var("LOG_FORMAT").ok().as_deref()) {
+        builder.pretty().init();
+    } else {
+        builder
+            .json()
+            .with_current_span(true)
+            .with_span_list(true)
+            .init();
+    }
 
     if let Some((raw, error)) = invalid_rust_log {
         tracing::warn!(
@@ -204,4 +233,24 @@ async fn shutdown_signal(token: CancellationToken) {
     }
 
     token.cancel();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::use_pretty_logs;
+
+    #[test]
+    fn log_format_defaults_to_json() {
+        assert!(!use_pretty_logs(None));
+        assert!(!use_pretty_logs(Some("")));
+        assert!(!use_pretty_logs(Some("json")));
+        assert!(!use_pretty_logs(Some("something-else")));
+    }
+
+    #[test]
+    fn log_format_pretty_is_case_insensitive() {
+        assert!(use_pretty_logs(Some("pretty")));
+        assert!(use_pretty_logs(Some("PRETTY")));
+        assert!(use_pretty_logs(Some(" Pretty ")));
+    }
 }
