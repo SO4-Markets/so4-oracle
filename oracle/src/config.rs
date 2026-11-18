@@ -13,10 +13,23 @@ pub const DEFAULT_TESTNET_HORIZON_URL: &str = "https://horizon-testnet.stellar.o
 pub const DEFAULT_MAINNET_HORIZON_URL: &str = "https://horizon.stellar.org";
 pub const DEFAULT_PRICE_LOOP_MS: u64 = 1_000;
 pub const DEFAULT_KEEPER_LOOP_MS: u64 = 1_500;
+/// Longest accepted `stale_after_seconds`. The oracle contract rejects a
+/// `SignedPrice` whose timestamp is more than 300 s old, so a longer window
+/// could never be submitted; keep a 30 s margin for signing/submission latency
+/// (#1292).
+pub const MAX_STALE_AFTER_SECONDS: u64 = 270;
 /// Default inclusion fee (stroops) for `set_prices` transactions.
 pub const DEFAULT_SET_PRICES_TX_FEE: u32 = 1_000_000;
 /// Default inclusion fee (stroops) for keeper handler transactions.
 pub const DEFAULT_KEEPER_TX_FEE: u32 = 2_000_000;
+/// Highest inclusion fee accepted for `SET_PRICES_TX_FEE` or `KEEPER_TX_FEE`:
+/// 1 XLM per transaction (#1463). The vars are `u32` stroops, so without a
+/// bound a mistyped extra three zeros is a 1000x fee accepted at boot and paid
+/// on every submission at keeper-loop cadence.
+pub const MAX_TX_FEE_STROOPS: u32 = 10_000_000;
+/// A fee above this multiple of its default is accepted but logged at
+/// startup, so a deliberate raise is visible in the boot logs (#1463).
+const TX_FEE_WARN_MULTIPLIER: u32 = 2;
 /// Default timeout in seconds for graceful shutdown of background tasks.
 pub const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 /// Lower bound for `PRICE_LOOP_MS` / `KEEPER_LOOP_MS` (#1464). Below it the
@@ -494,6 +507,14 @@ impl Config {
             })(),
             DEFAULT_MIN_KEEPER_BALANCE_XLM
         );
+        if balance_gate_disabled(min_keeper_balance_xlm) {
+            tracing::warn!(
+                min_keeper_balance_xlm,
+                "MIN_KEEPER_BALANCE_XLM=0 disables the keeper balance gate: no low-balance \
+                 error, /ready gate or metric will fire before submissions fail for \
+                 insufficient funds — use only for local testing"
+            );
+        }
 
         let set_prices_tx_fee: u32 = collect_or_default!(
             (|| {
@@ -502,15 +523,14 @@ impl Config {
                     "SET_PRICES_TX_FEE",
                     &DEFAULT_SET_PRICES_TX_FEE.to_string(),
                 )?;
-                if fee == 0 {
-                    return Err(EnvError::InvalidVar {
-                        var: "SET_PRICES_TX_FEE",
-                        reason: "must be greater than 0".to_string(),
-                    });
-                }
-                Ok(fee)
+                validate_tx_fee("SET_PRICES_TX_FEE", fee)
             })(),
             DEFAULT_SET_PRICES_TX_FEE
+        );
+        warn_if_tx_fee_high(
+            "SET_PRICES_TX_FEE",
+            set_prices_tx_fee,
+            DEFAULT_SET_PRICES_TX_FEE,
         );
 
         let keeper_tx_fee: u32 = collect_or_default!(
@@ -520,16 +540,11 @@ impl Config {
                     "KEEPER_TX_FEE",
                     &DEFAULT_KEEPER_TX_FEE.to_string(),
                 )?;
-                if fee == 0 {
-                    return Err(EnvError::InvalidVar {
-                        var: "KEEPER_TX_FEE",
-                        reason: "must be greater than 0".to_string(),
-                    });
-                }
-                Ok(fee)
+                validate_tx_fee("KEEPER_TX_FEE", fee)
             })(),
             DEFAULT_KEEPER_TX_FEE
         );
+        warn_if_tx_fee_high("KEEPER_TX_FEE", keeper_tx_fee, DEFAULT_KEEPER_TX_FEE);
 
         let price_loop_interval = collect_or_default!(
             (|| {
@@ -542,6 +557,14 @@ impl Config {
             })(),
             Duration::from_millis(DEFAULT_PRICE_LOOP_MS)
         );
+
+        // #1292: cross-check the token freshness windows against the refresh
+        // interval now that both are known.
+        if let Err(error) =
+            validate_staleness_above_loop_interval(&price_feed.tokens, price_loop_interval)
+        {
+            errors.push(EnvError::TokenConfig(error));
+        }
 
         let keeper_loop_interval = collect_or_default!(
             (|| {
@@ -661,6 +684,50 @@ impl Config {
     }
 }
 
+/// Rejects a zero fee and a fee above [`MAX_TX_FEE_STROOPS`] (#1463).
+fn validate_tx_fee(var: &'static str, fee: u32) -> Result<u32, EnvError> {
+    if fee == 0 {
+        return Err(EnvError::InvalidVar {
+            var,
+            reason: "must be greater than 0".to_string(),
+        });
+    }
+    if fee > MAX_TX_FEE_STROOPS {
+        return Err(EnvError::InvalidVar {
+            var,
+            reason: format!(
+                "must be at most {MAX_TX_FEE_STROOPS} stroops (1 XLM) per transaction, got {fee}"
+            ),
+        });
+    }
+    Ok(fee)
+}
+
+/// True when an accepted fee is still far enough above its default that it
+/// should be visible in the boot logs (#1463).
+fn tx_fee_is_unusually_high(fee: u32, default: u32) -> bool {
+    fee > default.saturating_mul(TX_FEE_WARN_MULTIPLIER)
+}
+
+fn warn_if_tx_fee_high(var: &'static str, fee: u32, default: u32) {
+    if tx_fee_is_unusually_high(fee, default) {
+        tracing::warn!(
+            var,
+            fee_stroops = fee,
+            default_stroops = default,
+            multiplier = TX_FEE_WARN_MULTIPLIER,
+            "inclusion fee is well above its default; it is paid on every submission"
+        );
+    }
+}
+
+/// `MIN_KEEPER_BALANCE_XLM=0` is accepted for local testing, but it turns the
+/// balance gate off entirely: `spendable < 0` is false for any funded account
+/// (#1462). Only `0` reaches here, since negative values are rejected.
+fn balance_gate_disabled(min_keeper_balance_xlm: f64) -> bool {
+    min_keeper_balance_xlm <= 0.0
+}
+
 fn required(
     lookup: &mut impl FnMut(&str) -> Option<String>,
     var: &'static str,
@@ -750,6 +817,30 @@ fn validate_strkey(var: &'static str, value: String, prefix: char) -> Result<Str
 fn load_price_feed_config(raw: Option<&str>) -> Result<PriceFeedConfig, ConfigError> {
     let raw = raw.unwrap_or(include_str!("../../config/tokens.json"));
     parse_price_feed_config(raw)
+}
+
+/// Rejects tokens whose freshness window is not longer than one price-feed
+/// refresh interval: such a price is stale before the next cycle can replace
+/// it, so the keeper would see `prices_stale` permanently (#1292).
+fn validate_staleness_above_loop_interval(
+    tokens: &[TokenConfig],
+    price_loop_interval: Duration,
+) -> Result<(), ConfigError> {
+    let loop_seconds = price_loop_interval.as_millis() / 1_000;
+    for token in tokens {
+        if u128::from(token.stale_after_seconds) <= loop_seconds {
+            return Err(ConfigError::InvalidToken {
+                symbol: token.symbol.clone(),
+                reason: format!(
+                    "stale_after_seconds ({}) must be greater than PRICE_LOOP_MS ({} ms), \
+                     otherwise cached prices go stale before the next refresh",
+                    token.stale_after_seconds,
+                    price_loop_interval.as_millis()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Parse and validate the `PRICE_FEED_CONFIG` JSON string.
@@ -853,6 +944,18 @@ pub fn parse_price_feed_config(raw: &str) -> Result<PriceFeedConfig, ConfigError
                     "min_sources ({}) exceeds number of configured sources ({})",
                     token.min_sources,
                     token.sources.len()
+                ),
+            });
+        }
+        // #1292: the oracle contract rejects a SignedPrice older than 300 s,
+        // so a wider freshness window makes every batch for this token revert.
+        if token.stale_after_seconds > MAX_STALE_AFTER_SECONDS {
+            return Err(ConfigError::InvalidToken {
+                symbol: token.symbol.clone(),
+                reason: format!(
+                    "stale_after_seconds ({}) must not exceed {}s: the oracle contract \
+                     rejects prices older than 300s",
+                    token.stale_after_seconds, MAX_STALE_AFTER_SECONDS
                 ),
             });
         }
@@ -1265,8 +1368,9 @@ mod tests {
 
     #[test]
     fn accept_valid_fixed_price() {
-        let json = r#"[{"symbol":"TUSDC","stellar_address":"CADDR","sources":["fixed"],"fixed_price":"10000000"}]"#;
-        assert!(parse_price_feed_config(json).is_ok());
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES","sources":["fixed"],"fixed_price":"10000000","min_sources":1}]"#;
+        let result = parse_price_feed_config(json);
+        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
     }
 
     #[test]
@@ -1931,6 +2035,70 @@ mod tests {
             let err = Config::from_lookup(|k| env.get(k).cloned()).unwrap_err();
             assert!(invalid_var_names(&err).contains(&"PYTH_API_KEY"), "{err}");
             assert!(!err.to_string().contains(key), "error must not echo the key");
+    #[test]
+    fn parse_price_feed_config_rejects_staleness_above_contract_window() {
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["fixed"],"min_sources":1,"fixed_price":"1000000000000000000000000000000","stale_after_seconds":271}]"#;
+
+        let err = parse_price_feed_config(json).unwrap_err();
+
+        assert!(err.to_string().contains("stale_after_seconds"), "{err}");
+        assert!(err.to_string().contains("270"), "{err}");
+    }
+
+    #[test]
+    fn parse_price_feed_config_accepts_staleness_at_contract_window_edge() {
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["fixed"],"min_sources":1,"fixed_price":"1000000000000000000000000000000","stale_after_seconds":270}]"#;
+
+        assert!(parse_price_feed_config(json).is_ok());
+    }
+
+    #[test]
+    fn validate_staleness_above_loop_interval_uses_whole_seconds() {
+        let json = r#"[{"symbol":"TUSDC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["fixed"],"min_sources":1,"fixed_price":"1000000000000000000000000000000","stale_after_seconds":2}]"#;
+        let tokens = parse_price_feed_config(json).unwrap().tokens;
+
+        // A 2.5 s refresh outruns a 2 s freshness window.
+        assert!(
+            validate_staleness_above_loop_interval(&tokens, Duration::from_millis(2_500)).is_err()
+        );
+        // A 1.5 s refresh leaves headroom between refreshes.
+        assert!(
+            validate_staleness_above_loop_interval(&tokens, Duration::from_millis(1_500)).is_ok()
+        );
+    }
+
+    #[test]
+    fn config_from_lookup_rejects_staleness_not_above_price_loop() {
+        let mut env = valid_env();
+        env.insert(
+            "PRICE_FEED_CONFIG",
+            r#"[{"symbol":"TUSDC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["fixed"],"min_sources":1,"fixed_price":"1000000000000000000000000000000","stale_after_seconds":1}]"#.to_string(),
+        );
+
+        let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+        assert!(
+            err.0.iter().any(|error| matches!(
+                error,
+                EnvError::TokenConfig(ConfigError::InvalidToken { .. })
+            )),
+            "expected a token-config error, got: {err}"
+        );
+        assert!(err.to_string().contains("PRICE_LOOP_MS"), "{err}");
+    // #1463 — a mistyped extra three zeros must fail at boot, naming the limit.
+    #[test]
+    fn config_from_lookup_rejects_tx_fees_above_the_cap() {
+        for var in ["SET_PRICES_TX_FEE", "KEEPER_TX_FEE"] {
+            let mut env = valid_env();
+            env.insert(var, (MAX_TX_FEE_STROOPS + 1).to_string());
+
+            let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+            let EnvError::InvalidVar { var: got, reason } = &err.0[0] else {
+                panic!("{var}: expected InvalidVar, got {err}");
+            };
+            assert_eq!(*got, var);
+            assert!(reason.contains("10000000"), "{reason}");
         }
     }
 
@@ -1972,5 +2140,38 @@ mod tests {
         token.sources.truncate(2);
         token.min_sources = 2;
         assert!(!outlier_rejection_can_degrade(&token));
+    fn config_from_lookup_accepts_tx_fees_at_the_cap() {
+        let mut env = valid_env();
+        env.insert("SET_PRICES_TX_FEE", MAX_TX_FEE_STROOPS.to_string());
+        env.insert("KEEPER_TX_FEE", MAX_TX_FEE_STROOPS.to_string());
+
+        let config = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(config.set_prices_tx_fee, MAX_TX_FEE_STROOPS);
+        assert_eq!(config.keeper_tx_fee, MAX_TX_FEE_STROOPS);
+    }
+
+    #[test]
+    fn tx_fee_warning_threshold_is_relative_to_the_default() {
+        let (set, keeper) = (DEFAULT_SET_PRICES_TX_FEE, DEFAULT_KEEPER_TX_FEE);
+
+        assert!(!tx_fee_is_unusually_high(set, set));
+        assert!(!tx_fee_is_unusually_high(keeper * 2, keeper));
+        assert!(tx_fee_is_unusually_high(keeper * 2 + 1, keeper));
+        assert!(tx_fee_is_unusually_high(MAX_TX_FEE_STROOPS, set));
+    }
+
+    // #1462 — 0 stays accepted for local testing, but is recognised as
+    // disabling the gate so boot logs a warning naming it.
+    #[test]
+    fn zero_min_keeper_balance_is_accepted_and_flagged_as_disabling_the_gate() {
+        let mut env = valid_env();
+        env.insert("MIN_KEEPER_BALANCE_XLM", "0".to_string());
+
+        let config = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert!(balance_gate_disabled(config.min_keeper_balance_xlm));
+        assert!(!balance_gate_disabled(DEFAULT_MIN_KEEPER_BALANCE_XLM));
+        assert!(!balance_gate_disabled(0.5));
     }
 }

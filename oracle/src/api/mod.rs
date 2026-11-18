@@ -360,6 +360,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             HeaderValue::from_static("no-store"),
         ))
         .layer(axum::middleware::from_fn(map_method_not_allowed))
+        // Request timeout: return 408 if a handler takes longer than 30 s
+        // (#1259). Applied outside the trace layer so the span captures the
+        // timeout as a 408, not as an internal server error.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(30),
+        ))
+        // Hard cap on concurrent requests (#1259). Excess requests receive
+        // 503 immediately rather than queuing, keeping /health and /ready
+        // reachable even under load. 512 is well above a single Fly machine's
+        // realistic per-instance concurrency while still bounding memory.
+        .layer(ConcurrencyLimitLayer::new(512))
         // Request timeout: return 408 if a handler takes longer than
         // REQUEST_TIMEOUT (#1259, #1452). Applied outside the trace layer so
         // the span captures the timeout as a 408, not as an internal error.
