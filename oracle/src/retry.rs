@@ -93,6 +93,7 @@ fn log_retry_failure<E: std::fmt::Debug>(
     retryable: bool,
 ) {
     tracing::warn!(
+        event = "retry_attempt_failed",
         attempt,
         max_attempts,
         retryable,
