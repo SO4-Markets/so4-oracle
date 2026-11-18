@@ -17,6 +17,14 @@ pub const DEFAULT_KEEPER_LOOP_MS: u64 = 1_500;
 pub const DEFAULT_SET_PRICES_TX_FEE: u32 = 1_000_000;
 /// Default inclusion fee (stroops) for keeper handler transactions.
 pub const DEFAULT_KEEPER_TX_FEE: u32 = 2_000_000;
+/// Highest inclusion fee accepted for `SET_PRICES_TX_FEE` or `KEEPER_TX_FEE`:
+/// 1 XLM per transaction (#1463). The vars are `u32` stroops, so without a
+/// bound a mistyped extra three zeros is a 1000x fee accepted at boot and paid
+/// on every submission at keeper-loop cadence.
+pub const MAX_TX_FEE_STROOPS: u32 = 10_000_000;
+/// A fee above this multiple of its default is accepted but logged at
+/// startup, so a deliberate raise is visible in the boot logs (#1463).
+const TX_FEE_WARN_MULTIPLIER: u32 = 2;
 /// Default timeout in seconds for graceful shutdown of background tasks.
 pub const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
@@ -408,6 +416,14 @@ impl Config {
             })(),
             DEFAULT_MIN_KEEPER_BALANCE_XLM
         );
+        if balance_gate_disabled(min_keeper_balance_xlm) {
+            tracing::warn!(
+                min_keeper_balance_xlm,
+                "MIN_KEEPER_BALANCE_XLM=0 disables the keeper balance gate: no low-balance \
+                 error, /ready gate or metric will fire before submissions fail for \
+                 insufficient funds — use only for local testing"
+            );
+        }
 
         let set_prices_tx_fee: u32 = collect_or_default!(
             (|| {
@@ -416,15 +432,14 @@ impl Config {
                     "SET_PRICES_TX_FEE",
                     &DEFAULT_SET_PRICES_TX_FEE.to_string(),
                 )?;
-                if fee == 0 {
-                    return Err(EnvError::InvalidVar {
-                        var: "SET_PRICES_TX_FEE",
-                        reason: "must be greater than 0".to_string(),
-                    });
-                }
-                Ok(fee)
+                validate_tx_fee("SET_PRICES_TX_FEE", fee)
             })(),
             DEFAULT_SET_PRICES_TX_FEE
+        );
+        warn_if_tx_fee_high(
+            "SET_PRICES_TX_FEE",
+            set_prices_tx_fee,
+            DEFAULT_SET_PRICES_TX_FEE,
         );
 
         let keeper_tx_fee: u32 = collect_or_default!(
@@ -434,16 +449,11 @@ impl Config {
                     "KEEPER_TX_FEE",
                     &DEFAULT_KEEPER_TX_FEE.to_string(),
                 )?;
-                if fee == 0 {
-                    return Err(EnvError::InvalidVar {
-                        var: "KEEPER_TX_FEE",
-                        reason: "must be greater than 0".to_string(),
-                    });
-                }
-                Ok(fee)
+                validate_tx_fee("KEEPER_TX_FEE", fee)
             })(),
             DEFAULT_KEEPER_TX_FEE
         );
+        warn_if_tx_fee_high("KEEPER_TX_FEE", keeper_tx_fee, DEFAULT_KEEPER_TX_FEE);
 
         let price_loop_interval = collect_or_default!(
             (|| {
@@ -557,6 +567,50 @@ impl Config {
             binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         })
     }
+}
+
+/// Rejects a zero fee and a fee above [`MAX_TX_FEE_STROOPS`] (#1463).
+fn validate_tx_fee(var: &'static str, fee: u32) -> Result<u32, EnvError> {
+    if fee == 0 {
+        return Err(EnvError::InvalidVar {
+            var,
+            reason: "must be greater than 0".to_string(),
+        });
+    }
+    if fee > MAX_TX_FEE_STROOPS {
+        return Err(EnvError::InvalidVar {
+            var,
+            reason: format!(
+                "must be at most {MAX_TX_FEE_STROOPS} stroops (1 XLM) per transaction, got {fee}"
+            ),
+        });
+    }
+    Ok(fee)
+}
+
+/// True when an accepted fee is still far enough above its default that it
+/// should be visible in the boot logs (#1463).
+fn tx_fee_is_unusually_high(fee: u32, default: u32) -> bool {
+    fee > default.saturating_mul(TX_FEE_WARN_MULTIPLIER)
+}
+
+fn warn_if_tx_fee_high(var: &'static str, fee: u32, default: u32) {
+    if tx_fee_is_unusually_high(fee, default) {
+        tracing::warn!(
+            var,
+            fee_stroops = fee,
+            default_stroops = default,
+            multiplier = TX_FEE_WARN_MULTIPLIER,
+            "inclusion fee is well above its default; it is paid on every submission"
+        );
+    }
+}
+
+/// `MIN_KEEPER_BALANCE_XLM=0` is accepted for local testing, but it turns the
+/// balance gate off entirely: `spendable < 0` is false for any funded account
+/// (#1462). Only `0` reaches here, since negative values are rejected.
+fn balance_gate_disabled(min_keeper_balance_xlm: f64) -> bool {
+    min_keeper_balance_xlm <= 0.0
 }
 
 fn required(
@@ -1745,5 +1799,58 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // #1463 — a mistyped extra three zeros must fail at boot, naming the limit.
+    #[test]
+    fn config_from_lookup_rejects_tx_fees_above_the_cap() {
+        for var in ["SET_PRICES_TX_FEE", "KEEPER_TX_FEE"] {
+            let mut env = valid_env();
+            env.insert(var, (MAX_TX_FEE_STROOPS + 1).to_string());
+
+            let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
+
+            let EnvError::InvalidVar { var: got, reason } = &err.0[0] else {
+                panic!("{var}: expected InvalidVar, got {err}");
+            };
+            assert_eq!(*got, var);
+            assert!(reason.contains("10000000"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn config_from_lookup_accepts_tx_fees_at_the_cap() {
+        let mut env = valid_env();
+        env.insert("SET_PRICES_TX_FEE", MAX_TX_FEE_STROOPS.to_string());
+        env.insert("KEEPER_TX_FEE", MAX_TX_FEE_STROOPS.to_string());
+
+        let config = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(config.set_prices_tx_fee, MAX_TX_FEE_STROOPS);
+        assert_eq!(config.keeper_tx_fee, MAX_TX_FEE_STROOPS);
+    }
+
+    #[test]
+    fn tx_fee_warning_threshold_is_relative_to_the_default() {
+        let (set, keeper) = (DEFAULT_SET_PRICES_TX_FEE, DEFAULT_KEEPER_TX_FEE);
+
+        assert!(!tx_fee_is_unusually_high(set, set));
+        assert!(!tx_fee_is_unusually_high(keeper * 2, keeper));
+        assert!(tx_fee_is_unusually_high(keeper * 2 + 1, keeper));
+        assert!(tx_fee_is_unusually_high(MAX_TX_FEE_STROOPS, set));
+    }
+
+    // #1462 — 0 stays accepted for local testing, but is recognised as
+    // disabling the gate so boot logs a warning naming it.
+    #[test]
+    fn zero_min_keeper_balance_is_accepted_and_flagged_as_disabling_the_gate() {
+        let mut env = valid_env();
+        env.insert("MIN_KEEPER_BALANCE_XLM", "0".to_string());
+
+        let config = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert!(balance_gate_disabled(config.min_keeper_balance_xlm));
+        assert!(!balance_gate_disabled(DEFAULT_MIN_KEEPER_BALANCE_XLM));
+        assert!(!balance_gate_disabled(0.5));
     }
 }

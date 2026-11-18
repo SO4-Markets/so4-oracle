@@ -4,7 +4,7 @@ Read and execute these instructions strictly before committing code or opening a
 
 ## 1. Project Orientation
 - **Binary**: This is an Axum service running the price loop, the keeper loop, and the HTTP API.
-- **Workspace Layout**: Core logic lives in `oracle/`, and shared configuration is in `shared/config/`.
+- **Workspace Layout**: Core logic lives in `oracle/`, and shared configuration is in `shared/config/`. `shared/config` holds the per-token `TokenConfig` schema and its token-list checks; `oracle::config` holds environment parsing and oracle-specific token checks. A new per-token field goes in `shared/config`, a new env var in `oracle::config` (#1460; see the crate doc in `shared/config/src/lib.rs`).
 - **Integration Tests**: Located exclusively in `oracle/tests/`. **Never** create or use a root `tests/` directory—the root `Cargo.toml` is a virtual manifest (`[workspace]` with no `[package]`), so Cargo builds no test target from it and silently ignores a root `tests/`. Integration tests belong to the `oracle` crate by choice: `shared/config` is covered by unit tests in `shared/config/src/lib.rs`, and if it ever needs an integration test it goes in `shared/config/tests/`, never the root.
 - **Docs**: `docs/KEEPER_STATE_MACHINE.md` documents the keeper failure state machine (constant names match the code); `docs/RUNBOOK.md` is the operator runbook.
 

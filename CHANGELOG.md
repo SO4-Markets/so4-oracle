@@ -49,6 +49,14 @@ under `[Unreleased]` (see `AGENTS.md` §3).
 - `oracle.service` start limit raised from 3 restarts per 60s to 50 per 300s and moved to the `[Unit]` section, so a crash loop no longer leaves the oracle permanently down pending a manual `systemctl reset-failed` (#544)
 
 ### Changed
+- `SET_PRICES_TX_FEE` and `KEEPER_TX_FEE` are capped at 10000000 stroops (1 XLM)
+  per transaction; a fee above 2x its default is accepted but logged at
+  startup (#1463)
+- `MIN_KEEPER_BALANCE_XLM=0` now logs a startup warning that it disables the
+  keeper balance gate (#1462)
+- `shared/config` crate docs explain its split from `oracle::config`, and every
+  `TokenConfig` field documents its unit, range and interactions, tabulated in
+  `docs/ENVIRONMENT.md` (#1460, #1461)
 - `TokenConfig.min` and `TokenConfig.max` removed. They were documented as
   "used by the API server for display" but nothing read them; the API serves
   runtime percentile bounds from `CachedPrice` instead. **Breaking for any
