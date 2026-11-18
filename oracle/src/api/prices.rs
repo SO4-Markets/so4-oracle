@@ -25,7 +25,7 @@ const READY_RPC_PROBE_TIMEOUT_SECS: u64 = 4;
 /// keeper balance with retries). Must stay below both Fly's and Railway's
 /// health-check timeouts so the service returns 503 promptly instead of
 /// hanging until the platform probe kills it (#1042).
-const READY_CHECK_TIMEOUT_SECS: u64 = 15;
+pub(crate) const READY_CHECK_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Deserialize)]
 pub struct FailedSubmissionsQuery {
@@ -221,9 +221,7 @@ where
 
 /// A single RPC-reachability probe against the configured Stellar RPC URL.
 async fn probe_rpc_reachability(state: &AppState) -> Result<(), ApiError> {
-    let response = state
-        .http
-        .get(&state.config.stellar_rpc_url)
+    let response = crate::http::with_correlation(state.http.get(&state.config.stellar_rpc_url))
         .timeout(Duration::from_secs(READY_RPC_PROBE_TIMEOUT_SECS))
         .send()
         .await

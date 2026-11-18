@@ -43,6 +43,30 @@ The `readme_endpoint_table_covers_every_route` test in `oracle/src/api/mod.rs`
 parses this table and fails if any route registered in `build_router` is
 missing from it.
 
+### Timeouts and limits
+
+Request deadlines nest, innermost first (#1452). Platform health-check
+timeouts (`fly.toml`, `railway.json`) should sit above the probe's own budget
+and at or below the global timeout, so the handler's answer is the one the
+platform sees:
+
+| Scope                          | Budget | Where                                                                                                   |
+| ------------------------------ | ------ | ------------------------------------------------------------------------------------------------------- |
+| `/ready` external checks       | 15s    | `READY_CHECK_TIMEOUT_SECS` (`api/prices.rs`)                                                            |
+| Admin Horizon lookups, retries | 20s    | `ADMIN_EXTERNAL_BUDGET` (`api/admin.rs`); `/keeper/balance` answers `504 {"error":"upstream_timeout"}` |
+| Every request                  | 30s    | `REQUEST_TIMEOUT` (`api/mod.rs`); `408` when exceeded                                                   |
+
+The global timeout is checked at compile time to stay above both budgets.
+`/health` and `/ready` sit outside the concurrency limit (512 in-flight
+requests) and are not recorded in the HTTP request metrics, so a load spike or
+a probe flood cannot take the liveness probe down or contend on the metrics
+lock (#1453, #1454).
+
+Every response carries an `x-request-id`, and the outbound RPC, Horizon and
+price-source calls made while serving it send the same id. Background price
+and keeper cycles generate their own `cycle_id`, record it on every log line
+of the cycle, and send that instead (#1455).
+
 ## Smoke Check
 
 ```sh

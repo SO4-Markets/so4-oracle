@@ -3,6 +3,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use shared_config::TokenConfig;
 use tokio::time::{interval, timeout, MissedTickBehavior};
+use tracing::Instrument;
 
 use crate::prices::AggregatedPrice;
 use crate::retry::MAX_BACKOFF_DELAY_MS;
@@ -120,7 +121,18 @@ pub async fn run_price_loop(state: Arc<AppState>) {
 /// Fetches the latest Stellar ledger sequence, iterates through configured tokens,
 /// builds and aggregates their prices, signs the results, and updates the cache.
 /// Never panics on individual errors; they are recorded as failure submissions.
+/// Runs one price cycle under a fresh cycle id (#1455): every log line in the
+/// cycle carries it as `cycle_id`, and outbound source/RPC calls send it as
+/// `x-request-id`, so one cycle's fetches can be grouped and traced.
 pub async fn run_price_cycle(state: Arc<AppState>) {
+    let cycle_id = crate::http::new_cycle_id();
+    let span = tracing::info_span!("price_cycle", cycle_id = %cycle_id);
+    crate::http::with_correlation_id(cycle_id, run_price_cycle_inner(state))
+        .instrument(span)
+        .await
+}
+
+async fn run_price_cycle_inner(state: Arc<AppState>) {
     let started = Instant::now();
     {
         let mut status = state.cycle_status.write().await;

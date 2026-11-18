@@ -238,8 +238,7 @@ pub(crate) async fn fetch_pyth_price_with_url(
     let query = format!("ids[]={feed_id}");
     let url_string = format!("{base_url}?{query}");
 
-    let response = crate::http::client()
-        .get(&url_string)
+    let response = crate::http::with_correlation(crate::http::client().get(&url_string))
         .send()
         .await
         .map_err(|err| PythPriceError::NetworkError(err.to_string()))?;
@@ -292,7 +291,7 @@ pub async fn fetch_pyth_prices(
         .join("&");
     let url_string = format!("{PYTH_HERMES_URL}?{query}");
 
-    let mut request = crate::http::client().get(&url_string);
+    let mut request = crate::http::with_correlation(crate::http::client().get(&url_string));
     if let Some(key) = api_key {
         request = request.bearer_auth(key);
     }

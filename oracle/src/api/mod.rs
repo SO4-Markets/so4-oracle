@@ -151,6 +151,34 @@ fn is_probe_response<B>(response: &Response<B>) -> bool {
     response.extensions().get::<ProbeRoute>().is_some()
 }
 
+/// Makes the inbound `x-request-id` the correlation id for everything the
+/// handler does, so its outbound RPC, Horizon and price-source calls carry
+/// the same id (#1455).
+async fn scope_correlation_id(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let id = request
+        .extensions()
+        .get::<tower_http::request_id::RequestId>()
+        .and_then(|id| id.header_value().to_str().ok())
+        .map(str::to_owned);
+    match id {
+        Some(id) => crate::http::with_correlation_id(id, next.run(request)).await,
+        None => next.run(request).await,
+    }
+}
+
+/// Outermost request deadline (#1452). It must stay above every per-route
+/// budget, or a caller gets a bare 408 instead of the handler's own, more
+/// specific timeout response. Checked at compile time below; the full
+/// hierarchy is documented in oracle/README.md.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const _: () = assert!(REQUEST_TIMEOUT.as_secs() > admin::ADMIN_EXTERNAL_BUDGET.as_secs());
+const _: () = assert!(REQUEST_TIMEOUT.as_secs() > prices::READY_CHECK_TIMEOUT_SECS);
+
+const MAX_CONCURRENT_REQUESTS: usize = 512;
+
 async fn track_metrics(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     request: axum::extract::Request,
@@ -270,8 +298,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             },
         );
 
-    Router::new()
-        .merge(probes)
+    // Everything except the probes. The concurrency cap and HTTP metrics are
+    // layered here, on these routes only (#1453, #1454): a liveness probe must
+    // never wait for a permit behind a load spike, and an unauthenticated
+    // probe flood must not contend on the metrics mutex every price and
+    // keeper cycle also uses.
+    let limited = Router::new()
         .merge(public)
         .route("/oracle/status", get(admin::oracle_status))
         .route("/keeper/status", get(admin::keeper_status))
@@ -286,7 +318,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(prices::failed_submissions),
         )
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found") })
-        .with_state(state.clone())
+        .layer(axum::middleware::from_fn_with_state(state.clone(), track_metrics))
+        // Hard cap on concurrent requests (#1259). 512 is well above a single
+        // Fly machine's realistic per-instance concurrency while still
+        // bounding memory. Probes are merged in below, outside this layer.
+        .layer(ConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS));
+
+    Router::new()
+        .merge(probes)
+        .merge(limited)
+        .with_state(state)
         // #1044 — CatchPanicLayer must be the OUTERMOST layer so it wraps
         // every handler. With `panic = "abort"` in the release profile a
         // panicking handler would otherwise abort the entire process; this
@@ -301,9 +342,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // "" (#790). `PropagateRequestIdLayer` only needs to run after the
         // handler, so it stays innermost.
         .layer(PropagateRequestIdLayer::x_request_id())
+        // Inside SetRequestIdLayer, so the id exists by the time this makes
+        // it the correlation id outbound calls send (#1455).
+        .layer(axum::middleware::from_fn(scope_correlation_id))
         .layer(trace_layer)
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        .layer(axum::middleware::from_fn_with_state(state, track_metrics))
         // No response from this service is meant to be cached — /prices is
         // the one endpoint explicitly CORS-enabled for direct browser
         // access, updates roughly once a second, and backs a trading
@@ -317,15 +360,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             HeaderValue::from_static("no-store"),
         ))
         .layer(axum::middleware::from_fn(map_method_not_allowed))
-        // Request timeout: return 408 if a handler takes longer than 30 s
-        // (#1259). Applied outside the trace layer so the span captures the
-        // timeout as a 408, not as an internal server error.
-        .layer(TimeoutLayer::new(Duration::from_secs(30)))
-        // Hard cap on concurrent requests (#1259). Excess requests receive
-        // 503 immediately rather than queuing, keeping /health and /ready
-        // reachable even under load. 512 is well above a single Fly machine's
-        // realistic per-instance concurrency while still bounding memory.
-        .layer(ConcurrencyLimitLayer::new(512))
+        // Request timeout: return 408 if a handler takes longer than
+        // REQUEST_TIMEOUT (#1259, #1452). Applied outside the trace layer so
+        // the span captures the timeout as a 408, not as an internal error.
+        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
 }
 
 #[cfg(test)]
@@ -408,6 +446,26 @@ mod tests {
             response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none(),
             "admin route must not carry CORS headers"
         );
+    // #1453, #1454 — probes sit outside the metrics and concurrency layers,
+    // so a probe flood neither records HTTP metrics nor takes permits. Every
+    // other route is still recorded.
+    #[tokio::test]
+    async fn probes_bypass_http_metrics_other_routes_do_not() {
+        let config = Arc::new(Config::default_for_tests());
+        let state = Arc::new(AppState::new(config));
+        let app = super::build_router(Arc::clone(&state));
+
+        for uri in ["/health", "/ready", "/prices"] {
+            let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            app.clone().oneshot(request).await.unwrap();
+        }
+
+        let metrics = state.metrics.to_prometheus();
+        assert!(metrics.contains("route=\"/prices\""), "{metrics}");
+        assert!(!metrics.contains("route=\"/health\""), "{metrics}");
+        assert!(!metrics.contains("route=\"/ready\""), "{metrics}");
+    }
+
     // #1459 — the trace layer logs a request at `debug` exactly when its
     // response carries the probe marker. The marker must survive every outer
     // middleware layer on /health and /ready, and appear on no other route.
