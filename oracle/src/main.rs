@@ -1,9 +1,14 @@
 use std::sync::Arc;
 
-use oracle::{api, AppState, Config};
+use oracle::{api, preflight, AppState, Config};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
+
+/// Exit code for configuration errors, distinct from transient runtime
+/// failures so an orchestrator restart policy can avoid retrying a
+/// misconfigured deployment (railway.json `restartPolicyMaxRetries`).
+const CONFIG_ERROR_EXIT_CODE: i32 = 78;
 
 #[tokio::main]
 async fn main() {
@@ -23,15 +28,28 @@ async fn main() {
     let config = match Config::from_env() {
         Ok(config) => Arc::new(config),
         Err(errors) => {
-            for error in &errors.0 {
-                tracing::error!(%error, "configuration failed");
-            }
-            std::process::exit(1);
+            tracing::error!(
+                "configuration failed: {} errors\n{}",
+                errors.0.len(),
+                errors
+            );
+            std::process::exit(CONFIG_ERROR_EXIT_CODE);
         }
     };
 
     let bind_addr = config.bind_addr;
     let state = Arc::new(AppState::new(Arc::clone(&config)));
+
+    if std::env::var("SKIP_PREFLIGHT").as_deref() == Ok("true") {
+        tracing::warn!("SKIP_PREFLIGHT=true set; skipping startup preflight checks");
+    } else {
+        let result = preflight::preflight(&config).await;
+        *state.preflight_result.write().await = Some(result.clone());
+        if result.hard_failed() {
+            tracing::error!("preflight hard checks failed; exiting");
+            std::process::exit(CONFIG_ERROR_EXIT_CODE);
+        }
+    }
     let app = api::build_router(Arc::clone(&state));
 
     let listener = match TcpListener::bind(bind_addr).await {

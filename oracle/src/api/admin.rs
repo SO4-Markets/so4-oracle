@@ -24,6 +24,7 @@ pub struct OracleStatusResponse {
     pub keeper_balance: Option<f64>,
     pub prices: Vec<CachedPrice>,
     pub recent_errors: Vec<FailedSubmission>,
+    pub preflight: Option<crate::preflight::PreflightResult>,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,12 +68,14 @@ pub async fn oracle_status(
         .cloned()
         .collect();
     let recent_errors = state.failures.lock().await.iter().rev().cloned().collect();
+    let preflight = state.preflight_result.read().await.clone();
 
     Json(OracleStatusResponse {
         last_cycle_time,
         keeper_balance: None,
         prices,
         recent_errors,
+        preflight,
     })
 }
 
