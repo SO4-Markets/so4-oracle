@@ -191,6 +191,7 @@ fn find_largest_consistent_cluster(
     })
 }
 
+#[cfg(test)]
 pub fn compute_confidence_interval(prices: &[i128]) -> Option<PriceProps> {
     compute_confidence_interval_with_spread(prices, 100)
 }
@@ -228,7 +229,9 @@ pub fn compute_confidence_interval_with_spread(
     }
 }
 
-/// Interpolating percentile (nearest-rank method).
+/// Interpolating percentile via linear interpolation between the two
+/// neighbouring order statistics (`index = p/100 * (n-1)`), rounded — the
+/// result is generally *not* one of the observed prices.
 pub fn percentile(sorted: &[i128], p: u8) -> i128 {
     debug_assert!(!sorted.is_empty());
     if sorted.len() == 1 || p == 0 {
@@ -392,6 +395,7 @@ pub fn filter_outliers(
 }
 
 /// Compute the median of a slice of prices safely.
+#[cfg(test)]
 pub fn compute_median(prices: &[i128]) -> Option<i128> {
     if prices.len() < 2 {
         return None;
