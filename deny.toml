@@ -27,6 +27,28 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
+# Duplicates that cannot be collapsed from this repo yet (#1440). Each entry
+# names the dependency that forces the older version; remove the entry once
+# that dependency moves, and any new duplicate fails `cargo deny` in CI.
+skip = [
+    # stellar-xdr 27 pins stellar-strkey 0.0.13 (and its crate-git-revision
+    # 0.0.6 build dep); the oracle itself uses stellar-strkey 0.0.18.
+    { crate = "stellar-strkey@0.0.13", reason = "pinned by stellar-xdr 27" },
+    { crate = "crate-git-revision@0.0.6", reason = "pinned by stellar-xdr 27 / stellar-strkey 0.0.13" },
+    # reqwest 0.13 depends on tower-http 0.6; the API layers use 0.7.
+    { crate = "tower-http@0.6.11", reason = "pulled in by reqwest 0.13" },
+    # The oracle depends on rand 0.8 directly, and ed25519/ring still use the
+    # rand_core 0.6 / getrandom 0.2 line; quinn-proto (reqwest) uses rand 0.9.
+    { crate = "rand@0.8.8", reason = "direct dependency; rand 0.9 migration not done yet" },
+    { crate = "rand_chacha@0.3.1", reason = "rand 0.8" },
+    { crate = "rand_core@0.6.4", reason = "rand 0.8, signature 2 (ed25519-dalek)" },
+    { crate = "getrandom@0.2.17", reason = "rand_core 0.6, ring 0.17" },
+    { crate = "getrandom@0.3.4", reason = "rand_core 0.9, quinn-proto, jobserver; uuid uses 0.4" },
+    { crate = "r-efi@5.3.0", reason = "getrandom 0.3" },
+    # ring, quinn-udp, errno, winapi-util and rustls-platform-verifier still
+    # target windows-sys 0.52 (Windows-only targets).
+    { crate = "windows-sys@0.52.0", reason = "ring, quinn-udp, errno, winapi-util, rustls-platform-verifier" },
+]
 
 [sources]
 unknown-registry = "deny"

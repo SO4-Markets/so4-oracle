@@ -273,12 +273,22 @@ struct HorizonBalanceEntry {
 #[derive(Debug, Deserialize)]
 struct HorizonAccountResponse {
     balances: Vec<HorizonBalanceEntry>,
+    /// Trustlines, offers, data entries and extra signers; each raises the
+    /// account's locked reserve (#1446). Absent is read as zero.
+    #[serde(default)]
+    subentry_count: u32,
+}
+
+/// The parts of a Horizon account the keeper's balance check needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountBalance {
+    /// Native (XLM) balance in stroops.
+    pub balance_stroops: i64,
+    pub subentry_count: u32,
 }
 
 /// Parse the JSON body returned by `GET /accounts/{id}` on a Horizon server.
-///
-/// Returns the native (XLM) balance in stroops (1 XLM = 10_000_000 stroops).
-pub fn parse_account_balance_response(body: &str) -> Result<i64, RpcError> {
+pub fn parse_account_response(body: &str) -> Result<AccountBalance, RpcError> {
     let resp: HorizonAccountResponse =
         serde_json::from_str(body).map_err(|e| RpcError::JsonError(e.to_string()))?;
 
@@ -288,7 +298,17 @@ pub fn parse_account_balance_response(body: &str) -> Result<i64, RpcError> {
         .find(|b| b.asset_type == "native")
         .ok_or_else(|| RpcError::JsonError("no native balance entry".to_string()))?;
 
-    parse_xlm_balance_to_stroops(&native.balance)
+    Ok(AccountBalance {
+        balance_stroops: parse_xlm_balance_to_stroops(&native.balance)?,
+        subentry_count: resp.subentry_count,
+    })
+}
+
+/// Parse the JSON body returned by `GET /accounts/{id}` on a Horizon server.
+///
+/// Returns the native (XLM) balance in stroops (1 XLM = 10_000_000 stroops).
+pub fn parse_account_balance_response(body: &str) -> Result<i64, RpcError> {
+    parse_account_response(body).map(|account| account.balance_stroops)
 }
 
 /// Stroops in one XLM: 1 XLM = 10^7 stroops.
@@ -340,12 +360,12 @@ fn parse_xlm_balance_to_stroops(balance: &str) -> Result<i64, RpcError> {
         .ok_or_else(unparseable)
 }
 
-/// Fetch the XLM balance for `account_id` from the Horizon server at
-/// `horizon_url`.  Returns the balance in stroops.
-pub async fn get_account_balance_stroops(
+/// Fetch the XLM balance and subentry count for `account_id` from the Horizon
+/// server at `horizon_url`.
+pub async fn get_account_balance(
     horizon_url: &str,
     account_id: &str,
-) -> Result<i64, RpcError> {
+) -> Result<AccountBalance, RpcError> {
     let url = format!("{horizon_url}/accounts/{account_id}");
 
     let response = crate::http::with_correlation(crate::http::client().get(&url))
@@ -372,12 +392,62 @@ pub async fn get_account_balance_stroops(
         });
     }
 
-    parse_account_balance_response(&body)
+    parse_account_response(&body)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #1412 — the exact integer parser is tested directly, with exact stroop
+    // values, instead of only through `parse_account_balance_response`.
+    #[test]
+    fn parse_xlm_balance_to_stroops_exact_values() {
+        let cases = [
+            ("100.0000000", 1_000_000_000),
+            ("0.0000001", 1),
+            ("0.0000000", 0),
+            ("1.5", 15_000_000),
+            ("1.", 10_000_000),
+            ("42", 420_000_000),
+            ("1.12345678", 11_234_567),
+            (" 2.5 ", 25_000_000),
+            ("922337203685.4775807", i64::MAX),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_xlm_balance_to_stroops(input),
+                Ok(expected),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_xlm_balance_to_stroops_rejects_malformed_input() {
+        let cases = [
+            "",
+            "abc",
+            "1.2.3",
+            "+1",
+            "-1",
+            ".5",
+            "1e7",
+            "1,5",
+            "922337203685.4775808",
+            "922337203686",
+            "99999999999999999999",
+        ];
+        for input in cases {
+            assert!(
+                matches!(
+                    parse_xlm_balance_to_stroops(input),
+                    Err(RpcError::JsonError(_))
+                ),
+                "{input:?} should be rejected"
+            );
+        }
+    }
 
     // #1449 — every variant is classified on purpose. `variant` has no
     // wildcard arm, so a new variant fails to compile until it is listed, and
@@ -679,10 +749,10 @@ mod tests {
         assert!(matches!(err, RpcError::JsonError(_)));
     }
 
-    // ── get_account_balance_stroops — HTTP-level tests (#404) ────────────────
+    // ── get_account_balance — HTTP-level tests (#404) ────────────────────────
 
     #[tokio::test]
-    async fn get_account_balance_stroops_200_returns_stroops() {
+    async fn get_account_balance_200_returns_stroops() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -700,12 +770,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        let result = get_account_balance_stroops(&server.uri(), "GABC").await;
-        assert_eq!(result.unwrap(), 500_000_000); // 50 XLM in stroops
+        let result = get_account_balance(&server.uri(), "GABC").await;
+        assert_eq!(result.unwrap().balance_stroops, 500_000_000); // 50 XLM in stroops
     }
 
     #[tokio::test]
-    async fn get_account_balance_stroops_404_returns_http_error() {
+    async fn get_account_balance_404_returns_unfunded_account() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -717,14 +787,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = get_account_balance_stroops(&server.uri(), "GNOT_FOUND")
+        let err = get_account_balance(&server.uri(), "GNOT_FOUND")
             .await
             .unwrap_err();
-        assert!(matches!(err, RpcError::HttpError { status: 404, .. }));
+        // An unfunded keeper is reported distinctly from an HTTP error (#1216).
+        assert!(matches!(err, RpcError::UnfundedAccount(_)));
     }
 
     #[tokio::test]
-    async fn get_account_balance_stroops_500_returns_http_error() {
+    async fn get_account_balance_500_returns_http_error() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -736,7 +807,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = get_account_balance_stroops(&server.uri(), "GABC")
+        let err = get_account_balance(&server.uri(), "GABC")
             .await
             .unwrap_err();
         assert!(matches!(err, RpcError::HttpError { status: 500, .. }));
