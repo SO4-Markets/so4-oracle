@@ -16,6 +16,7 @@ under `[Unreleased]` (see `AGENTS.md` §3).
 ## [Unreleased]
 
 ### Added
+- Boot-time bounds for `PRICE_LOOP_MS` / `KEEPER_LOOP_MS` (250–60000 ms, and `PRICE_LOOP_MS` below every token's `stale_after_seconds`), a `KEEPER_INDEX` cap of 255, and `PYTH_API_KEY` shape validation; startup warnings for pyth tokens with no key and for tokens one source outage away from two-source aggregation; the `oracle_token_sources_available` gauge (#1464, #1465, #1466, #1467)
 - `rust-toolchain.toml` to pin stable toolchain for reproducible builds (#979)
 - Package metadata (version, edition, license, repository, description) to workspace `Cargo.toml` (#977)
 - Missing env vars (`SET_PRICES_TX_FEE`, `KEEPER_TX_FEE`, `PYTH_API_KEY`) to `oracle/README.md` (#974)

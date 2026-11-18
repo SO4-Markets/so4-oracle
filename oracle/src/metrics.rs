@@ -70,6 +70,9 @@ pub struct Metrics {
     counters: Mutex<Counters>,
     token_source_fetch_failures: Mutex<BTreeMap<TokenSourceLabels, u64>>,
     token_source_outlier_rejections: Mutex<BTreeMap<TokenSourceLabels, u64>>,
+    /// Sources that returned a price for each symbol in the latest price
+    /// cycle (#1467), so "down to two sources" is alertable.
+    token_sources_available: Mutex<BTreeMap<String, usize>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,6 +162,14 @@ impl Metrics {
 
     /// Record that `source`'s price for `symbol`/`token` was excluded by the
     /// outlier filter during a price cycle (#728).
+    /// Record how many sources returned a price for `symbol` this cycle (#1467).
+    pub fn set_token_sources_available(&self, symbol: &str, count: usize) {
+        self.token_sources_available
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(symbol.to_string(), count);
+    }
+
     pub fn record_token_source_outlier_rejection(&self, symbol: &str, token: &str, source: &str) {
         let labels = TokenSourceLabels {
             symbol: symbol.to_string(),
@@ -372,6 +383,21 @@ impl Metrics {
             ));
         }
 
+        output.push_str("# HELP oracle_token_sources_available Sources that returned a price for the token in the latest price cycle; at 2 the outlier filter cannot reject anything\n");
+        output.push_str("# TYPE oracle_token_sources_available gauge\n");
+        for (symbol, count) in self
+            .token_sources_available
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+        {
+            output.push_str(&format!(
+                "oracle_token_sources_available{{symbol=\"{}\"}} {}\n",
+                escape_label_value(symbol),
+                count
+            ));
+        }
+
         output.push_str("# HELP oracle_submit_failures_total Total number of submit failures\n");
         output.push_str("# TYPE oracle_submit_failures_total counter\n");
         output.push_str(&format!(
@@ -577,6 +603,19 @@ mod tests {
         // 2 matches: one for the HELP/TYPE header, one for the actual metric.
         assert_eq!(matches, 3);
         assert!(output.contains("oracle_http_requests_total{route=\"/unmatched\",method=\"GET\",status_class=\"4xx\"} 2"));
+    }
+
+    // #1467 — the latest per-symbol source count is exported as a gauge.
+    #[test]
+    fn token_sources_available_reports_the_latest_count() {
+        let metrics = Metrics::new();
+        metrics.set_token_sources_available("TBTC", 3);
+        metrics.set_token_sources_available("TBTC", 2);
+
+        let output = metrics.to_prometheus();
+        assert!(output.contains("# TYPE oracle_token_sources_available gauge"));
+        assert!(output.contains("oracle_token_sources_available{symbol=\"TBTC\"} 2"));
+        assert!(!output.contains("oracle_token_sources_available{symbol=\"TBTC\"} 3"));
     }
 }
 

@@ -49,7 +49,7 @@ Startup rejects the same contract ID in two of these variables, naming both.
 | `KEEPER_PRIVATE_KEY`     | yes      |           | Hex-encoded 32-byte ed25519 seed used to sign prices. Secret — never put it in `fly.toml`/`railway.json`. |
 | `KEEPER_SECRET_KEY`      | yes      |           | `S…` strkey secret seed used to sign transactions. Secret.                                             |
 | `KEEPER_ACCOUNT_ID`      | yes      |           | `G…` public account ID of the keeper.                                                                  |
-| `KEEPER_INDEX`           |          | `0`       | Labels which keeper signed a price; no work partitioning (the service is single-instance only).        |
+| `KEEPER_INDEX`           |          | `0`       | `data_store` slot holding this keeper's public key, written into every signed price; 0–255. No work partitioning. |
 | `MIN_KEEPER_BALANCE_XLM` |          | `10.0`    | Minimum spendable XLM before the keeper stops submitting. Finite and non-negative.                     |
 | `SET_PRICES_TX_FEE`      |          | `1000000` | Inclusion fee (stroops) for `set_prices` transactions.                                                 |
 | `KEEPER_TX_FEE`          |          | `2000000` | Inclusion fee (stroops) for keeper handler transactions.                                               |
@@ -59,10 +59,10 @@ Startup rejects the same contract ID in two of these variables, naming both.
 | Variable            | Required | Default                       | Description                                                                                                           |
 | ------------------- | -------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `ADMIN_API_TOKEN`   |          | unset (admin routes `503`)    | Bearer token for admin routes. At least 32 characters; the `.env.example` placeholder is rejected. Secret.           |
-| `PYTH_API_KEY`      |          | unset                         | API key for the production Hermes (Pyth) endpoint. Secret.                                                            |
+| `PYTH_API_KEY`      |          | unset                         | API key for the production Hermes (Pyth) endpoint. Secret. At least 16 chars, no whitespace; a startup warning names pyth tokens when unset. |
 | `PRICE_FEED_CONFIG` |          | embedded `config/tokens.json` | Inline JSON array of `TokenConfig` entries — not a file path. Use `PRICE_FEED_CONFIG="$(cat tokens.json)"` for a file. |
-| `PRICE_LOOP_MS`     |          | `1000`                        | Interval between price cycles (ms).                                                                                   |
-| `KEEPER_LOOP_MS`    |          | `1500`                        | Interval between keeper cycles (ms).                                                                                  |
+| `PRICE_LOOP_MS`     |          | `1000`                        | Interval between price cycles (ms), 250–60000, and shorter than every token's `stale_after_seconds`.                    |
+| `KEEPER_LOOP_MS`    |          | `1500`                        | Interval between keeper cycles (ms), 250–60000.                                                                       |
 
 ## Runtime
 
