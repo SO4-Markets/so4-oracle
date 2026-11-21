@@ -38,15 +38,26 @@ pub const SCALE_DIGITS: u32 = 30;
 /// they go on-chain.
 pub const FLOAT_PRECISION: i128 = 10i128.pow(SCALE_DIGITS);
 
-/// Returns the current Unix timestamp in seconds.
-///
-/// This is a convenience wrapper around `SystemTime::now() - UNIX_EPOCH`
-/// that returns the duration as seconds (`u64`). Closes #399.
+/// Trait representing a source of Unix timestamps.
+pub trait Clock: Send + Sync {
+    fn now_secs(&self) -> u64;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_secs(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0)
+    }
+}
+
+/// Returns the current Unix timestamp in seconds using SystemClock.
 pub fn current_timestamp_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+    SystemClock.now_secs()
 }
 
 #[cfg(test)]

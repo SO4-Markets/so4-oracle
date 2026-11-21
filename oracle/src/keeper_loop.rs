@@ -115,6 +115,11 @@ pub async fn run_keeper_loop(state: Arc<AppState>) {
             }
         }
 
+        if state.keeper_balance_below_min.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!("keeper balance below minimum; skipping keeper cycle");
+            continue;
+        }
+
         // When the previous cycle found no pending work, sleep an extra
         // IDLE_BACKOFF_MULTIPLIER * keeper_loop_interval before running again.
         // This cuts the 4 idle RPC calls per tick down to 4 per (multiplier+1)

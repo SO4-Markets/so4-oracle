@@ -250,11 +250,11 @@ pub async fn metrics(_auth: AdminAuth, State(state): State<Arc<AppState>>) -> Re
         for (symbol, price) in &cache.prices {
             // CachedPrice.timestamp is a Unix timestamp in seconds set by the
             // price loop when it stores a fetched price.
-            let age = now
+            let now_secs = now
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
-                .unwrap_or(0)
-                .saturating_sub(price.timestamp);
+                .unwrap_or(0);
+            let age = price.age_seconds(now_secs);
             prometheus.push_str(&format!(
                 "oracle_price_age_seconds{{symbol=\"{}\"}} {}\n",
                 symbol, age

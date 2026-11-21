@@ -27,8 +27,22 @@ pub struct CachedPrice {
     pub timestamp: u64,
     #[serde(rename = "ledger")]
     pub ledger_seq: u32,
+    #[serde(skip_serializing)]
     pub sources_used: Vec<String>,
     pub signature: String,
+}
+
+impl CachedPrice {
+    pub fn age_seconds(&self, now: u64) -> u64 {
+        now.saturating_sub(self.timestamp)
+    }
+
+    pub fn is_stale(&self, stale_after_seconds: u64, now: u64) -> bool {
+        match now.checked_sub(self.timestamp) {
+            Some(age) => age >= stale_after_seconds,
+            None => true,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
