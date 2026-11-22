@@ -11,6 +11,15 @@ use serde::Serialize;
 /// inner-array length.
 const HTTP_DURATION_BUCKETS: [&str; 7] = ["0.01", "0.05", "0.1", "0.25", "0.5", "1", "+Inf"];
 
+/// Bucket upper bounds for `oracle_price_cycle_duration_seconds_histogram`.
+/// Budget is 1 s; buckets capture sub-second cycles up to the 60 s tail
+/// that is the subject of the open latency investigation.
+const PRICE_CYCLE_BUCKETS: [f64; 8] = [0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0];
+
+/// Bucket upper bounds for `oracle_keeper_cycle_duration_seconds_histogram`.
+/// Budget is ~25 s; buckets capture normal runs and the 50 s timeout tail.
+const KEEPER_CYCLE_BUCKETS: [f64; 6] = [1.0, 2.5, 5.0, 10.0, 25.0, 50.0];
+
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct HttpRouteLabels {
     pub route: String,
@@ -61,6 +70,14 @@ struct Counters {
     http_request_duration_buckets: BTreeMap<String, [u64; 7]>,
     http_request_duration_sum: BTreeMap<String, f64>,
     http_auth_failures_total: BTreeMap<String, u64>,
+    // Histogram fields for price-cycle duration.
+    // Bucket array length = PRICE_CYCLE_BUCKETS.len() + 1 (+Inf slot).
+    price_cycle_duration_buckets: [u64; 9],
+    price_cycle_duration_sum: f64,
+    // Histogram fields for keeper-cycle duration.
+    // Bucket array length = KEEPER_CYCLE_BUCKETS.len() + 1 (+Inf slot).
+    keeper_cycle_duration_buckets: [u64; 7],
+    keeper_cycle_duration_sum: f64,
 }
 
 #[derive(Debug, Default)]
@@ -118,6 +135,17 @@ impl Metrics {
         c.price_cycle_latency_ms = latency_ms;
         c.token_fetch_ok += tokens_ok as u64;
         c.token_fetch_failures += tokens_failed as u64;
+        let secs = latency_ms as f64 / 1000.0;
+        c.price_cycle_duration_sum += secs;
+        // Cumulative histogram: increment every bucket whose upper bound >= secs,
+        // so each bucket counts all observations up to and including that bound.
+        // The +Inf slot (index PRICE_CYCLE_BUCKETS.len()) always gets incremented.
+        for (i, &bound) in PRICE_CYCLE_BUCKETS.iter().enumerate() {
+            if secs <= bound {
+                c.price_cycle_duration_buckets[i] += 1;
+            }
+        }
+        c.price_cycle_duration_buckets[PRICE_CYCLE_BUCKETS.len()] += 1;
         Self::stamp(&mut c);
     }
 
@@ -135,6 +163,15 @@ impl Metrics {
         if tally.prices_stale {
             c.prices_stale_count += 1;
         }
+        let secs = latency_ms as f64 / 1000.0;
+        c.keeper_cycle_duration_sum += secs;
+        // Cumulative histogram: increment every bucket whose upper bound >= secs.
+        for (i, &bound) in KEEPER_CYCLE_BUCKETS.iter().enumerate() {
+            if secs <= bound {
+                c.keeper_cycle_duration_buckets[i] += 1;
+            }
+        }
+        c.keeper_cycle_duration_buckets[KEEPER_CYCLE_BUCKETS.len()] += 1;
         Self::stamp(&mut c);
     }
 
@@ -286,13 +323,57 @@ impl Metrics {
             c.price_cycle_count
         ));
 
+        // Deprecated gauge — kept for one release so existing dashboards keep
+        // working while operators migrate to the histogram below.
         output.push_str(
-            "# HELP oracle_price_cycle_duration_seconds Last price cycle duration in seconds\n",
+            "# HELP oracle_price_cycle_duration_seconds Last price cycle duration in seconds (deprecated; use oracle_price_cycle_duration_seconds_histogram)\n",
         );
         output.push_str("# TYPE oracle_price_cycle_duration_seconds gauge\n");
         output.push_str(&format!(
             "oracle_price_cycle_duration_seconds {}\n",
             c.price_cycle_latency_ms as f64 / 1000.0
+        ));
+
+        // Histogram: captures every cycle so p95/p99 tail latency is observable.
+        let price_bucket_bounds: Vec<&str> = PRICE_CYCLE_BUCKETS
+            .iter()
+            .map(|b| {
+                // Format as a string with enough precision, stripping trailing zeros.
+                // We use a static match to keep the output clean.
+                match *b {
+                    0.25 => "0.25",
+                    0.5  => "0.5",
+                    1.0  => "1",
+                    2.5  => "2.5",
+                    5.0  => "5",
+                    10.0 => "10",
+                    30.0 => "30",
+                    60.0 => "60",
+                    _    => "?",
+                }
+            })
+            .collect();
+        output.push_str(
+            "# HELP oracle_price_cycle_duration_seconds_histogram Price cycle duration histogram\n",
+        );
+        output.push_str("# TYPE oracle_price_cycle_duration_seconds_histogram histogram\n");
+        for (i, bound) in price_bucket_bounds.iter().enumerate() {
+            output.push_str(&format!(
+                "oracle_price_cycle_duration_seconds_histogram_bucket{{le=\"{bound}\"}} {}\n",
+                c.price_cycle_duration_buckets[i]
+            ));
+        }
+        output.push_str(&format!(
+            "oracle_price_cycle_duration_seconds_histogram_bucket{{le=\"+Inf\"}} {}\n",
+            c.price_cycle_duration_buckets[PRICE_CYCLE_BUCKETS.len()]
+        ));
+        output.push_str(&format!(
+            "oracle_price_cycle_duration_seconds_histogram_sum {}\n",
+            c.price_cycle_duration_sum
+        ));
+        output.push_str(&format!(
+            "oracle_price_cycle_duration_seconds_histogram_count {}\n",
+            c.price_cycle_duration_buckets[PRICE_CYCLE_BUCKETS.len()]
         ));
 
         output.push_str("# HELP oracle_keeper_cycles_total Total number of keeper cycles\n");
@@ -302,13 +383,51 @@ impl Metrics {
             c.keeper_cycle_count
         ));
 
+        // Deprecated gauge — kept for one release so existing dashboards keep
+        // working while operators migrate to the histogram below.
         output.push_str(
-            "# HELP oracle_keeper_cycle_duration_seconds Last keeper cycle duration in seconds\n",
+            "# HELP oracle_keeper_cycle_duration_seconds Last keeper cycle duration in seconds (deprecated; use oracle_keeper_cycle_duration_seconds_histogram)\n",
         );
         output.push_str("# TYPE oracle_keeper_cycle_duration_seconds gauge\n");
         output.push_str(&format!(
             "oracle_keeper_cycle_duration_seconds {}\n",
             c.keeper_cycle_latency_ms as f64 / 1000.0
+        ));
+
+        // Histogram: captures every cycle so p95/p99 tail latency is observable.
+        let keeper_bucket_bounds: Vec<&str> = KEEPER_CYCLE_BUCKETS
+            .iter()
+            .map(|b| match *b {
+                1.0  => "1",
+                2.5  => "2.5",
+                5.0  => "5",
+                10.0 => "10",
+                25.0 => "25",
+                50.0 => "50",
+                _    => "?",
+            })
+            .collect();
+        output.push_str(
+            "# HELP oracle_keeper_cycle_duration_seconds_histogram Keeper cycle duration histogram\n",
+        );
+        output.push_str("# TYPE oracle_keeper_cycle_duration_seconds_histogram histogram\n");
+        for (i, bound) in keeper_bucket_bounds.iter().enumerate() {
+            output.push_str(&format!(
+                "oracle_keeper_cycle_duration_seconds_histogram_bucket{{le=\"{bound}\"}} {}\n",
+                c.keeper_cycle_duration_buckets[i]
+            ));
+        }
+        output.push_str(&format!(
+            "oracle_keeper_cycle_duration_seconds_histogram_bucket{{le=\"+Inf\"}} {}\n",
+            c.keeper_cycle_duration_buckets[KEEPER_CYCLE_BUCKETS.len()]
+        ));
+        output.push_str(&format!(
+            "oracle_keeper_cycle_duration_seconds_histogram_sum {}\n",
+            c.keeper_cycle_duration_sum
+        ));
+        output.push_str(&format!(
+            "oracle_keeper_cycle_duration_seconds_histogram_count {}\n",
+            c.keeper_cycle_duration_buckets[KEEPER_CYCLE_BUCKETS.len()]
         ));
 
         output.push_str("# HELP oracle_orders_executed_total Total number of orders executed\n");
