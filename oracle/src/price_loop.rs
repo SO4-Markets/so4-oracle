@@ -93,7 +93,10 @@ pub async fn run_price_loop(state: Arc<AppState>) {
                 break;
             }
         }
-        if state.keeper_balance_below_min.load(std::sync::atomic::Ordering::Relaxed) {
+        if state
+            .keeper_balance_below_min
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             tracing::warn!("keeper balance below minimum; skipping price cycle");
             continue;
         }
@@ -429,7 +432,10 @@ async fn build_cached_price(
             pyth_prices,
             pyth_batch_failed,
             binance_prices,
-            &state.config.coinbase_base_url,
+            PriceSourceUrls {
+                coinbase: &state.config.coinbase_base_url,
+                binance: &state.config.binance_base_url,
+            },
         )
         .await
         {
@@ -491,6 +497,14 @@ async fn build_cached_price(
     signed_cached_price(state, token, ledger_seq, aggregate)
 }
 
+/// Configured exchange base URLs, threaded from `Config` into each fetch.
+/// Bundled into one value to keep the source-fetch helper signatures small.
+#[derive(Clone, Copy)]
+struct PriceSourceUrls<'a> {
+    coinbase: &'a str,
+    binance: &'a str,
+}
+
 async fn fetch_source_with_retry(
     source: &str,
     token: &TokenConfig,
@@ -498,7 +512,7 @@ async fn fetch_source_with_retry(
     pyth_prices: &std::collections::HashMap<String, crate::pyth::PythPriceFeed>,
     pyth_batch_failed: bool,
     binance_prices: Option<&std::collections::HashMap<String, i128>>,
-    coinbase_base_url: &str,
+    urls: PriceSourceUrls<'_>,
 ) -> Result<PriceWithObservationTime, SourceFailure> {
     crate::retry::retry_with_backoff(
         || async {
@@ -509,7 +523,7 @@ async fn fetch_source_with_retry(
                 pyth_prices,
                 pyth_batch_failed,
                 binance_prices,
-                coinbase_base_url,
+                urls,
             )
             .await
         },
@@ -533,7 +547,7 @@ async fn fetch_source_price(
     pyth_prices: &std::collections::HashMap<String, crate::pyth::PythPriceFeed>,
     pyth_batch_failed: bool,
     binance_prices: Option<&std::collections::HashMap<String, i128>>,
-    coinbase_base_url: &str,
+    urls: PriceSourceUrls<'_>,
 ) -> Result<PriceWithObservationTime, PriceSourceError> {
     let now = crate::current_timestamp_secs();
     match source {
@@ -543,20 +557,25 @@ async fn fetch_source_price(
                 .as_ref()
                 .ok_or_else(|| PriceSourceError::Config("missing binance_symbol".to_string()))?;
             if let Some(prices) = binance_prices {
-                prices.get(symbol).copied().map(|price| PriceWithObservationTime {
-                    price,
-                    observation_time: now,
-                }).ok_or_else(|| {
-                    PriceSourceError::Config(format!(
-                        "binance symbol not returned in batch: {symbol}"
-                    ))
-                })
+                prices
+                    .get(symbol)
+                    .copied()
+                    .map(|price| PriceWithObservationTime {
+                        price,
+                        observation_time: now,
+                    })
+                    .ok_or_else(|| {
+                        PriceSourceError::Config(format!(
+                            "binance symbol not returned in batch: {symbol}"
+                        ))
+                    })
             } else {
                 // Batch request failed or no batch was made — fall back to a
                 // single-symbol request so this token still gets a price.
-                let results = crate::binance::fetch_spot_prices(std::slice::from_ref(symbol))
-                    .await
-                    .map_err(PriceSourceError::Binance)?;
+                let results =
+                    crate::binance::fetch_spot_prices(urls.binance, std::slice::from_ref(symbol))
+                        .await
+                        .map_err(PriceSourceError::Binance)?;
                 results
                     .into_iter()
                     .find(|(got_symbol, _)| got_symbol == symbol)
@@ -574,7 +593,7 @@ async fn fetch_source_price(
                 .coinbase_symbol
                 .as_ref()
                 .ok_or_else(|| PriceSourceError::Config("missing coinbase_symbol".to_string()))?;
-            crate::coinbase::fetch_spot_price_with_url(coinbase_base_url, symbol)
+            crate::coinbase::fetch_spot_price_with_url(urls.coinbase, symbol)
                 .await
                 .map(|price| PriceWithObservationTime {
                     price,
@@ -727,7 +746,7 @@ async fn record_error_with_context(
     error: impl Into<String>,
     ctx: ErrorContext,
 ) {
-    state.failures.lock().await.push(FailedSubmission {
+    state.failures.lock().await.push(FailedSubmission::Price {
         at: SystemTime::now(),
         operation: operation.into(),
         network: state.config.network.as_str().to_string(),
@@ -749,6 +768,13 @@ mod tests {
     use crate::config::{Config, Network, PriceFeedConfig};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Duration;
+
+    fn test_urls() -> PriceSourceUrls<'static> {
+        PriceSourceUrls {
+            coinbase: crate::coinbase::COINBASE_EXCHANGE_RATES_URL,
+            binance: crate::binance::BINANCE_TICKER_PRICE_URL,
+        }
+    }
 
     fn test_state(token: TokenConfig) -> Arc<AppState> {
         let config = Config {
@@ -847,9 +873,10 @@ mod tests {
         let state = test_state(token.clone());
         let no_pyth = std::collections::HashMap::new();
 
-        let failure = fetch_source_with_retry("fixed", &token, None, &no_pyth, false, None, "")
-            .await
-            .unwrap_err();
+        let failure =
+            fetch_source_with_retry("fixed", &token, None, &no_pyth, false, None, test_urls())
+                .await
+                .unwrap_err();
         assert_eq!(failure.source, "fixed");
         assert_eq!(failure.symbol, "TUSDC");
         assert_eq!(failure.token, "CTOKEN");
@@ -861,12 +888,25 @@ mod tests {
         let built = build_cached_price(&state, &token, 7, &no_pyth, false, None).await;
         assert!(built.is_err());
         let failures = state.failures.lock().await;
-        let entry = failures.iter().next_back().expect("source failure recorded");
-        assert_eq!(entry.operation, "source:TUSDC:fixed");
-        assert_eq!(entry.source.as_deref(), Some("fixed"));
-        assert_eq!(entry.symbol, "TUSDC");
-        assert_eq!(entry.token, "CTOKEN");
-        assert_eq!(entry.ledger_seq, 7);
+        let entry = failures
+            .iter()
+            .next_back()
+            .expect("source failure recorded");
+        assert_eq!(entry.operation(), "source:TUSDC:fixed");
+        let FailedSubmission::Price {
+            source,
+            symbol,
+            token,
+            ledger_seq,
+            ..
+        } = entry
+        else {
+            panic!("expected a price failure record");
+        };
+        assert_eq!(source.as_deref(), Some("fixed"));
+        assert_eq!(symbol, "TUSDC");
+        assert_eq!(token, "CTOKEN");
+        assert_eq!(*ledger_seq, 7);
     }
 
     // ── #1416: unit coverage for the pure parts of the price path ───────────
@@ -966,9 +1006,10 @@ mod tests {
         let no_pyth = std::collections::HashMap::new();
         let started = tokio::time::Instant::now();
 
-        let failure = fetch_source_with_retry("nope", &token, None, &no_pyth, false, None, "")
-            .await
-            .unwrap_err();
+        let failure =
+            fetch_source_with_retry("nope", &token, None, &no_pyth, false, None, test_urls())
+                .await
+                .unwrap_err();
 
         assert!(matches!(failure.error, PriceSourceError::Unsupported(_)));
         assert_eq!(started.elapsed(), Duration::ZERO);
@@ -982,9 +1023,10 @@ mod tests {
         let started = tokio::time::Instant::now();
 
         // Batch failed and the feed is absent: a retryable network error.
-        let failure = fetch_source_with_retry("pyth", &token, None, &no_pyth, true, None, "")
-            .await
-            .unwrap_err();
+        let failure =
+            fetch_source_with_retry("pyth", &token, None, &no_pyth, true, None, test_urls())
+                .await
+                .unwrap_err();
 
         assert!(matches!(
             failure.error,

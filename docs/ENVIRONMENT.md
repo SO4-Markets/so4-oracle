@@ -67,6 +67,8 @@ Startup rejects the same contract ID in two of these variables, naming both.
 | `PRICE_FEED_CONFIG` |          | embedded `config/tokens.json` | Inline JSON array of `TokenConfig` entries — not a file path. Use `PRICE_FEED_CONFIG="$(cat tokens.json)"` for a file. |
 | `PRICE_LOOP_MS`     |          | `1000`                        | Interval between price cycles (ms), 250–60000, and shorter than every token's `stale_after_seconds`.                    |
 | `KEEPER_LOOP_MS`    |          | `1500`                        | Interval between keeper cycles (ms), 250–60000.                                                                       |
+| `COINBASE_BASE_URL` |          | production exchange-rates URL | Test-only override for the Coinbase endpoint; point price fetches at a local mock server.                              |
+| `BINANCE_BASE_URL`  |          | production ticker URL         | Test-only override for the Binance endpoint; point price fetches at a local mock server.                               |
 
 ### `TokenConfig` fields (`PRICE_FEED_CONFIG` / `config/tokens.json`)
 

@@ -109,6 +109,8 @@ mod tests {
     #[test]
     fn client_is_a_process_wide_singleton() {
         assert!(std::ptr::eq(client(), client()));
+    }
+
     async fn seen_id() -> Option<String> {
         current_correlation_id()
     }

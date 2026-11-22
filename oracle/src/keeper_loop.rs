@@ -115,7 +115,10 @@ pub async fn run_keeper_loop(state: Arc<AppState>) {
             }
         }
 
-        if state.keeper_balance_below_min.load(std::sync::atomic::Ordering::Relaxed) {
+        if state
+            .keeper_balance_below_min
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             tracing::warn!("keeper balance below minimum; skipping keeper cycle");
             continue;
         }
@@ -1195,11 +1198,21 @@ impl From<HandlerError> for String {
     }
 }
 
-
 /// Check if an error message indicates a poll timeout.
 #[allow(dead_code)]
 fn is_poll_timeout(error: &str) -> bool {
     error.contains("(hash: ")
+}
+
+/// Recover the transaction hash embedded in a poll-timeout error message, if
+/// any. Used so `/oracle/failed-submissions` can hand operators a hash to look
+/// up for ambiguous outcomes (#721).
+#[cfg(test)]
+fn poll_timeout_hash(error: &str) -> Option<String> {
+    const MARKER: &str = "(hash: ";
+    let rest = &error[error.find(MARKER)? + MARKER.len()..];
+    let hash = &rest[..rest.find(')')?];
+    (!hash.is_empty()).then(|| hash.to_string())
 }
 
 /// Detect whether a `SubmitError::TransactionFailed` was caused by a Soroban
@@ -1302,7 +1315,7 @@ async fn get_pending_keys(
     // valid offset. (#1268)
     let start = state
         .pending_key_start_index
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
             Some(if count <= 1 { 0 } else { (prev + 1) % count })
         })
         .unwrap_or(0);
@@ -1392,11 +1405,13 @@ async fn set_price_batch_on_chain(
         vec![prices_scval],
         state.config.set_prices_tx_fee,
         sequence,
-        None,
-        max_time,
+        tx_builder::InvokeTxOptions {
+            soroban_data: None,
+            max_time,
+        },
     )?;
 
-    let signed_xdr = sign_keeper_tx(&state, &tx)?;
+    let signed_xdr = sign_keeper_tx(state, &tx)?;
 
     let ledger = crate::submit::submit_and_poll(&state.config.stellar_rpc_url, &signed_xdr)
         .await
@@ -1490,7 +1505,10 @@ fn move_exceeds_bps(last: i128, median: i128, threshold_bps: u32) -> bool {
         Some(scaled) => scaled,
         None => return true,
     };
-    match last.checked_abs().and_then(|last| last.checked_mul(threshold)) {
+    match last
+        .checked_abs()
+        .and_then(|last| last.checked_mul(threshold))
+    {
         Some(bound) => scaled_change > bound,
         None => true,
     }
@@ -1600,11 +1618,13 @@ async fn execute_handler(
         ],
         state.config.keeper_tx_fee,
         sequence,
-        None,
-        max_time,
+        tx_builder::InvokeTxOptions {
+            soroban_data: None,
+            max_time,
+        },
     )?;
 
-    let signed_xdr = sign_keeper_tx(&state, &tx)?;
+    let signed_xdr = sign_keeper_tx(state, &tx)?;
 
     match crate::submit::submit_and_poll(&state.config.stellar_rpc_url, &signed_xdr).await {
         Ok(ledger) => {
@@ -1777,8 +1797,10 @@ async fn simulate_contract_call_once(
         scval_args,
         100,
         0, // sequence number is irrelevant for simulation
-        None,
-        0, // no time bound for simulation
+        tx_builder::InvokeTxOptions {
+            soroban_data: None,
+            max_time: 0, // no time bound for simulation
+        },
     )
     .map_err(SimulateError::Build)?;
 
@@ -1875,15 +1897,18 @@ async fn record_error(
     error: &str,
     tx_hash: Option<String>,
 ) {
-    state.failures.lock().await.push(FailedSubmission {
+    // Handler callers pass `execute_order:<key>` (and the deposit/withdrawal
+    // equivalents). Split the key out of the label instead of hiding it there;
+    // whole-cycle failures such as `keeper_cycle` have no key at all.
+    let (operation, key) = match operation.split_once(':') {
+        Some((operation, key)) => (operation.to_string(), Some(key.to_string())),
+        None => (operation.to_string(), None),
+    };
+    state.failures.lock().await.push(FailedSubmission::Keeper {
         at: SystemTime::now(),
-        operation: operation.to_string(),
+        operation,
         network: state.config.network.as_str().to_string(),
-        token: String::new(),
-        symbol: String::new(),
-        source: None,
-        min: 0,
-        max: 0,
+        key,
         // Carry the hash whenever the failure happened *after* submission
         // (a poll timeout), so `/oracle/failed-submissions` hands an operator
         // something to look up on a block explorer for exactly the ambiguous
@@ -1998,8 +2023,14 @@ mod tests {
         }
         let cases = [
             (SimulateError::Build("x".into()), false),
-            (SimulateError::Transport(RpcError::NetworkError("x".into())), true),
-            (SimulateError::Transport(RpcError::JsonError("x".into())), false),
+            (
+                SimulateError::Transport(RpcError::NetworkError("x".into())),
+                true,
+            ),
+            (
+                SimulateError::Transport(RpcError::JsonError("x".into())),
+                false,
+            ),
             (SimulateError::Response("x".into()), false),
             (SimulateError::Simulation("x".into()), false),
         ];
@@ -2061,7 +2092,9 @@ mod tests {
     #[test]
     fn post_set_prices_settle_stays_small_fraction_of_cycle_budget() {
         // #956 — the settle delay must not eat a meaningful share of the cycle timeout.
-        assert!(POST_SET_PRICES_SETTLE_MS * 10 <= KEEPER_CYCLE_TIMEOUT_SECS * 1_000);
+        let settle_ms = POST_SET_PRICES_SETTLE_MS;
+        let cycle_ms = KEEPER_CYCLE_TIMEOUT_SECS.saturating_mul(1_000);
+        assert!(settle_ms.saturating_mul(10) <= cycle_ms);
     }
 
     // ── #719: the in-flight-key decision must not depend on message text ─────
@@ -2269,7 +2302,7 @@ mod tests {
             )),
             keeper_secret_key: Some(std::sync::Arc::new(
                 crate::chain::tx_builder::signing_key_from_secret(
-                    "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                    "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT",
                 )
                 .unwrap(),
             )),
@@ -2313,8 +2346,9 @@ mod tests {
         let failures = state.failures.lock().await;
         let recorded: Vec<_> = failures.iter().collect();
         assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].tx_hash.as_deref(), Some(hash.as_str()));
-        assert_eq!(recorded[0].operation, "execute_deposit:abcd");
+        assert_eq!(recorded[0].tx_hash(), Some(hash.as_str()));
+        assert_eq!(recorded[0].operation(), "execute_deposit");
+        assert_eq!(recorded[0].key(), Some("abcd"));
     }
 
     #[tokio::test]
@@ -2332,7 +2366,7 @@ mod tests {
         let failures = state.failures.lock().await;
         let recorded: Vec<_> = failures.iter().collect();
         assert_eq!(recorded.len(), 1);
-        assert!(recorded[0].tx_hash.is_none());
+        assert!(recorded[0].tx_hash().is_none());
     }
 
     #[tokio::test]
@@ -2399,7 +2433,7 @@ mod tests {
             )),
             keeper_secret_key: Some(std::sync::Arc::new(
                 crate::chain::tx_builder::signing_key_from_secret(
-                    "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                    "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT",
                 )
                 .unwrap(),
             )),
@@ -2524,6 +2558,8 @@ mod tests {
         assert!(price_is_ledger_stale(&price, 1_051));
         // A probe that lags behind the cached price must not look stale.
         assert!(!price_is_ledger_stale(&price, 999));
+    }
+
     // ── #1242: submit-threshold lookup key and relative (bps) comparison ────
 
     fn threshold_test_state(submit_threshold_bps: u32) -> Arc<AppState> {
@@ -2551,7 +2587,7 @@ mod tests {
             )),
             keeper_secret_key: Some(std::sync::Arc::new(
                 crate::chain::tx_builder::signing_key_from_secret(
-                    "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                    "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT",
                 )
                 .unwrap(),
             )),
@@ -2573,11 +2609,13 @@ mod tests {
                     ..Default::default()
                 }],
             },
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         Arc::new(AppState::new(Arc::new(config)))
     }
 
-    fn threshold_price(median: i128) -> CachedPrice {
+    pub(super) fn threshold_price(median: i128) -> CachedPrice {
         CachedPrice {
             token_address: "GADDR".to_string(),
             symbol: "TUSDC".to_string(),
@@ -2634,7 +2672,7 @@ mod tests {
 #[cfg(test)]
 mod keeper_tx_tests {
     use super::*;
-    use crate::config::{Config, SecretString};
+    use crate::config::Config;
     use std::sync::Arc;
 
     // #1410 — table-test the three substring spellings, case variants and a
@@ -2651,7 +2689,11 @@ mod keeper_tx_tests {
         ] {
             assert!(is_bad_sequence_error(input), "{input:?} must match");
         }
-        for input in ["tx_too_late", "tx_insufficient_fee", "connection reset by peer"] {
+        for input in [
+            "tx_too_late",
+            "tx_insufficient_fee",
+            "connection reset by peer",
+        ] {
             assert!(!is_bad_sequence_error(input), "{input:?} must not match");
         }
     }
@@ -2672,18 +2714,19 @@ mod keeper_tx_tests {
     #[test]
     fn sign_keeper_tx_uses_cached_key_when_present() {
         let mut config = Config::default_for_tests();
-        config.keeper_secret_key = SecretString::new("22".repeat(32));
+        let key = Arc::new(ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]));
+        config.keeper_secret_key = Some(Arc::clone(&key));
         let state = AppState::new(Arc::new(config));
         assert!(state.tx_signing_key.is_some());
 
         let tx = dummy_tx();
         let got = sign_keeper_tx(&state, &tx).expect("cached-key signing succeeds");
-        let expected = crate::chain::tx_builder::sign_transaction(
+        let expected = crate::chain::tx_builder::sign_transaction_with_key(
             &tx,
-            state.config.keeper_secret_key.as_str(),
+            &key,
             &state.config.network_passphrase,
         )
-        .expect("string-key signing succeeds");
+        .expect("cached-key signing succeeds");
         assert_eq!(got, expected, "signature must be byte-identical");
     }
 
@@ -2705,7 +2748,12 @@ mod keeper_tx_tests {
     fn price_batches_split_at_max_price_batch_size() {
         let cache = |n: usize| -> BTreeMap<String, CachedPrice> {
             (0..n)
-                .map(|i| (format!("k{i:03}"), threshold_price(i as i128)))
+                .map(|i| {
+                    (
+                        format!("k{i:03}"),
+                        crate::keeper_loop::tests::threshold_price(i as i128),
+                    )
+                })
                 .collect()
         };
 

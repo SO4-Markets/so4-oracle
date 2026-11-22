@@ -200,11 +200,13 @@ pub struct Config {
     pub keeper_loop_interval: Duration,
     /// Token feed configuration (symbols, sources, addresses).
     pub price_feed: PriceFeedConfig,
-    /// Base URL for Coinbase exchange-rate requests. Defaults to the
-    /// production endpoint; override in tests to point at a mock server. (#1264)
+    /// Base URL for Coinbase exchange-rate requests. Defaults to the production
+    /// endpoint; `COINBASE_BASE_URL` overrides it. Test-only override for
+    /// pointing price fetches at a local mock server (#1264).
     pub coinbase_base_url: String,
     /// Base URL for Binance spot-price requests. Defaults to the production
-    /// endpoint; override in tests to point at a mock server. (#1264)
+    /// endpoint; `BINANCE_BASE_URL` overrides it. Test-only override for
+    /// pointing price fetches at a local mock server (#1264).
     pub binance_base_url: String,
 }
 
@@ -234,7 +236,9 @@ fn validate_pyth_api_key(key: &str) -> Result<(), String> {
         return Err("must not contain whitespace (check for a stray space or newline)".to_string());
     }
     if key.chars().count() < MIN_PYTH_API_KEY_LEN {
-        return Err(format!("must be at least {MIN_PYTH_API_KEY_LEN} characters (truncated?)"));
+        return Err(format!(
+            "must be at least {MIN_PYTH_API_KEY_LEN} characters (truncated?)"
+        ));
     }
     Ok(())
 }
@@ -414,8 +418,7 @@ impl Config {
         let keeper_private_key = if !keeper_private_key_raw.is_empty() {
             collect_or_default!(
                 (|| {
-                    let value =
-                        validate_hex_key("KEEPER_PRIVATE_KEY", keeper_private_key_raw, 32)?;
+                    let value = validate_hex_key("KEEPER_PRIVATE_KEY", keeper_private_key_raw, 32)?;
                     crate::signing::signing_key_from_hex(&value)
                         .map(|key| Some(std::sync::Arc::new(key)))
                         .map_err(|err| EnvError::InvalidVar {
@@ -434,8 +437,7 @@ impl Config {
         let keeper_secret_key = if !keeper_secret_key_raw.is_empty() {
             collect_or_default!(
                 (|| {
-                    let value =
-                        validate_strkey("KEEPER_SECRET_KEY", keeper_secret_key_raw, 'S')?;
+                    let value = validate_strkey("KEEPER_SECRET_KEY", keeper_secret_key_raw, 'S')?;
                     crate::chain::tx_builder::signing_key_from_secret(&value)
                         .map(|key| Some(std::sync::Arc::new(key)))
                         .map_err(|err| EnvError::InvalidVar {
@@ -638,6 +640,17 @@ impl Config {
             }
         }
 
+        // Test-only overrides so integration tests that build a Config from the
+        // environment can redirect price sources at a local mock server (#1264).
+        // Blank values fall back to the production constants, as with other
+        // optional variables.
+        let coinbase_base_url = lookup("COINBASE_BASE_URL")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string());
+        let binance_base_url = lookup("BINANCE_BASE_URL")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| crate::binance::BINANCE_TICKER_PRICE_URL.to_string());
+
         if !errors.is_empty() {
             return Err(EnvErrors(errors));
         }
@@ -678,8 +691,8 @@ impl Config {
             price_loop_interval,
             keeper_loop_interval,
             price_feed,
-            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
-            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+            coinbase_base_url,
+            binance_base_url,
         })
     }
 }
@@ -1117,6 +1130,58 @@ mod tests {
     }
 
     #[test]
+    fn config_from_lookup_uses_production_price_base_urls_by_default() {
+        let env = valid_env();
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(
+            cfg.coinbase_base_url,
+            crate::coinbase::COINBASE_EXCHANGE_RATES_URL
+        );
+        assert_eq!(
+            cfg.binance_base_url,
+            crate::binance::BINANCE_TICKER_PRICE_URL
+        );
+    }
+
+    #[test]
+    fn config_from_lookup_overrides_price_base_urls_from_env() {
+        let mut env = valid_env();
+        env.insert(
+            "COINBASE_BASE_URL",
+            "http://127.0.0.1:9001/coinbase".to_string(),
+        );
+        env.insert(
+            "BINANCE_BASE_URL",
+            "http://127.0.0.1:9002/binance".to_string(),
+        );
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(cfg.coinbase_base_url, "http://127.0.0.1:9001/coinbase");
+        assert_eq!(cfg.binance_base_url, "http://127.0.0.1:9002/binance");
+    }
+
+    #[test]
+    fn config_from_lookup_ignores_blank_price_base_url_overrides() {
+        let mut env = valid_env();
+        env.insert("COINBASE_BASE_URL", "   ".to_string());
+        env.insert("BINANCE_BASE_URL", String::new());
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(
+            cfg.coinbase_base_url,
+            crate::coinbase::COINBASE_EXCHANGE_RATES_URL
+        );
+        assert_eq!(
+            cfg.binance_base_url,
+            crate::binance::BINANCE_TICKER_PRICE_URL
+        );
+    }
+
+    #[test]
     fn config_from_lookup_uses_default_bind_addr_when_unset() {
         let env = valid_env();
         assert!(!env.contains_key("BIND_ADDR"));
@@ -1482,7 +1547,7 @@ mod tests {
             ),
             (
                 "KEEPER_SECRET_KEY",
-                "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+                "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT".to_string(),
             ),
             (
                 "KEEPER_ACCOUNT_ID",
@@ -1640,7 +1705,7 @@ mod tests {
 
     #[test]
     fn validate_strkey_accepts_s_prefixed() {
-        let value = "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let value = "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT";
         let result = validate_strkey("KEEPER_SECRET_KEY", value.to_string(), 'S');
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), value);
@@ -1677,7 +1742,7 @@ mod tests {
 
     #[test]
     fn validate_strkey_rejects_s_prefixed_for_account() {
-        let value = "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let value = "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT";
         let result = validate_strkey("KEEPER_ACCOUNT_ID", value.to_string(), 'G');
         assert!(result.is_err());
     }
@@ -1725,7 +1790,7 @@ mod tests {
         let mut env = valid_env();
         env.insert(
             "KEEPER_ACCOUNT_ID",
-            "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT".to_string(),
         );
 
         let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
@@ -1989,7 +2054,10 @@ mod tests {
             env.insert(var, value.to_string());
 
             let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
-            assert!(invalid_var_names(&err).contains(&var), "{var}={value}: {err}");
+            assert!(
+                invalid_var_names(&err).contains(&var),
+                "{var}={value}: {err}"
+            );
         }
     }
 
@@ -2034,7 +2102,13 @@ mod tests {
 
             let err = Config::from_lookup(|k| env.get(k).cloned()).unwrap_err();
             assert!(invalid_var_names(&err).contains(&"PYTH_API_KEY"), "{err}");
-            assert!(!err.to_string().contains(key), "error must not echo the key");
+            assert!(
+                !err.to_string().contains(key),
+                "error must not echo the key"
+            );
+        }
+    }
+
     #[test]
     fn parse_price_feed_config_rejects_staleness_above_contract_window() {
         let json = r#"[{"symbol":"TUSDC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["fixed"],"min_sources":1,"fixed_price":"1000000000000000000000000000000","stale_after_seconds":271}]"#;
@@ -2085,6 +2159,8 @@ mod tests {
             "expected a token-config error, got: {err}"
         );
         assert!(err.to_string().contains("PRICE_LOOP_MS"), "{err}");
+    }
+
     // #1463 — a mistyped extra three zeros must fail at boot, naming the limit.
     #[test]
     fn config_from_lookup_rejects_tx_fees_above_the_cap() {
@@ -2140,6 +2216,9 @@ mod tests {
         token.sources.truncate(2);
         token.min_sources = 2;
         assert!(!outlier_rejection_can_degrade(&token));
+    }
+
+    #[test]
     fn config_from_lookup_accepts_tx_fees_at_the_cap() {
         let mut env = valid_env();
         env.insert("SET_PRICES_TX_FEE", MAX_TX_FEE_STROOPS.to_string());

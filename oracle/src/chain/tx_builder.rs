@@ -15,8 +15,15 @@ use crate::chain::scval::{account_strkey_to_muxed, strkey_to_sc_address};
 /// guaranteed `tx_too_late` before the key is retried.
 pub const TX_MAX_TIME_SECS: u64 = 60;
 
-/// `max_time`: Unix timestamp of the transaction's hard deadline.
-/// Pass `0` to omit time bounds (e.g. for simulation calls where sequence is 0).
+/// Soroban-specific options for [`build_invoke_tx`], grouped to keep the
+/// constructor's argument count within clippy's limit.
+pub struct InvokeTxOptions {
+    pub soroban_data: Option<SorobanTransactionData>,
+    /// Unix timestamp of the transaction's hard deadline. `0` omits time
+    /// bounds (e.g. for simulation calls where sequence is 0).
+    pub max_time: u64,
+}
+
 pub fn build_invoke_tx(
     source_account: &str,
     contract_id: &str,
@@ -24,8 +31,7 @@ pub fn build_invoke_tx(
     args: Vec<ScVal>,
     fee: u32,
     sequence: u64,
-    soroban_data: Option<SorobanTransactionData>,
-    max_time: u64,
+    options: InvokeTxOptions,
 ) -> Result<Transaction, String> {
     let source_muxed = account_strkey_to_muxed(source_account)?;
     let contract_addr = strkey_to_sc_address(contract_id)?;
@@ -56,15 +62,15 @@ pub fn build_invoke_tx(
         .try_into()
         .map_err(|e| format!("failed to build operations VecM: {e}"))?;
 
-    let ext = match soroban_data {
+    let ext = match options.soroban_data {
         Some(data) => TransactionExt::V1(data),
         None => TransactionExt::V0,
     };
 
-    let cond = if max_time > 0 {
+    let cond = if options.max_time > 0 {
         Preconditions::Time(TimeBounds {
             min_time: TimePoint(0),
-            max_time: TimePoint(max_time),
+            max_time: TimePoint(options.max_time),
         })
     } else {
         Preconditions::None
@@ -205,8 +211,10 @@ mod tests {
             vec![ScVal::Void],
             100,
             1,
-            None,
-            0,
+            InvokeTxOptions {
+                soroban_data: None,
+                max_time: 0,
+            },
         )
         .unwrap();
 
@@ -226,8 +234,10 @@ mod tests {
             vec![ScVal::Void],
             100,
             1,
-            None,
-            max_time,
+            InvokeTxOptions {
+                soroban_data: None,
+                max_time,
+            },
         )
         .unwrap();
 
@@ -251,8 +261,10 @@ mod tests {
             vec![ScVal::Void],
             100,
             1,
-            None,
-            0,
+            InvokeTxOptions {
+                soroban_data: None,
+                max_time: 0,
+            },
         )
         .unwrap();
 
@@ -279,8 +291,10 @@ mod tests {
             vec![ScVal::Void],
             100,
             1,
-            None,
-            0,
+            InvokeTxOptions {
+                soroban_data: None,
+                max_time: 0,
+            },
         );
         assert!(err.is_err());
     }

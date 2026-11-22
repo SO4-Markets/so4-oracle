@@ -86,26 +86,85 @@ pub struct KeeperExecution {
     pub error: Option<String>,
 }
 
+/// A failure record in the shared ring buffer.
+///
+/// Price-fetch failures and keeper/handler failures share little beyond the
+/// error message and time. Keeping them in one flat struct made `token` /
+/// `symbol` / `min` / `max` meaningless filler on keeper records, where
+/// `min`/`max` serialised as `"0"` and read like a real zero-width price band.
+/// The tagged enum makes the distinction explicit in the JSON served by
+/// `/oracle/status` and `/oracle/failed-submissions`.
 #[derive(Debug, Clone, Serialize)]
-pub struct FailedSubmission {
-    pub at: SystemTime,
-    pub operation: String,
-    pub network: String,
-    pub token: String,
-    pub symbol: String,
-    /// Price source that failed (`binance`, `coinbase`, ...), for per-source
-    /// fetch failures; `None` for failures not tied to one source (#1450).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(serialize_with = "ser_i128_str")]
-    pub min: i128,
-    #[serde(serialize_with = "ser_i128_str")]
-    pub max: i128,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tx_hash: Option<String>,
-    pub error: String,
-    pub timestamp: u64,
-    pub ledger_seq: u32,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FailedSubmission {
+    /// A price-fetch or aggregation failure for a configured token.
+    Price {
+        at: SystemTime,
+        operation: String,
+        network: String,
+        token: String,
+        symbol: String,
+        /// Price source that failed (`binance`, `coinbase`, ...), for per-source
+        /// fetch failures; `None` for failures not tied to one source (#1450).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        #[serde(serialize_with = "ser_i128_str")]
+        min: i128,
+        #[serde(serialize_with = "ser_i128_str")]
+        max: i128,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tx_hash: Option<String>,
+        error: String,
+        timestamp: u64,
+        ledger_seq: u32,
+    },
+    /// A keeper handler failure (or a whole-cycle failure with no key). `key`
+    /// and `tx_hash` are omitted from JSON when absent rather than emitted as
+    /// empty strings / placeholder values.
+    Keeper {
+        at: SystemTime,
+        operation: String,
+        network: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tx_hash: Option<String>,
+        error: String,
+        timestamp: u64,
+        ledger_seq: u32,
+    },
+}
+
+impl FailedSubmission {
+    /// Operation label used by the `/oracle/failed-submissions` prefix filter.
+    /// Derived from the variant so filtering keeps working after the split.
+    pub fn operation(&self) -> &str {
+        match self {
+            Self::Price { operation, .. } | Self::Keeper { operation, .. } => operation,
+        }
+    }
+
+    /// Error message, shared by both variants.
+    pub fn error(&self) -> &str {
+        match self {
+            Self::Price { error, .. } | Self::Keeper { error, .. } => error,
+        }
+    }
+
+    /// Key of the affected handler operation, for keeper failures only.
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            Self::Keeper { key, .. } => key.as_deref(),
+            Self::Price { .. } => None,
+        }
+    }
+
+    /// Transaction hash, when the failure happened after submission.
+    pub fn tx_hash(&self) -> Option<&str> {
+        match self {
+            Self::Price { tx_hash, .. } | Self::Keeper { tx_hash, .. } => tx_hash.as_deref(),
+        }
+    }
 }
 
 pub fn ser_i128_str<S>(value: &i128, serializer: S) -> Result<S::Ok, S::Error>
@@ -141,6 +200,14 @@ impl<T> RingBuffer<T> {
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
         self.items.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 }
 
@@ -405,7 +472,7 @@ mod signing_key_state_tests {
         ));
         config.keeper_secret_key = Some(std::sync::Arc::new(
             crate::chain::tx_builder::signing_key_from_secret(
-                "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT",
             )
             .unwrap(),
         ));
@@ -433,7 +500,11 @@ mod keeper_status_snapshot_tests {
     async fn snapshot_returns_pair_when_generation_unchanged() {
         let state = AppState::new(Arc::new(Config::default_for_tests()));
         state.keeper_status.write().await.pending_orders = 3;
-        state.cycle_status.write().await.last_keeper_cycle_latency_ms = Some(7);
+        state
+            .cycle_status
+            .write()
+            .await
+            .last_keeper_cycle_latency_ms = Some(7);
 
         let (ks, cs) = state.keeper_status_snapshot().await;
         assert_eq!(ks.pending_orders, 3);

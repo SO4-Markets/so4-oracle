@@ -30,6 +30,7 @@ under `[Unreleased]` (see `AGENTS.md` §3).
 - `SubmitError::may_still_confirm` and `SubmitError::diagnostic_events`
 - `docs/ENVIRONMENT.md`, the single environment-variable reference, and the `env-docs` CI job (`scripts/check-env-docs.sh`) that checks it against the code (#1432)
 - `docs/README.md` index linked from `README.md`; plan documents carry a `Status:` line and `plan.md` moved to `docs/REWRITE_PLAN.md` (#1433, #1434)
+- Test-only `COINBASE_BASE_URL` / `BINANCE_BASE_URL` config overrides, threaded through both price fetch paths, and a CI check that no tracked `*.rs` file starts with a UTF-8 BOM (#1264)
 
 ### Fixed
 - The keeper's in-flight-key decision now branches on the `SubmitError`
@@ -47,6 +48,7 @@ under `[Unreleased]` (see `AGENTS.md` §3).
 - `ConfigError` derives `Clone`/`Eq` so it can be embedded in `EnvError`
 - `keeper_loop::record_error` now records the transaction hash for post-submission failures (poll timeouts) instead of always storing `None`, so `/oracle/failed-submissions` exposes a hash to look up on a block explorer for ambiguous outcomes (#721)
 - Binance, Coinbase, and Pyth HTTP 429 responses are now classified as retryable (matching `RpcError`), so a rate limit triggers backoff and a retry instead of permanently abandoning the price source for the cycle (#708)
+- `/oracle/failed-submissions` now reports buffer-wide `total_count` alongside `matched_count`; previously `total_count` held only the filtered count, so paginated callers could not see how many records existed. The `?operation=` prefix semantics are documented in code and the API docs.
 - `oracle.service` start limit raised from 3 restarts per 60s to 50 per 300s and moved to the `[Unit]` section, so a crash loop no longer leaves the oracle permanently down pending a manual `systemctl reset-failed` (#544)
 
 ### Changed
@@ -67,6 +69,7 @@ under `[Unreleased]` (see `AGENTS.md` §3).
   migration started in #599 so a `record_*` call is one consistent generation
 - `Metrics::record_keeper_cycle` takes a `KeeperCycleTally` instead of seven
   positional arguments
+- `FailedSubmission` is now a tagged enum (`"kind": "price"` / `"kind": "keeper"`). Keeper records carry an optional `key` and no longer emit meaningless `token`/`symbol`/`min`/`max` fields; the failure ring buffer and `/oracle/failed-submissions` filter are unchanged in behaviour.
 
 ### Tests
 - Added coverage for `validate_pyth_price` rejecting a malformed (non-numeric) `conf` field, previously unexercised (#712)

@@ -122,8 +122,7 @@ pub fn aggregate_prices(
     let min_observation_time = filter_result
         .filtered_sources
         .iter()
-        .enumerate()
-        .filter_map(|(i, source)| {
+        .filter_map(|source| {
             // Find the index of this source in the original sources array
             sources
                 .iter()
@@ -879,8 +878,8 @@ mod tests {
     /// from the file, so a new token's value is covered automatically.
     fn configured_spreads() -> Vec<u32> {
         let raw = include_str!("../../config/tokens.json");
-        let config = crate::config::parse_price_feed_config(raw)
-            .expect("config/tokens.json must parse");
+        let config =
+            crate::config::parse_price_feed_config(raw).expect("config/tokens.json must parse");
         let mut spreads: Vec<u32> = config
             .tokens
             .iter()
@@ -930,10 +929,7 @@ mod tests {
                     p.min,
                     p.max
                 );
-                assert!(
-                    p.min >= 0,
-                    "negative min for {prices:?} at {spread} bps"
-                );
+                assert!(p.min >= 0, "negative min for {prices:?} at {spread} bps");
             }
         }
     }
@@ -962,7 +958,8 @@ mod tests {
             vec![100, 101, 99, 5000],
         ] {
             let obs_times = observation_times_for(prices.len(), 1000);
-            let result = aggregate_prices(&prices, &names(prices.len()), &obs_times, 1, 10_000).unwrap();
+            let result =
+                aggregate_prices(&prices, &names(prices.len()), &obs_times, 1, 10_000).unwrap();
             assert!(
                 result.min <= result.median && result.median <= result.max,
                 "min {} <= median {} <= max {} violated for {prices:?}",
@@ -995,7 +992,8 @@ mod tests {
             vec![100i128, 101, 99, 5000],
         ] {
             let obs_times = observation_times_for(prices.len(), 1000);
-            let result = aggregate_prices(&prices, &names(prices.len()), &obs_times, 1, 10_000).unwrap();
+            let result =
+                aggregate_prices(&prices, &names(prices.len()), &obs_times, 1, 10_000).unwrap();
             assert_eq!(
                 result.sources_used.len() + result.rejected_sources.len(),
                 prices.len(),
@@ -1012,7 +1010,8 @@ mod tests {
             vec![1000i128, 1001, 1002, 1003, 1004, 1200],
         ] {
             let obs_times = observation_times_for(prices.len(), 1000);
-            let baseline = aggregate_prices(&prices, &names(prices.len()), &obs_times, 2, 500).unwrap();
+            let baseline =
+                aggregate_prices(&prices, &names(prices.len()), &obs_times, 2, 500).unwrap();
             for (p, s) in permutations(&prices) {
                 let obs_times_perm = observation_times_for(p.len(), 1000);
                 let r = aggregate_prices(&p, &s, &obs_times_perm, 2, 500).unwrap();

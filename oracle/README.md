@@ -32,12 +32,16 @@ are throttled with `429`. Query parameters and response shapes:
 | `/keeper/status`             | GET    | admin  | —                                         | `KeeperStatusResponse`: pending orders/deposits/withdrawals, recent executions, cycle timing |
 | `/keeper/balance`            | GET    | admin  | —                                         | `{"account_id":"G…","balance_stroops":<i64>,"balance_xlm":<f64>,"min_balance_xlm":<f64>,"is_funded":<bool>}` |
 | `/keeper/blacklist/{key}`    | DELETE | admin  | —                                         | `{"key":"<key>","cleared":true}`                                          |
-| `/oracle/failed-submissions` | GET    | admin  | `operation=<prefix>`, `limit=<n>`         | `{"failures":[FailedSubmission],"total_count":<n>}`                       |
+| `/oracle/failed-submissions` | GET    | admin  | `operation=<prefix>`, `limit=<n>`         | `{"failures":[FailedSubmission],"matched_count":<n>,"total_count":<n>}`   |
 | `/metrics`                   | GET    | admin  | —                                         | Prometheus text exposition                                                |
 
 `/oracle/failed-submissions` returns the most recent failures first,
 filtered by operation-name prefix when `?operation=` is given, at most
-`?limit=` entries (default 100, capped at 256).
+`?limit=` entries (default 100, capped at 256). `matched_count` is the number
+matching the prefix before the limit; `total_count` is the whole ring buffer.
+Failures are tagged `"kind": "price"` or `"kind": "keeper"` — keeper records
+carry an optional `key` and never emit the price-only `token`/`symbol`/`min`/`max`
+fields.
 
 The `readme_endpoint_table_covers_every_route` test in `oracle/src/api/mod.rs`
 parses this table and fails if any route registered in `build_router` is

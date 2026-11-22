@@ -100,7 +100,7 @@ async fn tokens_failed_equals_failures_ring_buffer_count() {
     let failures = state.failures.lock().await;
     let entries: Vec<_> = failures
         .iter()
-        .filter(|e| e.operation.starts_with("price:"))
+        .filter(|e| e.operation().starts_with("price:"))
         .collect();
     assert_eq!(
         entries.len(),
@@ -146,7 +146,7 @@ async fn all_three_log_fields_correct_for_all_good_cycle() {
     let failures = state.failures.lock().await;
     let token_failures: Vec<_> = failures
         .iter()
-        .filter(|e| e.operation.starts_with("price:"))
+        .filter(|e| e.operation().starts_with("price:"))
         .collect();
     let metrics = state.metrics.to_response();
 
@@ -179,7 +179,7 @@ async fn all_three_log_fields_correct_for_mixed_cycle() {
     let failures = state.failures.lock().await;
     let token_failures: Vec<_> = failures
         .iter()
-        .filter(|e| e.operation.starts_with("price:"))
+        .filter(|e| e.operation().starts_with("price:"))
         .collect();
     let metrics = state.metrics.to_response();
 
@@ -324,7 +324,7 @@ async fn three_good_two_bad_log_fields_are_three_and_two() {
     let failures = state.failures.lock().await;
     let token_failures: Vec<_> = failures
         .iter()
-        .filter(|e| e.operation.starts_with("price:"))
+        .filter(|e| e.operation().starts_with("price:"))
         .collect();
 
     assert_eq!(cache.prices.len(), 3, "tokens_ok = 3");
@@ -368,12 +368,12 @@ async fn tokens_failed_operation_field_identifies_failing_token() {
     let failures = state.failures.lock().await;
     let token_failures: Vec<_> = failures
         .iter()
-        .filter(|e| e.operation.starts_with("price:"))
+        .filter(|e| e.operation().starts_with("price:"))
         .collect();
 
     assert_eq!(token_failures.len(), 1);
     assert!(
-        token_failures[0].operation.contains("MYBAD"),
+        token_failures[0].operation().contains("MYBAD"),
         "failure operation must contain the token symbol so the log is meaningful"
     );
 }
@@ -486,7 +486,7 @@ async fn tokens_ok_plus_tokens_failed_equals_total_tokens() {
     let failures = state.failures.lock().await;
     let token_failures: Vec<_> = failures
         .iter()
-        .filter(|e| e.operation.starts_with("price:"))
+        .filter(|e| e.operation().starts_with("price:"))
         .collect();
 
     let tokens_ok = cache.prices.len();
