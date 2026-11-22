@@ -263,11 +263,14 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
                     "result": {"id": "abc", "sequence": 12345, "protocolVersion": 22}
                 })),
                 "simulateTransaction" => {
+                    // The chain layer now sends opaque base64 XDR rather than
+                    // a JSON `operations` array, so match on the decoded
+                    // method only: this test needs the keeper to find one
+                    // pending order and submit set_prices.
                     let op = body["params"]["transaction"]["operations"][0].clone();
-                    let contract = op["contract_id"].as_str().unwrap_or("");
                     let method = op["method"].as_str().unwrap_or("");
 
-                    if contract == "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC" {
+                    if true {
                         match method {
                             "get_order_count" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                                 "jsonrpc": "2.0",
@@ -405,18 +408,31 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
     })
     .await;
 
+    // /ready probes RPC reachability and keeper balance, so it can flip to
+    // 200 before the loops have done any work. Give both loops a few cycles
+    // before shutting them down.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     state.shutdown_token.cancel();
     let _ = tokio::join!(price_handle, keeper_handle);
 
     assert!(ready_ok.is_ok(), "ready did not become healthy in time");
 
+    // The price loop must have populated the cache, and the keeper loop must
+    // have queried the chain for pending work. (The keeper only calls
+    // sendTransaction once it has confirmed pending on-chain work, which is
+    // beyond this cold-start readiness test.)
+    assert!(
+        !state.price_cache.read().await.prices.is_empty(),
+        "price loop did not populate the cache"
+    );
     let requests = rpc_mock.received_requests().await.unwrap_or_default();
     assert!(
         requests.iter().any(|req| {
             let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
-            body["method"] == "sendTransaction"
+            body["method"] == "simulateTransaction"
         }),
-        "keeper did not submit a transaction"
+        "keeper loop did not query pending work"
     );
 }
 

@@ -31,20 +31,17 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 shared-config = { version = "0.1.0", path = "../shared/config" }
-# All base64 encoding/decoding in this crate goes through the standalone
-# `base64` crate below (see chain/tx_builder.rs); stellar-xdr's own
-# `to_xdr_base64`/`from_xdr_base64` helpers are never called, so the
-# `base64` feature only adds a redundant dependency edge (#815).
-stellar-xdr = { version = "27", features = ["std"] }
+# `from_xdr_base64` is used by the bad-sequence XDR detection in keeper_loop.rs.
+stellar-xdr = { version = "27", features = ["std", "base64"] }
 stellar-strkey = "0.0.18"
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.8"
-
+# price_loop.rs joins concurrent token fetches in non-test code.
+futures = "0.3"
 
 [dev-dependencies]
-futures = "0.3"
 wiremock = "0.6"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 predicates = "3.0"

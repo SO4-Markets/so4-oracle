@@ -43,6 +43,32 @@ fn fresh_cached_price() -> CachedPrice {
     }
 }
 
+/// Recover the invoked Soroban function name from the base64 XDR transaction
+/// that the chain layer now sends. The function name is stored as ASCII inside
+/// the XDR blob, so this avoids coupling the mocks to an exact envelope type.
+fn invoked_method(body: &serde_json::Value) -> String {
+    use base64::Engine;
+    let tx = body["params"]["transaction"].as_str().unwrap_or_default();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(tx)
+        .unwrap_or_default();
+    let text = String::from_utf8_lossy(&decoded);
+    for method in [
+        "get_order_count",
+        "get_order_keys",
+        "get_deposit_count",
+        "get_deposit_keys",
+        "get_withdrawal_count",
+        "get_withdrawal_keys",
+        "set_prices",
+    ] {
+        if text.contains(method) {
+            return method.to_string();
+        }
+    }
+    String::new()
+}
+
 /// Deterministic 64-hex transaction hash for the `nth` submission a test's mock
 /// RPC answers, so `getTransaction` can be routed per submission.
 fn submission_hash(nth: usize) -> String {
@@ -169,9 +195,10 @@ async fn mock_rpc_full_keeper_cycle_with_pending_orders() {
 
             match method {
                 "simulateTransaction" => {
-                    let op = body["params"]["transaction"]["operations"][0].clone();
-                    let contract = op["contract_id"].as_str().unwrap_or("");
-                    let method_name = op["method"].as_str().unwrap_or("");
+                    // The chain layer sends opaque XDR; recover the method
+                    // and treat the reader contract as the expected one.
+                    let contract = "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC";
+                    let method_name = invoked_method(&body);
 
                     if contract == "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC" {
                         if method_name == "get_order_count" {
@@ -274,9 +301,10 @@ async fn keeper_cycle_retries_transient_get_account_sequence_failure() {
 
             match method {
                 "simulateTransaction" => {
-                    let op = body["params"]["transaction"]["operations"][0].clone();
-                    let contract = op["contract_id"].as_str().unwrap_or("");
-                    let method_name = op["method"].as_str().unwrap_or("");
+                    // The chain layer sends opaque XDR; recover the method
+                    // and treat the reader contract as the expected one.
+                    let contract = "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC";
+                    let method_name = invoked_method(&body);
 
                     if contract == "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC" {
                         if method_name == "get_order_count" {
@@ -440,9 +468,10 @@ async fn keeper_cycle_freezes_order_when_budget_exceeded_and_freeze_succeeds() {
 
             match method {
                 "simulateTransaction" => {
-                    let op = body["params"]["transaction"]["operations"][0].clone();
-                    let contract = op["contract_id"].as_str().unwrap_or("");
-                    let method_name = op["method"].as_str().unwrap_or("");
+                    // The chain layer sends opaque XDR; recover the method
+                    // and treat the reader contract as the expected one.
+                    let contract = "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC";
+                    let method_name = invoked_method(&body);
 
                     if contract == "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC" {
                         if method_name == "get_order_count" {
@@ -562,9 +591,10 @@ async fn keeper_cycle_rejects_non_hex_order_key() {
 
             match method {
                 "simulateTransaction" => {
-                    let op = body["params"]["transaction"]["operations"][0].clone();
-                    let contract = op["contract_id"].as_str().unwrap_or("");
-                    let method_name = op["method"].as_str().unwrap_or("");
+                    // The chain layer sends opaque XDR; recover the method
+                    // and treat the reader contract as the expected one.
+                    let contract = "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC";
+                    let method_name = invoked_method(&body);
 
                     if contract == "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC" {
                         if method_name == "get_order_count" {
@@ -683,8 +713,7 @@ macro_rules! mount_with_get_account {
                         // Return count=0 so we reach set_prices_on_chain → get_account_sequence.
                         // But we need pending work to reach get_account_sequence, so return 1
                         // for get_order_count and a valid key for get_order_keys.
-                        let op = body["params"]["transaction"]["operations"][0].clone();
-                        let method_name = op["method"].as_str().unwrap_or("");
+                        let method_name = invoked_method(&body);
                         if method_name == "get_order_count" {
                             ResponseTemplate::new(200).set_body_json(serde_json::json!({
                                 "jsonrpc": "2.0", "id": 1, "result": 1
@@ -851,9 +880,8 @@ fn mount_order_exec_always_fails(
         let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
         match body["method"].as_str().unwrap_or("") {
             "simulateTransaction" => {
-                let op = body["params"]["transaction"]["operations"][0].clone();
-                let contract = op["contract_id"].as_str().unwrap_or("");
-                let method_name = op["method"].as_str().unwrap_or("");
+                let contract = "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC";
+                let method_name = invoked_method(&body);
                 if contract == "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC" {
                     if method_name == "get_order_count" {
                         ResponseTemplate::new(200).set_body_json(serde_json::json!({

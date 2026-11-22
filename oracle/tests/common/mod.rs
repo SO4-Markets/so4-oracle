@@ -74,7 +74,7 @@ pub fn fixed_token_with_price(symbol: &str, address: &str, price: &str) -> Token
         submit_threshold_bps: 10,
         min: 0.0,
         max: 0.0,
-        sources_used: vec![],
+        pyth_max_confidence_bps: 50,
     }
 }
 
@@ -94,7 +94,7 @@ pub fn bad_token(symbol: &str, address: &str) -> TokenConfig {
         submit_threshold_bps: 10,
         min: 0.0,
         max: 0.0,
-        sources_used: vec![],
+        pyth_max_confidence_bps: 50,
     }
 }
 

@@ -81,7 +81,7 @@ async fn test_unmatched_route_metrics_cardinality() {
         let _ = app.clone().oneshot(req).await.unwrap();
     }
 
-    let metrics_out = state.metrics.to_prometheus();
+    let metrics_out = state.metrics.to_prometheus(state.config.network.as_str());
 
     // We expect 10 requests to be logged under the "/unmatched" route label,
     // not under "/some-random-route-x".
@@ -102,7 +102,7 @@ async fn test_promtool_validation() {
     state.metrics.record_http_request("/prices", "GET", 200, 15);
     state.metrics.record_http_auth_failure("/oracle/status");
 
-    let metrics_out = state.metrics.to_prometheus();
+    let metrics_out = state.metrics.to_prometheus(state.config.network.as_str());
 
     let mut child = match std::process::Command::new("promtool")
         .arg("check")

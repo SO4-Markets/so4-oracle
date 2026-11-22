@@ -347,7 +347,7 @@ async fn last_updated_not_set_when_token_has_no_sources() {
         submit_threshold_bps: 10,
         min: 0.0,
         max: 0.0,
-        sources_used: vec![],
+        pyth_max_confidence_bps: 50,
     };
     let state = test_state(&mock.uri(), vec![no_source_token]);
 

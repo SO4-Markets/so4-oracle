@@ -293,7 +293,7 @@ mod tests {
     use crate::{AppState, Config};
     use axum::body::Body;
     use axum::http::header::CACHE_CONTROL;
-    use axum::http::Request;
+    use axum::http::{Request, StatusCode};
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -381,7 +381,7 @@ mod tests {
         let _ = app.clone().oneshot(successful_request).await;
         let _ = app.clone().oneshot(failing_request).await;
 
-        let metrics_out = state.metrics.to_prometheus();
+        let metrics_out = state.metrics.to_prometheus(state.config.network.as_str());
 
         assert!(
             !metrics_out.contains(test_secret),

@@ -413,7 +413,7 @@ async fn token_failure_count_reflected_in_metrics_after_partial_cycle() {
         "exactly one token succeeded in this cycle"
     );
 
-    let prometheus = state.metrics.to_prometheus();
+    let prometheus = state.metrics.to_prometheus(state.config.network.as_str());
     assert!(prometheus.contains(
         "oracle_token_source_fetch_failures_total{symbol=\"FAIL1\",token=\"CFAIL111111111111111111111111111111111111111111111111111111\",source=\"unsupported_source\"} 1"
     ));

@@ -9,7 +9,23 @@
 /// magnitude intact while still spreading concurrent retries apart.
 pub fn jitter(delay_ms: u64) -> u64 {
     let factor = 0.5 + rand::random::<f64>() * 0.5;
-    ((delay_ms as f64) * factor) as u64
+    jitter_with(delay_ms, factor)
+}
+
+/// Apply a caller-supplied factor in `[0.5, 1.0)` to a backoff delay.
+///
+/// Kept separate from [`jitter`] so the contract can be property-tested with
+/// deterministic factors instead of relying on random draws. The result is
+/// never larger than `delay_ms` (so a configured cap still holds after
+/// jittering) and never zero for a non-zero input (so a retry loop cannot
+/// degenerate into a busy loop).
+fn jitter_with(delay_ms: u64, factor: f64) -> u64 {
+    if delay_ms == 0 {
+        return 0;
+    }
+    let factor = factor.clamp(0.5, 1.0);
+    let scaled = (delay_ms as f64 * factor) as u64;
+    scaled.clamp(1, delay_ms)
 }
 
 /// Retry an async fallible closure with exponential backoff (resolves #356, #585).
@@ -108,7 +124,7 @@ async fn sleep_ms(ms: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -209,17 +225,20 @@ mod tests {
     async fn max_delay_cap_is_respected() {
         tokio::time::pause();
         let call_count = Rc::new(Cell::new(0u32));
+        let attempts = Rc::new(RefCell::new(Vec::new()));
 
-        // base_delay_ms (200) > max_delay_ms (50): first sleep must be clamped.
-        // With 5 attempts the uncapped sequence would be 200 → 400 → 800 → 1600 ms;
-        // capped at 50 it stays at 50 for every inter-attempt sleep.
-        // The test just verifies the function completes and returns the right value
-        // (timing assertions would be flaky in unit tests).
+        // base_delay_ms (200) > max_delay_ms (50): the first sleep must be
+        // clamped to the cap. With the clock paused, the gaps between the
+        // recorded attempt timestamps ARE the sleep durations, so the cap is
+        // verified directly instead of merely assumed.
         let count = Rc::clone(&call_count);
+        let stamps = Rc::clone(&attempts);
         let result: Result<u32, &'static str> = retry_with_backoff(
             || {
                 let count = Rc::clone(&count);
+                let stamps = Rc::clone(&stamps);
                 async move {
+                    stamps.borrow_mut().push(tokio::time::Instant::now());
                     let n = count.get() + 1;
                     count.set(n);
                     if n < 3 {
@@ -237,5 +256,91 @@ mod tests {
 
         assert_eq!(result, Ok(7));
         assert_eq!(call_count.get(), 3);
+
+        let stamps = attempts.borrow();
+        assert_eq!(stamps.len(), 3);
+        let gaps: Vec<_> = stamps
+            .windows(2)
+            .map(|pair| pair[1].duration_since(pair[0]).as_millis())
+            .collect();
+        assert_eq!(gaps.len(), 2, "expected exactly two inter-attempt sleeps");
+        for gap in &gaps {
+            assert!(
+                (25..=50).contains(gap),
+                "jittered sleep {gap}ms escaped the 50 ms cap (expected [25, 50])"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn uncapped_backoff_grows_exponentially() {
+        tokio::time::pause();
+        let call_count = Rc::new(Cell::new(0u32));
+        let attempts = Rc::new(RefCell::new(Vec::new()));
+
+        let count = Rc::clone(&call_count);
+        let stamps = Rc::clone(&attempts);
+        let result: Result<u32, &'static str> = retry_with_backoff(
+            || {
+                let count = Rc::clone(&count);
+                let stamps = Rc::clone(&stamps);
+                async move {
+                    stamps.borrow_mut().push(tokio::time::Instant::now());
+                    let n = count.get() + 1;
+                    count.set(n);
+                    if n < 4 {
+                        Err("transient")
+                    } else {
+                        Ok(1u32)
+                    }
+                }
+            },
+            4,
+            100,
+            60_000, // effectively uncapped
+        )
+        .await;
+
+        assert_eq!(result, Ok(1));
+
+        let stamps = attempts.borrow();
+        let gaps: Vec<_> = stamps
+            .windows(2)
+            .map(|pair| pair[1].duration_since(pair[0]).as_millis())
+            .collect();
+        // Uncapped growth is 100 → 200 → 400 ms, each jittered by [0.5, 1).
+        for (gap, (low, high)) in gaps.iter().zip([(50, 100), (100, 200), (200, 400)]) {
+            assert!(
+                (low..=high).contains(gap),
+                "sleep {gap}ms outside expected [{low}, {high}]"
+            );
+        }
+    }
+
+    #[test]
+    fn jitter_never_exceeds_input_or_becomes_zero() {
+        for delay in [0u64, 1, 2, 3, 25, 50, 200, 1_000, u64::MAX / 2] {
+            for _ in 0..64 {
+                let j = jitter(delay);
+                assert!(j <= delay, "jitter({delay}) = {j} exceeded input");
+                if delay > 0 {
+                    assert!(j >= 1, "jitter({delay}) = 0 would busy-loop");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_with_honours_injected_factor_and_bounds() {
+        assert_eq!(jitter_with(0, 0.7), 0);
+        assert_eq!(
+            jitter_with(1, 0.5),
+            1,
+            "must not return 0 for a positive delay"
+        );
+        assert_eq!(jitter_with(100, 0.5), 50);
+        assert_eq!(jitter_with(100, 1.0), 100);
+        assert_eq!(jitter_with(200, 2.0), 200, "factor clamped to <= 1");
+        assert_eq!(jitter_with(200, 0.1), 100, "factor clamped to >= 0.5");
     }
 }

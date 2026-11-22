@@ -5,6 +5,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+/// Compile-time build identity injected by `build.rs`.
+///
+/// The version from `Cargo.toml` alone identifies nothing while the workspace
+/// has no release tags, so the commit and compiler are included as well.
+pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const BUILD_COMMIT: &str = env!("GIT_SHA");
+pub const BUILD_RUSTC: &str = env!("RUSTC_VERSION");
+
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct HttpRouteLabels {
     pub route: String,
@@ -236,9 +244,23 @@ impl Metrics {
         }
     }
 
-    pub fn to_prometheus(&self) -> String {
+    /// Render the Prometheus exposition, including the build identity.
+    ///
+    /// `network` comes from `Config`, so two accidentally co-located instances
+    /// on different networks (or commits) are distinguishable from a scrape.
+    pub fn to_prometheus(&self, network: &str) -> String {
         let c = self.counters.lock().unwrap_or_else(|p| p.into_inner());
         let mut output = String::new();
+
+        output.push_str("# HELP oracle_build_info Build identity of this oracle process\n");
+        output.push_str("# TYPE oracle_build_info gauge\n");
+        output.push_str(&format!(
+            "oracle_build_info{{version=\"{}\",commit=\"{}\",rustc=\"{}\",network=\"{}\"}} 1\n",
+            escape_label_value(BUILD_VERSION),
+            escape_label_value(BUILD_COMMIT),
+            escape_label_value(BUILD_RUSTC),
+            escape_label_value(network),
+        ));
 
         output.push_str("# HELP oracle_price_cycles_total Total number of price cycles\n");
         output.push_str("# TYPE oracle_price_cycles_total counter\n");
@@ -473,9 +495,20 @@ mod tests {
         let metrics = Metrics::new();
         metrics.record_price_cycle(100, 3, 1);
 
-        let prometheus = metrics.to_prometheus();
+        let prometheus = metrics.to_prometheus("testnet");
         assert!(prometheus.contains("oracle_price_cycles_total 1"));
         assert!(prometheus.contains("oracle_price_cycle_duration_seconds 0.1"));
+    }
+
+    #[test]
+    fn prometheus_exposes_build_identity() {
+        let metrics = Metrics::new();
+        let output = metrics.to_prometheus("testnet");
+
+        assert!(output.contains("# TYPE oracle_build_info gauge"));
+        assert!(output.contains(&format!(
+            "oracle_build_info{{version=\"{BUILD_VERSION}\",commit=\"{BUILD_COMMIT}\",rustc=\"{BUILD_RUSTC}\",network=\"testnet\"}} 1"
+        )));
     }
 
     #[test]
@@ -505,7 +538,7 @@ mod tests {
         metrics.record_token_source_fetch_failure("XLM", "CXLM", "pyth");
         metrics.record_token_source_fetch_failure("BTC", "CBTC", "binance");
 
-        let prometheus = metrics.to_prometheus();
+        let prometheus = metrics.to_prometheus("testnet");
         assert!(prometheus.contains(
             "oracle_token_source_fetch_failures_total{symbol=\"XLM\",token=\"CXLM\",source=\"pyth\"} 2"
         ));
@@ -519,7 +552,7 @@ mod tests {
         let metrics = Metrics::new();
         metrics.record_token_source_fetch_failure("A\"B", "C\\D", "line\nfeed");
 
-        let prometheus = metrics.to_prometheus();
+        let prometheus = metrics.to_prometheus("testnet");
         assert!(prometheus.contains(
             "oracle_token_source_fetch_failures_total{symbol=\"A\\\"B\",token=\"C\\\\D\",source=\"line\\nfeed\"} 1"
         ));
@@ -533,7 +566,7 @@ mod tests {
         metrics.record_http_request("/unmatched", "GET", 404, 15);
         metrics.record_http_request("/unmatched", "GET", 404, 25);
 
-        let output = metrics.to_prometheus();
+        let output = metrics.to_prometheus("testnet");
         let matches = output.matches("oracle_http_requests_total").count();
         // 2 matches: one for the HELP/TYPE header, one for the actual metric.
         assert_eq!(matches, 3);

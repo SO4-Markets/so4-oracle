@@ -21,7 +21,7 @@ const ACCOUNT_SEQUENCE_RETRY_BASE_DELAY_MS: u64 = 100;
 const SIMULATE_RETRY_ATTEMPTS: u32 = 3;
 const SIMULATE_RETRY_BASE_DELAY_MS: u64 = 100;
 /// Hard cap on a single keeper cycle — closes #490.
-const KEEPER_CYCLE_TIMEOUT_SECS: u64 = 50;
+pub(crate) const KEEPER_CYCLE_TIMEOUT_SECS: u64 = 50;
 /// Maximum character length of raw RPC error JSON embedded in log fields (#1005).
 /// Matches the truncation discipline already applied to diagnostic events in
 /// `submit.rs::truncate_events_for_log` — raw error bodies from a misbehaving
@@ -847,24 +847,14 @@ fn is_bad_sequence_error(error: &str) -> bool {
 /// is `tx_bad_seq`. Malformed or non-bad-seq XDR returns `false` (caller
 /// falls through to other detection paths).
 fn is_bad_sequence_xdr(error_result_xdr: &str) -> bool {
-    use base64::Engine;
-    use stellar_xdr::{Decode, TransactionResult, TransactionResultResult};
+    use stellar_xdr::{Limits, ReadXdr, TransactionResult, TransactionResultResult};
 
-    let bytes = match base64::engine::general_purpose::STANDARD.decode(error_result_xdr) {
-        Ok(b) => b,
+    let tx_result = match TransactionResult::from_xdr_base64(error_result_xdr, Limits::none()) {
+        Ok(r) => r,
         Err(_) => return false,
     };
 
-    let tx_result = match TransactionResult::from_xdr_base64(error_result_xdr) {
-        Ok(r) => r,
-        // Manual fallback: try decoding from raw bytes
-        Err(_) => match TransactionResult::decode(&mut &bytes[..]) {
-            Ok(r) => r,
-            Err(_) => return false,
-        },
-    };
-
-    matches!(tx_result.result, TransactionResultResult::TxBadSeq(_))
+    matches!(tx_result.result, TransactionResultResult::TxBadSeq)
 }
 
 /// Execute a handler contract call, using and maintaining a per-cycle cached
@@ -1043,7 +1033,9 @@ async fn simulate_contract_call_once(
         .iter()
         .map(|arg| {
             if arg.starts_with('C') || arg.starts_with('G') {
-                stellar_xdr::ScVal::Address(crate::chain::scval::strkey_to_sc_address(arg)?)
+                Ok(stellar_xdr::ScVal::Address(
+                    crate::chain::scval::strkey_to_sc_address(arg)?,
+                ))
             } else {
                 let sym: stellar_xdr::ScSymbol = arg
                     .to_string()
@@ -1339,7 +1331,7 @@ mod tests {
                         submit_threshold_bps: 10,
                         min: 0.0,
                         max: 0.0,
-                        sources_used: vec![],
+                        pyth_max_confidence_bps: 50,
                     },
                     shared_config::TokenConfig {
                         symbol: "STALE".to_string(),
@@ -1356,7 +1348,7 @@ mod tests {
                         submit_threshold_bps: 10,
                         min: 0.0,
                         max: 0.0,
-                        sources_used: vec![],
+                        pyth_max_confidence_bps: 50,
                     },
                 ],
             },

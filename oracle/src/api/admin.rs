@@ -160,7 +160,7 @@ pub async fn clear_blacklisted_key(
 }
 
 pub async fn metrics(_auth: AdminAuth, State(state): State<Arc<AppState>>) -> Response {
-    let prometheus = state.metrics.to_prometheus();
+    let prometheus = state.metrics.to_prometheus(state.config.network.as_str());
     (
         StatusCode::OK,
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],

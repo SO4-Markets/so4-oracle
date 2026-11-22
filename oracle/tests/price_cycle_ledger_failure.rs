@@ -365,26 +365,26 @@ async fn fail_ok_fail_sequence_counts_all_three_cycles() {
     // cycle 1: ledger fails
     let m1 = Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
-        .mount(&mock)
+        .mount_as_scoped(&mock)
         .await;
     run_price_cycle(Arc::clone(&state)).await;
-    m1.drop().await;
+    drop(m1);
 
     // cycle 2: ledger succeeds
     let m2 = Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ledger_ok()))
-        .mount(&mock)
+        .mount_as_scoped(&mock)
         .await;
     run_price_cycle(Arc::clone(&state)).await;
-    m2.drop().await;
+    drop(m2);
 
     // cycle 3: ledger fails again
     let m3 = Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(ledger_fail()))
-        .mount(&mock)
+        .mount_as_scoped(&mock)
         .await;
     run_price_cycle(Arc::clone(&state)).await;
-    m3.drop().await;
+    drop(m3);
 
     // Single state instance sees all three cycles; count must be 3.
     assert_eq!(
