@@ -1,47 +1,70 @@
 [package]
 name = "oracle"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
+version = "0.1.0"
+edition = "2021"
+authors = ["0xsteins"]
+# Inherited from [workspace.package]; without it cargo-deny reports the crate
+# as unlicensed and the CI `deny licenses` job fails.
 license.workspace = true
-repository.workspace = true
-rust-version.workspace = true
 
 [lints]
 workspace = true
 
 [lib]
 path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "oracle"
 path = "src/main.rs"
 
 [dependencies]
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "matched-path", "original-uri", "query", "tokio", "tower-log", "tracing"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "test-util"] }
+futures = "0.3"
 tokio-util = "0.7"
-tower-http = { version = "0.7", features = ["cors", "trace", "request-id", "set-header", "catch-panic"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "query"] }
+# request-id/catch-panic/set-header gate the modules api/mod.rs builds its
+# middleware stack from; `query` on reqwest gates `RequestBuilder::query`,
+# used by the Coinbase fetcher.
+tower-http = { version = "0.7", features = [
+    "cors",
+    "trace",
+    "request-id",
+    "catch-panic",
+    "set-header",
+    "timeout",
+] }
+# ConcurrencyLimitLayer caps in-flight API requests (#1259).
+tower = { version = "0.5", features = ["limit"] }
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "query",
+    "rustls",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ed25519-dalek = "2.1"
+zeroize = "1.8"
 hex = "0.4"
+rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
-shared-config = { version = "0.1.0", path = "../shared/config" }
-# `from_xdr_base64` is used by the bad-sequence XDR detection in keeper_loop.rs.
+shared-config = { path = "../shared/config" }
 stellar-xdr = { version = "27", features = ["std", "base64"] }
 stellar-strkey = "0.0.18"
 base64 = "0.22"
 sha2 = "0.10"
-rand = "0.8"
-# price_loop.rs joins concurrent token fetches in non-test code.
-futures = "0.3"
+digest = "0.10"
+# Constant-time token comparison (#1444); already in Cargo.lock via ed25519-dalek.
+subtle = "2.6"
 
 [dev-dependencies]
+base64 = "0.22"
+stellar-xdr = { version = "27", features = ["std", "base64"] }
+stellar-strkey = "0.0.18"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
+openssl = { version = "0.10", features = ["vendored"] }
+predicates = "3"
 tower = { version = "0.5", features = ["util"] }
-predicates = "3.0"

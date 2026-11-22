@@ -1,4 +1,3 @@
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,13 +10,22 @@ use serde::{Deserialize, Serialize};
 use super::{AdminAuth, ApiError};
 use crate::state::{AppState, CachedPrice, FailedSubmission};
 
+/// Attempts for each `/ready` external probe. The keeper-balance check has
+/// retried since #590; the RPC-reachability check uses the same policy (#894).
 const READY_BALANCE_RETRY_ATTEMPTS: u32 = 3;
+/// Base delay for the exponential backoff between `/ready` probe attempts.
 const READY_BALANCE_RETRY_BASE_DELAY_MS: u64 = 100;
+/// Per-attempt timeout for the RPC-reachability probe. The shared HTTP client
+/// defaults to 15s, but `perform_external_ready_checks` runs under
+/// `READY_CHECK_TIMEOUT_SECS`; a shorter per-attempt timeout lets all
+/// `READY_BALANCE_RETRY_ATTEMPTS` attempts (plus backoff) complete instead of
+/// the first attempt consuming the whole readiness budget (#894).
+const READY_RPC_PROBE_TIMEOUT_SECS: u64 = 4;
 /// Hard cap on the entire `/ready` external-check path (RPC reachability +
 /// keeper balance with retries). Must stay below both Fly's and Railway's
 /// health-check timeouts so the service returns 503 promptly instead of
 /// hanging until the platform probe kills it (#1042).
-const READY_CHECK_TIMEOUT_SECS: u64 = 15;
+pub(crate) const READY_CHECK_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Deserialize)]
 pub struct FailedSubmissionsQuery {
@@ -43,19 +51,13 @@ impl FromRequestParts<Arc<AppState>> for FailedSubmissionsQuery {
     }
 }
 
-// #497 — extended health response exposes last-cycle timestamps and failure
-// counts so staleness or failure streaks are detectable without grepping logs.
+// #1280 — public probes must not expose internal failure counters or cycle
+// timestamps to unauthenticated callers. Liveness probes only need status+version;
+// counters have moved to the admin-only GET /oracle/status endpoint.
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_price_cycle_secs_ago: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_keeper_cycle_secs_ago: Option<u64>,
-    pub price_cycle_count: u64,
-    pub keeper_cycle_count: u64,
-    pub token_fetch_failures: u64,
-    pub submit_failures: u64,
+    pub version: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -64,28 +66,10 @@ pub struct FailuresResponse {
     pub total_count: usize,
 }
 
-pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let cycle = state.cycle_status.read().await;
-    let metrics = state.metrics.to_response();
-
-    let last_price_cycle_secs_ago = cycle
-        .last_price_cycle_at
-        .and_then(|t| t.elapsed().ok())
-        .map(|d| d.as_secs());
-
-    let last_keeper_cycle_secs_ago = cycle
-        .last_keeper_cycle_at
-        .and_then(|t| t.elapsed().ok())
-        .map(|d| d.as_secs());
-
+pub async fn health(_state: State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
-        last_price_cycle_secs_ago,
-        last_keeper_cycle_secs_ago,
-        price_cycle_count: metrics.price_cycle_count,
-        keeper_cycle_count: metrics.keeper_cycle_count,
-        token_fetch_failures: metrics.token_fetch_failures,
-        submit_failures: metrics.submit_failures,
+        version: env!("CARGO_PKG_VERSION"),
     })
 }
 
@@ -138,7 +122,6 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
     // so concurrent requests during a cache miss are coalesced into one
     // outbound check rather than each independently triggering
     // perform_external_ready_checks (#1021).
-    let metrics = state.metrics.to_response();
     {
         let mut cache = state.ready_cache.write().await;
         if let Some(last) = cache.last_checked {
@@ -146,25 +129,7 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
                 if let Some((status, msg)) = cache.last_error.clone() {
                     return Err(ApiError::new(status, msg));
                 }
-                // Compute cycle times like health() does
-                let cycle = state.cycle_status.read().await;
-                let last_price_cycle_secs_ago = cycle
-                    .last_price_cycle_at
-                    .and_then(|t| t.elapsed().ok())
-                    .map(|d| d.as_secs());
-                let last_keeper_cycle_secs_ago = cycle
-                    .last_keeper_cycle_at
-                    .and_then(|t| t.elapsed().ok())
-                    .map(|d| d.as_secs());
-                return Ok(Json(HealthResponse {
-                    status: "ok",
-                    last_price_cycle_secs_ago,
-                    last_keeper_cycle_secs_ago,
-                    price_cycle_count: metrics.price_cycle_count,
-                    keeper_cycle_count: metrics.keeper_cycle_count,
-                    token_fetch_failures: metrics.token_fetch_failures,
-                    submit_failures: metrics.submit_failures,
-                }));
+                return Ok(ready_response());
             }
         }
 
@@ -195,34 +160,69 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
         }
     }
 
-    let metrics = state.metrics.to_response();
-    // Compute cycle times like health() does
-    let cycle = state.cycle_status.read().await;
-    let last_price_cycle_secs_ago = cycle
-        .last_price_cycle_at
-        .and_then(|t| t.elapsed().ok())
-        .map(|d| d.as_secs());
-    let last_keeper_cycle_secs_ago = cycle
-        .last_keeper_cycle_at
-        .and_then(|t| t.elapsed().ok())
-        .map(|d| d.as_secs());
-    Ok(Json(HealthResponse {
-        status: "ok",
-        last_price_cycle_secs_ago,
-        last_keeper_cycle_secs_ago,
-        price_cycle_count: metrics.price_cycle_count,
-        keeper_cycle_count: metrics.keeper_cycle_count,
-        token_fetch_failures: metrics.token_fetch_failures,
-        submit_failures: metrics.submit_failures,
-    }))
+    Ok(ready_response())
 }
 
-async fn perform_external_ready_checks(state: &AppState) -> Result<(), ApiError> {
-    // Check RPC reachability
-    let rpc_url = &state.config.stellar_rpc_url;
-    let response = state
-        .http
-        .get(rpc_url)
+/// `/ready`'s success body: the same status+version as `/health`. The
+/// counters and cycle timestamps it used to build here moved to the
+/// admin-only `/oracle/status` in #1280, and the leftover fields no longer
+/// existed on `HealthResponse`, so `ready` did not compile (#1415).
+fn ready_response() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok",
+        version: env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// Run a single `/ready` external probe with the shared retry policy (#590,
+/// #894): up to `READY_BALANCE_RETRY_ATTEMPTS` attempts with an exponential
+/// backoff between them. An error for which `is_terminal` returns `true` (for
+/// example `RpcError::BalanceBelowMinimum`) is returned immediately instead of
+/// being retried, preserving the keeper-balance check's fail-fast behaviour.
+async fn retry_ready_probe<T, E, F, Fut>(
+    mut probe: F,
+    is_terminal: impl Fn(&E) -> bool,
+    probe_name: &str,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Debug,
+{
+    let mut last_error = None;
+
+    for attempt in 1..=READY_BALANCE_RETRY_ATTEMPTS {
+        match probe().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                if is_terminal(&error) {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    attempt,
+                    max_attempts = READY_BALANCE_RETRY_ATTEMPTS,
+                    probe = probe_name,
+                    error = ?error,
+                    "ready probe attempt failed"
+                );
+                last_error = Some(error);
+                if attempt < READY_BALANCE_RETRY_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(
+                        READY_BALANCE_RETRY_BASE_DELAY_MS * 2_u64.pow(attempt - 1),
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+
+    Err(last_error.expect("READY_BALANCE_RETRY_ATTEMPTS is greater than zero"))
+}
+
+/// A single RPC-reachability probe against the configured Stellar RPC URL.
+async fn probe_rpc_reachability(state: &AppState) -> Result<(), ApiError> {
+    let response = crate::http::with_correlation(state.http.get(&state.config.stellar_rpc_url))
+        .timeout(Duration::from_secs(READY_RPC_PROBE_TIMEOUT_SECS))
         .send()
         .await
         .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "rpc_unreachable"))?;
@@ -234,6 +234,21 @@ async fn perform_external_ready_checks(state: &AppState) -> Result<(), ApiError>
         ));
     }
 
+    Ok(())
+}
+
+async fn perform_external_ready_checks(state: &AppState) -> Result<(), ApiError> {
+    // Check RPC reachability. This runs before the keeper-balance check, so a
+    // single dropped connection or timeout used to short-circuit the whole
+    // readiness probe; retry it with the same policy as the balance check
+    // (#590, #894).
+    retry_ready_probe(
+        || probe_rpc_reachability(state),
+        |_| false,
+        "rpc reachability",
+    )
+    .await?;
+
     // Check keeper balance
     let keeper_cfg = crate::keeper::KeeperBalanceConfig {
         horizon_url: state.config.horizon_url.clone(),
@@ -241,7 +256,18 @@ async fn perform_external_ready_checks(state: &AppState) -> Result<(), ApiError>
         min_balance_xlm: state.config.min_keeper_balance_xlm,
     };
 
-    match check_keeper_balance_for_ready(&keeper_cfg, &state.keeper_balance_below_min).await {
+    match retry_ready_probe(
+        || crate::keeper::check_keeper_balance(&keeper_cfg, &state.keeper_balance_below_min),
+        |error: &crate::stellar_rpc::RpcError| {
+            matches!(
+                error,
+                crate::stellar_rpc::RpcError::BalanceBelowMinimum { .. }
+            )
+        },
+        "keeper balance",
+    )
+    .await
+    {
         Ok(_) => {}
         Err(crate::stellar_rpc::RpcError::BalanceBelowMinimum { .. }) => {
             return Err(ApiError::new(
@@ -258,39 +284,6 @@ async fn perform_external_ready_checks(state: &AppState) -> Result<(), ApiError>
         }
     }
     Ok(())
-}
-
-async fn check_keeper_balance_for_ready(
-    keeper_cfg: &crate::keeper::KeeperBalanceConfig,
-    below_min: &Arc<AtomicBool>,
-) -> Result<i64, crate::stellar_rpc::RpcError> {
-    let mut last_error = None;
-
-    for attempt in 1..=READY_BALANCE_RETRY_ATTEMPTS {
-        match crate::keeper::check_keeper_balance(keeper_cfg, below_min).await {
-            Ok(stroops) => return Ok(stroops),
-            Err(error @ crate::stellar_rpc::RpcError::BalanceBelowMinimum { .. }) => {
-                return Err(error);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    attempt,
-                    max_attempts = READY_BALANCE_RETRY_ATTEMPTS,
-                    error = %error,
-                    "ready keeper balance attempt failed"
-                );
-                last_error = Some(error);
-                if attempt < READY_BALANCE_RETRY_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(
-                        READY_BALANCE_RETRY_BASE_DELAY_MS * 2_u64.pow(attempt - 1),
-                    ))
-                    .await;
-                }
-            }
-        }
-    }
-
-    Err(last_error.expect("READY_BALANCE_RETRY_ATTEMPTS is greater than zero"))
 }
 
 pub async fn prices(
@@ -331,6 +324,10 @@ pub async fn failed_submissions(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::time::Instant;
+
     use super::*;
     use crate::{AppState, Config};
 
@@ -340,16 +337,299 @@ mod tests {
     }
 
     // #339 — GET /health must return 200 with {"status":"ok"}, no auth required
-    // #497 — health now also surfaces cycle timestamps and failure counters
+    // #1280 — public probes must not expose internal failure counters
     #[tokio::test]
-    async fn health_returns_status_ok() {
+    async fn health_returns_status_ok_and_version_only() {
         let state = test_state();
         let Json(body) = health(State(state)).await;
         assert_eq!(body.status, "ok");
-        // No cycles have run yet — counts are zero and timestamps are absent
-        assert_eq!(body.price_cycle_count, 0);
-        assert_eq!(body.keeper_cycle_count, 0);
-        assert!(body.last_price_cycle_secs_ago.is_none());
-        assert!(body.last_keeper_cycle_secs_ago.is_none());
+        assert!(!body.version.is_empty());
+        // Counters must NOT be present on the public response (they moved to /oracle/status).
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(json.get("price_cycle_count").is_none());
+        assert!(json.get("keeper_cycle_count").is_none());
+        assert!(json.get("token_fetch_failures").is_none());
+        assert!(json.get("submit_failures").is_none());
+        assert!(json.get("last_price_cycle_secs_ago").is_none());
+        assert!(json.get("last_keeper_cycle_secs_ago").is_none());
+    }
+
+    /// #894 - the shared readiness retry helper recovers from a transient error.
+    #[tokio::test(start_paused = true)]
+    async fn retry_ready_probe_recovers_from_transient_failure() {
+        let calls = Rc::new(Cell::new(0u32));
+        let counter = Rc::clone(&calls);
+
+        let result: Result<(), &'static str> = retry_ready_probe(
+            || {
+                let counter = Rc::clone(&counter);
+                async move {
+                    let call = counter.get() + 1;
+                    counter.set(call);
+                    if call < READY_BALANCE_RETRY_ATTEMPTS {
+                        Err("transient")
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            |_| false,
+            "test",
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls.get(), READY_BALANCE_RETRY_ATTEMPTS);
+    }
+
+    /// #894 - terminal errors are returned without consuming retries.
+    #[tokio::test(start_paused = true)]
+    async fn retry_ready_probe_returns_terminal_error_immediately() {
+        let calls = Rc::new(Cell::new(0u32));
+        let counter = Rc::clone(&calls);
+
+        let result: Result<(), &'static str> = retry_ready_probe(
+            || {
+                let counter = Rc::clone(&counter);
+                async move {
+                    counter.set(counter.get() + 1);
+                    Err("terminal")
+                }
+            },
+            |_| true,
+            "test",
+        )
+        .await;
+
+        assert_eq!(result, Err("terminal"));
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// #894 - a probe that keeps failing is retried a bounded number of times.
+    #[tokio::test(start_paused = true)]
+    async fn retry_ready_probe_exhausts_attempts() {
+        let calls = Rc::new(Cell::new(0u32));
+        let counter = Rc::clone(&calls);
+
+        let result: Result<(), &'static str> = retry_ready_probe(
+            || {
+                let counter = Rc::clone(&counter);
+                async move {
+                    counter.set(counter.get() + 1);
+                    Err("always fails")
+                }
+            },
+            |_| false,
+            "test",
+        )
+        .await;
+
+        assert_eq!(result, Err("always fails"));
+        assert_eq!(calls.get(), READY_BALANCE_RETRY_ATTEMPTS);
+    }
+
+    // ── #1415: ready, prices and failed_submissions ──────────────────────
+
+    /// State whose RPC and Horizon URLs refuse connections immediately, so a
+    /// test fails fast (rather than hanging) if a cached path makes a call.
+    fn offline_state() -> Arc<AppState> {
+        let mut config = Config::default_for_tests();
+        config.stellar_rpc_url = "http://127.0.0.1:9".to_string();
+        config.horizon_url = "http://127.0.0.1:9".to_string();
+        Arc::new(AppState::new(Arc::new(config)))
+    }
+
+    fn cached_price(symbol: &str) -> CachedPrice {
+        CachedPrice {
+            token_address: format!("C{symbol}"),
+            symbol: symbol.to_string(),
+            display_symbol: symbol.to_string(),
+            keeper_index: 0,
+            min: 1,
+            max: 2,
+            median: 1,
+            timestamp: 0,
+            ledger_seq: 1,
+            sources_used: vec!["fixed".to_string()],
+            signature: String::new(),
+        }
+    }
+
+    async fn add_price(state: &AppState, symbol: &str) {
+        let mut cache = state.price_cache.write().await;
+        cache
+            .prices
+            .insert(symbol.to_string(), cached_price(symbol));
+    }
+
+    async fn mark_cycles(state: &AppState, price: bool, keeper: bool) {
+        let mut cycle = state.cycle_status.write().await;
+        let now = std::time::SystemTime::now();
+        cycle.last_price_cycle_at = price.then_some(now);
+        cycle.last_keeper_cycle_at = keeper.then_some(now);
+    }
+
+    async fn ready_error(state: Arc<AppState>) -> ApiError {
+        ready(State(state)).await.expect_err("ready should fail")
+    }
+
+    #[tokio::test]
+    async fn ready_without_cached_prices_is_unavailable() {
+        let error = ready_error(offline_state()).await;
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message, "no_prices_cached");
+    }
+
+    #[tokio::test]
+    async fn ready_with_a_stale_price_loop_is_unavailable() {
+        let state = offline_state();
+        add_price(&state, "BTC").await;
+        mark_cycles(&state, false, true).await;
+
+        assert_eq!(ready_error(state).await.message, "price_loop_stale");
+    }
+
+    #[tokio::test]
+    async fn ready_with_a_stale_keeper_loop_is_unavailable() {
+        let state = offline_state();
+        add_price(&state, "BTC").await;
+        mark_cycles(&state, true, false).await;
+
+        assert_eq!(ready_error(state).await.message, "keeper_loop_stale");
+    }
+
+    // A fresh cached success is served without any outbound call: the RPC
+    // and Horizon URLs refuse connections, so a real check would fail.
+    #[tokio::test]
+    async fn ready_serves_a_fresh_cached_success_without_outbound_calls() {
+        let state = offline_state();
+        add_price(&state, "BTC").await;
+        mark_cycles(&state, true, true).await;
+        state.ready_cache.write().await.last_checked = Some(Instant::now());
+
+        let Json(body) = ready(State(state)).await.expect("cached success");
+        assert_eq!(body.status, "ok");
+    }
+
+    #[tokio::test]
+    async fn ready_serves_a_fresh_cached_failure() {
+        let state = offline_state();
+        add_price(&state, "BTC").await;
+        mark_cycles(&state, true, true).await;
+        {
+            let mut cache = state.ready_cache.write().await;
+            cache.last_checked = Some(Instant::now());
+            let error = (StatusCode::SERVICE_UNAVAILABLE, "keeper_balance_low".into());
+            cache.last_error = Some(error);
+        }
+
+        assert_eq!(ready_error(state).await.message, "keeper_balance_low");
+    }
+
+    // An expired cache entry re-runs the external checks and records the
+    // new outcome for the next request.
+    #[tokio::test]
+    async fn ready_rechecks_after_the_cache_expires_and_records_the_result() {
+        let state = offline_state();
+        add_price(&state, "BTC").await;
+        mark_cycles(&state, true, true).await;
+        let expired = Instant::now().checked_sub(Duration::from_secs(10));
+        state.ready_cache.write().await.last_checked = expired;
+
+        let error = ready_error(Arc::clone(&state)).await;
+
+        assert_eq!(error.message, "rpc_unreachable");
+        let cache = state.ready_cache.read().await;
+        let recorded = cache.last_error.clone().map(|(_, message)| message);
+        assert_eq!(recorded.as_deref(), Some("rpc_unreachable"));
+        assert!(cache.last_checked > expired);
+    }
+
+    #[tokio::test]
+    async fn prices_is_unavailable_until_the_first_cycle() {
+        let error = prices(State(offline_state()))
+            .await
+            .expect_err("empty cache");
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message, "no_prices");
+    }
+
+    #[tokio::test]
+    async fn prices_returns_every_cached_price() {
+        let state = offline_state();
+        add_price(&state, "BTC").await;
+        add_price(&state, "ETH").await;
+
+        let Json(body) = prices(State(state)).await.expect("cached prices");
+        let mut symbols: Vec<_> = body.iter().map(|p| p.symbol.as_str()).collect();
+        symbols.sort_unstable();
+        assert_eq!(symbols, ["BTC", "ETH"]);
+    }
+
+    fn failure(operation: &str) -> FailedSubmission {
+        FailedSubmission {
+            at: std::time::SystemTime::now(),
+            operation: operation.to_string(),
+            network: "testnet".to_string(),
+            token: String::new(),
+            symbol: String::new(),
+            source: None,
+            min: 0,
+            max: 0,
+            tx_hash: None,
+            error: "boom".to_string(),
+            timestamp: 0,
+            ledger_seq: 0,
+        }
+    }
+
+    async fn query_failures(
+        state: Arc<AppState>,
+        operation: Option<&str>,
+        limit: Option<usize>,
+    ) -> FailuresResponse {
+        let query = FailedSubmissionsQuery {
+            operation: operation.map(str::to_string),
+            limit,
+        };
+        let Json(body) = failed_submissions(AdminAuth, query, State(state)).await;
+        body
+    }
+
+    #[tokio::test]
+    async fn failed_submissions_filters_by_operation_prefix_newest_first() {
+        let state = offline_state();
+        {
+            let mut failures = state.failures.lock().await;
+            failures.push(failure("source:BTC:binance"));
+            failures.push(failure("execute_order"));
+            failures.push(failure("source:ETH:pyth"));
+        }
+
+        let body = query_failures(state, Some("source:"), None).await;
+
+        assert_eq!(body.total_count, 2);
+        let operations: Vec<_> = body.failures.iter().map(|f| &f.operation).collect();
+        assert_eq!(operations, ["source:ETH:pyth", "source:BTC:binance"]);
+    }
+
+    #[tokio::test]
+    async fn failed_submissions_limit_defaults_to_100_and_is_capped_at_256() {
+        let state = offline_state();
+        {
+            let mut failures = state.failures.lock().await;
+            for i in 0..300 {
+                failures.push(failure(&format!("op-{i}")));
+            }
+        }
+
+        let defaulted = query_failures(Arc::clone(&state), None, None).await;
+        let capped = query_failures(Arc::clone(&state), None, Some(10_000)).await;
+        let small = query_failures(state, None, Some(5)).await;
+
+        assert_eq!(defaulted.failures.len(), 100);
+        assert_eq!(capped.failures.len(), capped.total_count.min(256));
+        assert_eq!(small.failures.len(), 5);
+        assert_eq!(small.total_count, defaulted.total_count);
     }
 }

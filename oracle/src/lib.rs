@@ -9,6 +9,7 @@ pub mod keeper;
 pub mod keeper_loop;
 pub mod metrics;
 pub mod network_config;
+pub mod preflight;
 pub mod price_loop;
 pub mod prices;
 pub mod pyth;
@@ -37,13 +38,56 @@ pub const SCALE_DIGITS: u32 = 30;
 /// they go on-chain.
 pub const FLOAT_PRECISION: i128 = 10i128.pow(SCALE_DIGITS);
 
-/// Returns the current Unix timestamp in seconds.
-///
-/// This is a convenience wrapper around `SystemTime::now() - UNIX_EPOCH`
-/// that returns the duration as seconds (`u64`). Closes #399.
+/// Trait representing a source of Unix timestamps.
+pub trait Clock: Send + Sync {
+    fn now_secs(&self) -> u64;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_secs(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0)
+    }
+}
+
+/// Returns the current Unix timestamp in seconds using SystemClock.
 pub fn current_timestamp_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+    SystemClock.now_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn system_now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test host clock is after the Unix epoch")
+            .as_secs()
+    }
+
+    // #1420 — 11 call sites read prices' and cycles' ages from this value.
+    #[test]
+    fn current_timestamp_secs_tracks_the_system_clock() {
+        let before = system_now_secs();
+        let now = current_timestamp_secs();
+        let after = system_now_secs();
+        assert!(
+            before <= now && now <= after,
+            "{before} <= {now} <= {after}"
+        );
+    }
+
+    // `unwrap_or(0)` only applies to a pre-epoch clock; on any sane host the
+    // value must be a real, recent timestamp, never the 0 fallback.
+    #[test]
+    fn current_timestamp_secs_is_not_the_pre_epoch_fallback() {
+        const JAN_1_2020: u64 = 1_577_836_800;
+        assert!(current_timestamp_secs() > JAN_1_2020);
+    }
 }

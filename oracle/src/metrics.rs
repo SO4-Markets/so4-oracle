@@ -13,11 +13,39 @@ pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BUILD_COMMIT: &str = env!("GIT_SHA");
 pub const BUILD_RUSTC: &str = env!("RUSTC_VERSION");
 
+/// Cumulative latency bucket upper bounds, in seconds, matching the `if`
+/// ladder in `record_http_request`. The trailing `+Inf` slot counts every
+/// request for the route, so its length is `Counters::http_request_duration_buckets`'s
+/// inner-array length.
+const HTTP_DURATION_BUCKETS: [&str; 7] = ["0.01", "0.05", "0.1", "0.25", "0.5", "1", "+Inf"];
+
+/// Bucket upper bounds for `oracle_price_cycle_duration_seconds_histogram`.
+/// Budget is 1 s; buckets capture sub-second cycles up to the 60 s tail
+/// that is the subject of the open latency investigation.
+const PRICE_CYCLE_BUCKETS: [f64; 8] = [0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0];
+
+/// Bucket upper bounds for `oracle_keeper_cycle_duration_seconds_histogram`.
+/// Budget is ~25 s; buckets capture normal runs and the 50 s timeout tail.
+const KEEPER_CYCLE_BUCKETS: [f64; 6] = [1.0, 2.5, 5.0, 10.0, 25.0, 50.0];
+
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct HttpRouteLabels {
     pub route: String,
     pub method: String,
     pub status_class: String,
+}
+
+/// Label set for the per-source token counters.
+///
+/// Ordering is derived so this can key a `BTreeMap` without pulling in a
+/// hash-map hasher. The label set is bounded by
+/// (configured tokens × configured sources) — see
+/// `record_token_source_fetch_failure` for the cardinality argument.
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct TokenSourceLabels {
+    pub symbol: String,
+    pub token: String,
+    pub source: String,
 }
 
 /// All price-cycle and keeper-cycle counters, held behind a single mutex.
@@ -42,32 +70,34 @@ struct Counters {
     deposits_executed: u64,
     withdrawals_executed: u64,
     submit_failures: u64,
+    keeper_balance_low_count: u64,
+    prices_stale_count: u64,
     last_metrics_update: u64,
     http_requests_in_flight: u64,
     http_requests_total: BTreeMap<HttpRouteLabels, u64>,
     http_request_duration_buckets: BTreeMap<String, [u64; 7]>,
     http_request_duration_sum: BTreeMap<String, f64>,
     http_auth_failures_total: BTreeMap<String, u64>,
+    // Histogram fields for price-cycle duration.
+    // Bucket array length = PRICE_CYCLE_BUCKETS.len() + 1 (+Inf slot).
+    price_cycle_duration_buckets: [u64; 9],
+    price_cycle_duration_sum: f64,
+    // Histogram fields for keeper-cycle duration.
+    // Bucket array length = KEEPER_CYCLE_BUCKETS.len() + 1 (+Inf slot).
+    keeper_cycle_duration_buckets: [u64; 7],
+    keeper_cycle_duration_sum: f64,
 }
 
 #[derive(Debug, Default)]
 pub struct Metrics {
+    /// Every cycle counter, behind one mutex so a single `record_*` call is
+    /// observed by readers as one consistent generation (#599).
     counters: Mutex<Counters>,
-    pub token_source_fetch_failures: Mutex<BTreeMap<TokenSourceLabels, u64>>,
-    /// Per (symbol, token, source) count of times that source's price was
-    /// excluded by the MAD-based outlier filter in `aggregate_prices`, even
-    /// on cycles where enough other sources still met `min_sources` and the
-    /// cycle succeeded. Surfaces `AggregatedPrice.rejected_sources`, which
-    /// was previously computed on every successful aggregation and then
-    /// discarded before reaching any consumer (#728).
-    pub token_source_outlier_rejections: Mutex<BTreeMap<TokenSourceLabels, u64>>,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct TokenSourceLabels {
-    pub symbol: String,
-    pub token: String,
-    pub source: String,
+    token_source_fetch_failures: Mutex<BTreeMap<TokenSourceLabels, u64>>,
+    token_source_outlier_rejections: Mutex<BTreeMap<TokenSourceLabels, u64>>,
+    /// Sources that returned a price for each symbol in the latest price
+    /// cycle (#1467), so "down to two sources" is alertable.
+    token_sources_available: Mutex<BTreeMap<String, usize>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,7 +112,24 @@ pub struct MetricsResponse {
     pub deposits_executed: u64,
     pub withdrawals_executed: u64,
     pub submit_failures: u64,
+    pub keeper_balance_low_count: u64,
+    pub prices_stale_count: u64,
     pub last_metrics_update: u64,
+}
+
+/// What a single keeper cycle did, as reported by the keeper loop.
+///
+/// Grouped into a struct rather than passed as seven positional arguments so
+/// the two `bool` flags cannot be transposed at a call site — a swapped pair
+/// would silently attribute a low-balance cycle as a stale-price one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeeperCycleTally {
+    pub orders: usize,
+    pub deposits: usize,
+    pub withdrawals: usize,
+    pub errors: usize,
+    pub keeper_balance_low: bool,
+    pub prices_stale: bool,
 }
 
 impl Metrics {
@@ -96,24 +143,43 @@ impl Metrics {
         c.price_cycle_latency_ms = latency_ms;
         c.token_fetch_ok += tokens_ok as u64;
         c.token_fetch_failures += tokens_failed as u64;
+        let secs = latency_ms as f64 / 1000.0;
+        c.price_cycle_duration_sum += secs;
+        // Cumulative histogram: increment every bucket whose upper bound >= secs,
+        // so each bucket counts all observations up to and including that bound.
+        // The +Inf slot (index PRICE_CYCLE_BUCKETS.len()) always gets incremented.
+        for (i, &bound) in PRICE_CYCLE_BUCKETS.iter().enumerate() {
+            if secs <= bound {
+                c.price_cycle_duration_buckets[i] += 1;
+            }
+        }
+        c.price_cycle_duration_buckets[PRICE_CYCLE_BUCKETS.len()] += 1;
         Self::stamp(&mut c);
     }
 
-    pub fn record_keeper_cycle(
-        &self,
-        latency_ms: u64,
-        orders: usize,
-        deposits: usize,
-        withdrawals: usize,
-        errors: usize,
-    ) {
+    pub fn record_keeper_cycle(&self, latency_ms: u64, tally: KeeperCycleTally) {
         let mut c = self.counters.lock().unwrap_or_else(|p| p.into_inner());
         c.keeper_cycle_count += 1;
         c.keeper_cycle_latency_ms = latency_ms;
-        c.orders_executed += orders as u64;
-        c.deposits_executed += deposits as u64;
-        c.withdrawals_executed += withdrawals as u64;
-        c.submit_failures += errors as u64;
+        c.orders_executed += tally.orders as u64;
+        c.deposits_executed += tally.deposits as u64;
+        c.withdrawals_executed += tally.withdrawals as u64;
+        c.submit_failures += tally.errors as u64;
+        if tally.keeper_balance_low {
+            c.keeper_balance_low_count += 1;
+        }
+        if tally.prices_stale {
+            c.prices_stale_count += 1;
+        }
+        let secs = latency_ms as f64 / 1000.0;
+        c.keeper_cycle_duration_sum += secs;
+        // Cumulative histogram: increment every bucket whose upper bound >= secs.
+        for (i, &bound) in KEEPER_CYCLE_BUCKETS.iter().enumerate() {
+            if secs <= bound {
+                c.keeper_cycle_duration_buckets[i] += 1;
+            }
+        }
+        c.keeper_cycle_duration_buckets[KEEPER_CYCLE_BUCKETS.len()] += 1;
         Self::stamp(&mut c);
     }
 
@@ -141,6 +207,14 @@ impl Metrics {
 
     /// Record that `source`'s price for `symbol`/`token` was excluded by the
     /// outlier filter during a price cycle (#728).
+    /// Record how many sources returned a price for `symbol` this cycle (#1467).
+    pub fn set_token_sources_available(&self, symbol: &str, count: usize) {
+        self.token_sources_available
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(symbol.to_string(), count);
+    }
+
     pub fn record_token_source_outlier_rejection(&self, symbol: &str, token: &str, source: &str) {
         let labels = TokenSourceLabels {
             symbol: symbol.to_string(),
@@ -240,6 +314,8 @@ impl Metrics {
             deposits_executed: c.deposits_executed,
             withdrawals_executed: c.withdrawals_executed,
             submit_failures: c.submit_failures,
+            keeper_balance_low_count: c.keeper_balance_low_count,
+            prices_stale_count: c.prices_stale_count,
             last_metrics_update: c.last_metrics_update,
         }
     }
@@ -269,13 +345,57 @@ impl Metrics {
             c.price_cycle_count
         ));
 
+        // Deprecated gauge — kept for one release so existing dashboards keep
+        // working while operators migrate to the histogram below.
         output.push_str(
-            "# HELP oracle_price_cycle_duration_seconds Last price cycle duration in seconds\n",
+            "# HELP oracle_price_cycle_duration_seconds Last price cycle duration in seconds (deprecated; use oracle_price_cycle_duration_seconds_histogram)\n",
         );
         output.push_str("# TYPE oracle_price_cycle_duration_seconds gauge\n");
         output.push_str(&format!(
             "oracle_price_cycle_duration_seconds {}\n",
             c.price_cycle_latency_ms as f64 / 1000.0
+        ));
+
+        // Histogram: captures every cycle so p95/p99 tail latency is observable.
+        let price_bucket_bounds: Vec<&str> = PRICE_CYCLE_BUCKETS
+            .iter()
+            .map(|b| {
+                // Format as a string with enough precision, stripping trailing zeros.
+                // We use a static match to keep the output clean.
+                match *b {
+                    0.25 => "0.25",
+                    0.5 => "0.5",
+                    1.0 => "1",
+                    2.5 => "2.5",
+                    5.0 => "5",
+                    10.0 => "10",
+                    30.0 => "30",
+                    60.0 => "60",
+                    _ => "?",
+                }
+            })
+            .collect();
+        output.push_str(
+            "# HELP oracle_price_cycle_duration_seconds_histogram Price cycle duration histogram\n",
+        );
+        output.push_str("# TYPE oracle_price_cycle_duration_seconds_histogram histogram\n");
+        for (i, bound) in price_bucket_bounds.iter().enumerate() {
+            output.push_str(&format!(
+                "oracle_price_cycle_duration_seconds_histogram_bucket{{le=\"{bound}\"}} {}\n",
+                c.price_cycle_duration_buckets[i]
+            ));
+        }
+        output.push_str(&format!(
+            "oracle_price_cycle_duration_seconds_histogram_bucket{{le=\"+Inf\"}} {}\n",
+            c.price_cycle_duration_buckets[PRICE_CYCLE_BUCKETS.len()]
+        ));
+        output.push_str(&format!(
+            "oracle_price_cycle_duration_seconds_histogram_sum {}\n",
+            c.price_cycle_duration_sum
+        ));
+        output.push_str(&format!(
+            "oracle_price_cycle_duration_seconds_histogram_count {}\n",
+            c.price_cycle_duration_buckets[PRICE_CYCLE_BUCKETS.len()]
         ));
 
         output.push_str("# HELP oracle_keeper_cycles_total Total number of keeper cycles\n");
@@ -285,13 +405,51 @@ impl Metrics {
             c.keeper_cycle_count
         ));
 
+        // Deprecated gauge — kept for one release so existing dashboards keep
+        // working while operators migrate to the histogram below.
         output.push_str(
-            "# HELP oracle_keeper_cycle_duration_seconds Last keeper cycle duration in seconds\n",
+            "# HELP oracle_keeper_cycle_duration_seconds Last keeper cycle duration in seconds (deprecated; use oracle_keeper_cycle_duration_seconds_histogram)\n",
         );
         output.push_str("# TYPE oracle_keeper_cycle_duration_seconds gauge\n");
         output.push_str(&format!(
             "oracle_keeper_cycle_duration_seconds {}\n",
             c.keeper_cycle_latency_ms as f64 / 1000.0
+        ));
+
+        // Histogram: captures every cycle so p95/p99 tail latency is observable.
+        let keeper_bucket_bounds: Vec<&str> = KEEPER_CYCLE_BUCKETS
+            .iter()
+            .map(|b| match *b {
+                1.0 => "1",
+                2.5 => "2.5",
+                5.0 => "5",
+                10.0 => "10",
+                25.0 => "25",
+                50.0 => "50",
+                _ => "?",
+            })
+            .collect();
+        output.push_str(
+            "# HELP oracle_keeper_cycle_duration_seconds_histogram Keeper cycle duration histogram\n",
+        );
+        output.push_str("# TYPE oracle_keeper_cycle_duration_seconds_histogram histogram\n");
+        for (i, bound) in keeper_bucket_bounds.iter().enumerate() {
+            output.push_str(&format!(
+                "oracle_keeper_cycle_duration_seconds_histogram_bucket{{le=\"{bound}\"}} {}\n",
+                c.keeper_cycle_duration_buckets[i]
+            ));
+        }
+        output.push_str(&format!(
+            "oracle_keeper_cycle_duration_seconds_histogram_bucket{{le=\"+Inf\"}} {}\n",
+            c.keeper_cycle_duration_buckets[KEEPER_CYCLE_BUCKETS.len()]
+        ));
+        output.push_str(&format!(
+            "oracle_keeper_cycle_duration_seconds_histogram_sum {}\n",
+            c.keeper_cycle_duration_sum
+        ));
+        output.push_str(&format!(
+            "oracle_keeper_cycle_duration_seconds_histogram_count {}\n",
+            c.keeper_cycle_duration_buckets[KEEPER_CYCLE_BUCKETS.len()]
         ));
 
         output.push_str("# HELP oracle_orders_executed_total Total number of orders executed\n");
@@ -366,6 +524,21 @@ impl Metrics {
             ));
         }
 
+        output.push_str("# HELP oracle_token_sources_available Sources that returned a price for the token in the latest price cycle; at 2 the outlier filter cannot reject anything\n");
+        output.push_str("# TYPE oracle_token_sources_available gauge\n");
+        for (symbol, count) in self
+            .token_sources_available
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+        {
+            output.push_str(&format!(
+                "oracle_token_sources_available{{symbol=\"{}\"}} {}\n",
+                escape_label_value(symbol),
+                count
+            ));
+        }
+
         output.push_str("# HELP oracle_submit_failures_total Total number of submit failures\n");
         output.push_str("# TYPE oracle_submit_failures_total counter\n");
         output.push_str(&format!(
@@ -380,7 +553,23 @@ impl Metrics {
             c.last_metrics_update
         ));
 
-        output.push_str("# HELP oracle_http_requests_total Total number of HTTP requests\n");
+        output.push_str("# HELP oracle_keeper_balance_low_count Total number of cycles with keeper balance below minimum\n");
+        output.push_str("# TYPE oracle_keeper_balance_low_count counter\n");
+        output.push_str(&format!(
+            "oracle_keeper_balance_low_count {}\n",
+            c.keeper_balance_low_count
+        ));
+
+        output.push_str(
+            "# HELP oracle_prices_stale_count Total number of cycles with stale prices\n",
+        );
+        output.push_str("# TYPE oracle_prices_stale_count counter\n");
+        output.push_str(&format!(
+            "oracle_prices_stale_count {}\n",
+            c.prices_stale_count
+        ));
+
+        output.push_str("# HELP oracle_http_requests_total Total HTTP requests by route, method and status class\n");
         output.push_str("# TYPE oracle_http_requests_total counter\n");
         for (labels, count) in &c.http_requests_total {
             output.push_str(&format!(
@@ -392,56 +581,39 @@ impl Metrics {
             ));
         }
 
+        // Cumulative histogram. The bucket bounds are the ones
+        // `record_http_request` writes into, in ascending order; the last slot
+        // is the +Inf catch-all and is always total request count for the
+        // route.
         output.push_str(
-            "# HELP oracle_http_request_duration_seconds HTTP request duration histogram\n",
+            "# HELP oracle_http_request_duration_seconds HTTP request duration by route\n",
         );
         output.push_str("# TYPE oracle_http_request_duration_seconds histogram\n");
         for (route, buckets) in &c.http_request_duration_buckets {
-            let escaped_route = escape_label_value(route);
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"0.01\"}} {}\n",
-                escaped_route, buckets[0]
-            ));
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"0.05\"}} {}\n",
-                escaped_route, buckets[1]
-            ));
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"0.1\"}} {}\n",
-                escaped_route, buckets[2]
-            ));
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"0.25\"}} {}\n",
-                escaped_route, buckets[3]
-            ));
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"0.5\"}} {}\n",
-                escaped_route, buckets[4]
-            ));
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"1\"}} {}\n",
-                escaped_route, buckets[5]
-            ));
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_bucket{{route=\"{}\",le=\"+Inf\"}} {}\n",
-                escaped_route, buckets[6]
-            ));
-
-            output.push_str(&format!(
-                "oracle_http_request_duration_seconds_count{{route=\"{}\"}} {}\n",
-                escaped_route, buckets[6]
-            ));
-            if let Some(sum) = c.http_request_duration_sum.get(route) {
+            let route_label = escape_label_value(route);
+            for (bound, count) in HTTP_DURATION_BUCKETS.iter().zip(buckets) {
                 output.push_str(&format!(
-                    "oracle_http_request_duration_seconds_sum{{route=\"{}\"}} {}\n",
-                    escaped_route, sum
+                    "oracle_http_request_duration_seconds_bucket{{route=\"{route_label}\",le=\"{bound}\"}} {count}\n"
                 ));
             }
         }
+        for (route, sum) in &c.http_request_duration_sum {
+            output.push_str(&format!(
+                "oracle_http_request_duration_seconds_sum{{route=\"{}\"}} {}\n",
+                escape_label_value(route),
+                sum
+            ));
+        }
+        for (route, buckets) in &c.http_request_duration_buckets {
+            output.push_str(&format!(
+                "oracle_http_request_duration_seconds_count{{route=\"{}\"}} {}\n",
+                escape_label_value(route),
+                buckets[HTTP_DURATION_BUCKETS.len() - 1]
+            ));
+        }
 
-        output.push_str(
-            "# HELP oracle_http_requests_in_flight Current number of in-flight HTTP requests\n",
-        );
+        output
+            .push_str("# HELP oracle_http_requests_in_flight HTTP requests currently in flight\n");
         output.push_str("# TYPE oracle_http_requests_in_flight gauge\n");
         output.push_str(&format!(
             "oracle_http_requests_in_flight {}\n",
@@ -476,8 +648,18 @@ mod tests {
     #[test]
     fn test_metrics_recording() {
         let metrics = Metrics::new();
-        metrics.record_price_cycle(100, 3, 1);
-        metrics.record_keeper_cycle(200, 5, 3, 2, 1);
+        metrics.record_price_cycle(100, 0, 0);
+        metrics.record_keeper_cycle(
+            200,
+            KeeperCycleTally {
+                orders: 5,
+                deposits: 3,
+                withdrawals: 2,
+                errors: 1,
+                keeper_balance_low: true,
+                prices_stale: false,
+            },
+        );
 
         let response = metrics.to_response();
         assert_eq!(response.price_cycle_count, 1);
@@ -488,6 +670,8 @@ mod tests {
         assert_eq!(response.deposits_executed, 3);
         assert_eq!(response.withdrawals_executed, 2);
         assert_eq!(response.submit_failures, 1);
+        assert_eq!(response.keeper_balance_low_count, 1);
+        assert_eq!(response.prices_stale_count, 0);
     }
 
     #[test]
@@ -498,17 +682,6 @@ mod tests {
         let prometheus = metrics.to_prometheus("testnet");
         assert!(prometheus.contains("oracle_price_cycles_total 1"));
         assert!(prometheus.contains("oracle_price_cycle_duration_seconds 0.1"));
-    }
-
-    #[test]
-    fn prometheus_exposes_build_identity() {
-        let metrics = Metrics::new();
-        let output = metrics.to_prometheus("testnet");
-
-        assert!(output.contains("# TYPE oracle_build_info gauge"));
-        assert!(output.contains(&format!(
-            "oracle_build_info{{version=\"{BUILD_VERSION}\",commit=\"{BUILD_COMMIT}\",rustc=\"{BUILD_RUSTC}\",network=\"testnet\"}} 1"
-        )));
     }
 
     #[test]
@@ -529,6 +702,17 @@ mod tests {
 
         let resp = metrics.to_response();
         assert_eq!(resp.token_fetch_ok, 6, "4 + 2 = 6 total successes");
+    }
+
+    #[test]
+    fn prometheus_exposes_build_identity() {
+        let metrics = Metrics::new();
+        let output = metrics.to_prometheus("testnet");
+
+        assert!(output.contains("# TYPE oracle_build_info gauge"));
+        assert!(output.contains(&format!(
+            "oracle_build_info{{version=\"{BUILD_VERSION}\",commit=\"{BUILD_COMMIT}\",rustc=\"{BUILD_RUSTC}\",network=\"testnet\"}} 1"
+        )));
     }
 
     #[test]
@@ -571,5 +755,39 @@ mod tests {
         // 2 matches: one for the HELP/TYPE header, one for the actual metric.
         assert_eq!(matches, 3);
         assert!(output.contains("oracle_http_requests_total{route=\"/unmatched\",method=\"GET\",status_class=\"4xx\"} 2"));
+    }
+
+    // #1467 — the latest per-symbol source count is exported as a gauge.
+    #[test]
+    fn token_sources_available_reports_the_latest_count() {
+        let metrics = Metrics::new();
+        metrics.set_token_sources_available("TBTC", 3);
+        metrics.set_token_sources_available("TBTC", 2);
+
+        let output = metrics.to_prometheus("testnet");
+        assert!(output.contains("# TYPE oracle_token_sources_available gauge"));
+        assert!(output.contains("oracle_token_sources_available{symbol=\"TBTC\"} 2"));
+        assert!(!output.contains("oracle_token_sources_available{symbol=\"TBTC\"} 3"));
+    }
+}
+
+#[cfg(test)]
+mod escape_label_value_tests {
+    use super::*;
+
+    // #1409 — exact output locks the escape ORDER (backslash first) and
+    // documents that \r is left untouched.
+    #[test]
+    fn test_escape_label_value_escapes_backslash_newline_and_quote() {
+        let cases = [
+            (r"a\b", r"a\\b"),
+            ("a\"b", "a\\\"b"),
+            ("a\nb", "a\\nb"),
+            ("a\r\nb", "a\r\\nb"),
+            ("a\\b\"c\nd", "a\\\\b\\\"c\\nd"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(escape_label_value(input), expected, "input {input:?}");
+        }
     }
 }

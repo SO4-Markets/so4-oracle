@@ -35,13 +35,19 @@ pub fn test_config_with_tokens(
         withdrawal_handler_contract_id: "CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE"
             .to_string(),
         reader_contract_id: "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC".to_string(),
-        keeper_private_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_secret_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_account_id: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+        keeper_private_key: Some(std::sync::Arc::new(
+            oracle::signing::signing_key_from_hex(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        )),
+        keeper_secret_key: Some(std::sync::Arc::new(
+            oracle::chain::tx_builder::signing_key_from_secret(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        )),
+        keeper_account_id: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
         keeper_index: 0,
         admin_api_token: Some(SecretString::new("test-admin-token".to_string())),
         min_keeper_balance_xlm: 10.0,
@@ -50,6 +56,8 @@ pub fn test_config_with_tokens(
         price_loop_interval: Duration::from_millis(1000),
         keeper_loop_interval: Duration::from_millis(1500),
         price_feed: PriceFeedConfig { tokens },
+        coinbase_base_url: oracle::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+        binance_base_url: oracle::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         pyth_api_key: None,
     })
 }
@@ -72,9 +80,7 @@ pub fn fixed_token_with_price(symbol: &str, address: &str, price: &str) -> Token
         max_deviation_bps: 100,
         stale_after_seconds: 60,
         submit_threshold_bps: 10,
-        min: 0.0,
-        max: 0.0,
-        pyth_max_confidence_bps: 50,
+        pyth_max_confidence_bps: 100,
     }
 }
 
@@ -92,10 +98,33 @@ pub fn bad_token(symbol: &str, address: &str) -> TokenConfig {
         max_deviation_bps: 100,
         stale_after_seconds: 60,
         submit_threshold_bps: 10,
-        min: 0.0,
-        max: 0.0,
-        pyth_max_confidence_bps: 50,
+        pyth_max_confidence_bps: 100,
     }
+}
+
+/// Build the JSON-RPC response `getLedgerEntries` returns for an account
+/// ledger entry, using real XDR so the keeper's decoder is exercised (#1241).
+///
+/// `seq_num` is the account's last consumed sequence number; the keeper
+/// derives the next transaction sequence from it.
+pub fn account_entry_response(seq_num: i64) -> serde_json::Value {
+    use stellar_xdr::{AccountEntry, LedgerEntryData, Limits, SequenceNumber, WriteXdr};
+
+    let xdr = LedgerEntryData::Account(AccountEntry {
+        seq_num: SequenceNumber(seq_num),
+        ..Default::default()
+    })
+    .to_xdr_base64(Limits::none())
+    .expect("account entry XDR encodes");
+
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "entries": [{ "key": "", "xdr": xdr }],
+            "latestLedger": 12345
+        }
+    })
 }
 
 pub fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
@@ -112,10 +141,13 @@ pub fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
         deposit_handler_contract_id: "CDEPOSIT".to_string(),
         withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
         reader_contract_id: "CREADER".to_string(),
-        keeper_private_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_secret_key: SecretString::new("SSECRET".to_string()),
+        keeper_private_key: Some(std::sync::Arc::new(
+            oracle::signing::signing_key_from_hex(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        )),
+        keeper_secret_key: None,
         keeper_account_id: "GACCOUNT".to_string(),
         keeper_index: 0,
         admin_api_token: None,
@@ -125,7 +157,56 @@ pub fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
         price_loop_interval: Duration::from_millis(1000),
         keeper_loop_interval: Duration::from_millis(1000),
         price_feed: PriceFeedConfig { tokens },
+        coinbase_base_url: oracle::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+        binance_base_url: oracle::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         pyth_api_key: None,
     });
     Arc::new(AppState::new(config))
+}
+
+/// Extract `(contract_id, method)` from a `simulateTransaction` request body.
+///
+/// Since #997 the keeper builds a real base64 XDR `TransactionEnvelope`
+/// rather than a hand-rolled JSON object, so a mock cannot discriminate
+/// between `get_order_count` and `get_deposit_keys` by reading
+/// `params.transaction.operations[0]` out of JSON — that path is always
+/// null. Decode the envelope instead and pull the contract address and
+/// function name out of the `InvokeContract` host function.
+pub fn simulated_invoke_target(body: &serde_json::Value) -> Option<(String, String)> {
+    use stellar_xdr::{
+        HostFunction, InvokeHostFunctionOp, Limits, OperationBody, ReadXdr, ScAddress,
+        TransactionEnvelope,
+    };
+
+    let b64 = body.get("params")?.get("transaction")?.as_str()?;
+
+    let envelope = TransactionEnvelope::from_xdr_base64(b64, Limits::none()).ok()?;
+    let tx = match envelope {
+        TransactionEnvelope::Tx(v1) => v1.tx,
+        _ => return None,
+    };
+    let op = tx.operations.first()?;
+
+    let args = match &op.body {
+        OperationBody::InvokeHostFunction(InvokeHostFunctionOp {
+            host_function: HostFunction::InvokeContract(args),
+            ..
+        }) => args,
+        _ => return None,
+    };
+
+    let contract = match &args.contract_address {
+        ScAddress::Contract(id) => {
+            format!(
+                "{}",
+                stellar_strkey::Strkey::Contract(stellar_strkey::Contract(id.0 .0))
+            )
+        }
+        _ => return None,
+    };
+
+    // `format!` rather than `.to_string()`: `Strkey::to_string` returns a
+    // heapless string, and `StringM` changes type depending on whether
+    // stellar-xdr's `alloc` feature is on for this target.
+    Some((contract, format!("{}", args.function_name.0)))
 }

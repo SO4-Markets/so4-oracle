@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -27,8 +27,22 @@ pub struct CachedPrice {
     pub timestamp: u64,
     #[serde(rename = "ledger")]
     pub ledger_seq: u32,
+    #[serde(skip_serializing)]
     pub sources_used: Vec<String>,
     pub signature: String,
+}
+
+impl CachedPrice {
+    pub fn age_seconds(&self, now: u64) -> u64 {
+        now.saturating_sub(self.timestamp)
+    }
+
+    pub fn is_stale(&self, stale_after_seconds: u64, now: u64) -> bool {
+        match now.checked_sub(self.timestamp) {
+            Some(age) => age >= stale_after_seconds,
+            None => true,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -36,6 +50,10 @@ pub struct PriceCache {
     pub prices: BTreeMap<String, CachedPrice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_updated: Option<SystemTime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_submitted_medians: Option<BTreeMap<String, i128>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_full_submission: Option<SystemTime>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -75,6 +93,10 @@ pub struct FailedSubmission {
     pub network: String,
     pub token: String,
     pub symbol: String,
+    /// Price source that failed (`binance`, `coinbase`, ...), for per-source
+    /// fetch failures; `None` for failures not tied to one source (#1450).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(serialize_with = "ser_i128_str")]
     pub min: i128,
     #[serde(serialize_with = "ser_i128_str")]
@@ -150,6 +172,48 @@ pub const MAX_CONSECUTIVE_EXECUTION_FAILURES: u32 = 5;
 /// stuck orders within a handful of keeper cycles.
 pub const IN_FLIGHT_EXPIRY: Duration = Duration::from_secs(300);
 
+/// Failed admin-auth attempts allowed per client within [`ADMIN_AUTH_WINDOW`]
+/// before further attempts are rejected with 429 until the window ends (#1214).
+pub const MAX_ADMIN_AUTH_FAILURES: u32 = 5;
+pub const ADMIN_AUTH_WINDOW: Duration = Duration::from_secs(60);
+/// Cap on tracked clients so the map can't grow without bound.
+const MAX_TRACKED_ADMIN_CLIENTS: usize = 10_000;
+
+/// Per-client failure counter for `AdminAuth` (#1214). Keyed by client IP
+/// (or "unknown" when the peer address isn't available, e.g. in tests).
+#[derive(Default)]
+pub struct AdminAuthLimiter {
+    failures: std::sync::Mutex<HashMap<String, (u32, Instant)>>,
+}
+
+impl AdminAuthLimiter {
+    /// True when `client` has used up its failure budget for the current window.
+    pub fn is_blocked(&self, client: &str, now: Instant) -> bool {
+        let map = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+        matches!(map.get(client), Some((count, start))
+            if *count >= MAX_ADMIN_AUTH_FAILURES && now.duration_since(*start) < ADMIN_AUTH_WINDOW)
+    }
+
+    pub fn record_failure(&self, client: &str, now: Instant) {
+        let mut map = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= MAX_TRACKED_ADMIN_CLIENTS {
+            map.retain(|_, (_, start)| now.duration_since(*start) < ADMIN_AUTH_WINDOW);
+        }
+        let entry = map.entry(client.to_string()).or_insert((0, now));
+        if now.duration_since(entry.1) >= ADMIN_AUTH_WINDOW {
+            *entry = (0, now);
+        }
+        entry.0 += 1;
+    }
+
+    pub fn record_success(&self, client: &str) {
+        self.failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(client);
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
@@ -183,10 +247,32 @@ pub struct AppState {
     /// crossed its two sequential lock reads and retry, rather than returning a
     /// torn `keeper_status` / `cycle_status` pair (#797).
     pub keeper_cycle_generation: Arc<AtomicU64>,
+    /// `KEEPER_PRIVATE_KEY` decoded once at config load (#1226, #1473).
+    /// `SigningKey` zeroises its seed on drop. `None` when unset; an
+    /// undecodable key is a boot failure, not a per-signature fallback.
+    /// Last startup preflight result, exposed on `/oracle/status` (#1468).
+    pub preflight_result: Arc<RwLock<Option<crate::preflight::PreflightResult>>>,
+    /// `KEEPER_PRIVATE_KEY` decoded once at startup for price signing (#1226).
+    /// `SigningKey` zeroises its seed on drop. `None` if unset or invalid, in
+    /// which case signing falls back to the string key and reports the error.
+    pub price_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    /// `KEEPER_SECRET_KEY` decoded once at config load (#1226, #1473).
+    /// `None` when unset; an undecodable key is a boot failure.
+    pub tx_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    /// Throttles repeated failed admin-token attempts per client (#1214).
+    pub admin_auth_limiter: Arc<AdminAuthLimiter>,
+    /// Round-robin start index for `get_pending_keys` fetches so keys near
+    /// the end of the on-chain list are not permanently starved when the list
+    /// is longer than the batch each cycle can process (#1268).
+    pub pending_key_start_index: Arc<AtomicU32>,
 }
 
 impl AppState {
     pub fn new(config: Arc<Config>) -> Self {
+        // Keys were decoded (and the raw strings dropped) at config load
+        // (#1472, #1473); AppState just carries the Arc'd decoded keys.
+        let price_signing_key = config.keeper_private_key.clone();
+        let tx_signing_key = config.keeper_secret_key.clone();
         Self {
             config,
             http: crate::http::client().clone(),
@@ -203,6 +289,11 @@ impl AppState {
             execution_failure_counts: Arc::new(Mutex::new(HashMap::new())),
             keeper_balance_below_min: Arc::new(AtomicBool::new(false)),
             keeper_cycle_generation: Arc::new(AtomicU64::new(0)),
+            preflight_result: Arc::new(RwLock::new(None)),
+            price_signing_key,
+            tx_signing_key,
+            admin_auth_limiter: Arc::new(AdminAuthLimiter::default()),
+            pending_key_start_index: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -265,5 +356,141 @@ mod tests {
         buffer.push(3);
 
         assert_eq!(buffer.iter().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod admin_auth_limiter_tests {
+    use super::*;
+
+    #[test]
+    fn blocks_after_max_failures_and_resets_after_window() {
+        let limiter = AdminAuthLimiter::default();
+        let t0 = Instant::now();
+        for _ in 0..MAX_ADMIN_AUTH_FAILURES {
+            assert!(!limiter.is_blocked("1.2.3.4", t0));
+            limiter.record_failure("1.2.3.4", t0);
+        }
+        assert!(limiter.is_blocked("1.2.3.4", t0));
+        assert!(
+            !limiter.is_blocked("5.6.7.8", t0),
+            "other clients are unaffected"
+        );
+        assert!(!limiter.is_blocked("1.2.3.4", t0 + ADMIN_AUTH_WINDOW));
+    }
+
+    #[test]
+    fn success_clears_failures() {
+        let limiter = AdminAuthLimiter::default();
+        let t0 = Instant::now();
+        for _ in 0..MAX_ADMIN_AUTH_FAILURES - 1 {
+            limiter.record_failure("1.2.3.4", t0);
+        }
+        limiter.record_success("1.2.3.4");
+        limiter.record_failure("1.2.3.4", t0);
+        assert!(!limiter.is_blocked("1.2.3.4", t0));
+    }
+}
+
+#[cfg(test)]
+mod signing_key_state_tests {
+    use super::*;
+
+    // #1226/#1473 — keys are decoded at config load; AppState carries them.
+    #[test]
+    fn app_state_carries_decoded_keys_from_config() {
+        let mut config = Config::default_for_tests();
+        config.keeper_private_key = Some(std::sync::Arc::new(
+            crate::signing::signing_key_from_hex(&"11".repeat(32)).unwrap(),
+        ));
+        config.keeper_secret_key = Some(std::sync::Arc::new(
+            crate::chain::tx_builder::signing_key_from_secret(
+                "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT",
+            )
+            .unwrap(),
+        ));
+        let state = AppState::new(Arc::new(config));
+        assert!(state.price_signing_key.is_some());
+        assert!(state.tx_signing_key.is_some());
+
+        let state = AppState::new(Arc::new(Config::default_for_tests()));
+        assert!(
+            state.price_signing_key.is_none(),
+            "unset key must stay None"
+        );
+        assert!(state.tx_signing_key.is_none(), "unset key must stay None");
+    }
+}
+
+#[cfg(test)]
+mod keeper_status_snapshot_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    // #1408 (1): with a stable generation the pair is returned from the first read.
+    #[tokio::test]
+    async fn snapshot_returns_pair_when_generation_unchanged() {
+        let state = AppState::new(Arc::new(Config::default_for_tests()));
+        state.keeper_status.write().await.pending_orders = 3;
+        state
+            .cycle_status
+            .write()
+            .await
+            .last_keeper_cycle_latency_ms = Some(7);
+
+        let (ks, cs) = state.keeper_status_snapshot().await;
+        assert_eq!(ks.pending_orders, 3);
+        assert_eq!(cs.last_keeper_cycle_latency_ms, Some(7));
+    }
+
+    // #1408 (2): a generation bump between the two reads forces a retry, so
+    // the returned keeper_status is re-read after the bump.
+    #[tokio::test]
+    async fn snapshot_retries_when_generation_bumps_between_reads() {
+        let state = Arc::new(AppState::new(Arc::new(Config::default_for_tests())));
+        state.keeper_status.write().await.pending_orders = 1;
+
+        // Hold the second lock so the snapshot stalls between its two reads.
+        let stall = state.cycle_status.write().await;
+        let reader = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { state.keeper_status_snapshot().await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        state.keeper_cycle_generation.fetch_add(1, Ordering::SeqCst);
+        state.keeper_status.write().await.pending_orders = 2;
+        drop(stall);
+
+        let (ks, _) = reader.await.unwrap();
+        assert_eq!(
+            ks.pending_orders, 2,
+            "snapshot must re-read after a generation bump"
+        );
+    }
+
+    // #1408 (3): under permanent generation flux every attempt collides and
+    // the call falls through to the best-effort pair instead of looping.
+    #[tokio::test]
+    async fn snapshot_falls_back_when_generation_never_settles() {
+        let state = Arc::new(AppState::new(Arc::new(Config::default_for_tests())));
+        state.keeper_status.write().await.pending_orders = 9;
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flux = {
+            let gen = Arc::clone(&state.keeper_cycle_generation);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    gen.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+
+        let (ks, _) = state.keeper_status_snapshot().await;
+        stop.store(true, Ordering::SeqCst);
+        flux.join().unwrap();
+        assert_eq!(ks.pending_orders, 9, "best-effort pair must still return");
     }
 }

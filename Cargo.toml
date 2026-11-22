@@ -1,3 +1,6 @@
+# Virtual manifest: `[workspace]` with no `[package]`, so there is no root
+# crate and no root `tests/` — Cargo silently ignores one here. Integration
+# tests live in `oracle/tests/` (see AGENTS.md §1).
 [workspace]
 members = ["oracle", "shared/config"]
 resolver = "2"
@@ -19,6 +22,10 @@ mismatched_lifetime_syntaxes = "allow"
 
 # Aligned with railway.json healthcheck: setting healthcheckPath to /ready
 # ensures the probe reflects real liveness (/ready inspects state.cycle_status).
+# panic = "unwind" is required for CatchPanicLayer to function — with
+# panic = "abort", a single panicking handler kills the entire process
+# immediately (#1213). The process-level restart is still handled by the
+# railway/fly ON_FAILURE policy if the whole binary exits.
 # Setting panic = "abort" ensures any unexpected panic crashes the process,
 # allowing the ON_FAILURE restart policy to detect and restart it.
 #
@@ -29,5 +36,14 @@ mismatched_lifetime_syntaxes = "allow"
 # panic = "unwind" (debug builds, cargo test). Cross-reference: main.rs.
 [profile.release]
 overflow-checks = true
-panic = "abort"
+panic = "unwind"
 
+# NOTE: there is intentionally no [patch.crates-io] for stellar-strkey here.
+# A version-only patch (`stellar-strkey = { version = "0.0.18" }`, added for
+# #1007 to collapse the three copies stellar-xdr v27 pulls in) is rejected by
+# cargo >= 1.95 with "patch for `stellar-strkey` points to the same source,
+# but patches must point to different sources" — a manifest-level error that
+# made every cargo invocation in this workspace fail before compiling a single
+# line. The section was therefore inert, not load-bearing, and has been
+# removed. Collapsing the copies for real requires a patch entry with a real
+# `path` or `git` source, which is a separate change.

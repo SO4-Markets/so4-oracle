@@ -1,5 +1,6 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
+  "_comment": "SECRETS ARE NOT SET HERE (#1232, #1428). This file is committed to git and shown in the Railway dashboard, so the keeper signing keys (KEEPER_PRIVATE_KEY, KEEPER_SECRET_KEY), the admin token (ADMIN_API_TOKEN) and the optional PYTH_API_KEY are dashboard-only: add them under the service Variables tab and mark each one Sealed (README.md, Deployment > Railway). CI's manifest-secrets job fails if any of them is assigned under variables. Railway ignores this key.",
   "build": {
     "builder": "DOCKERFILE",
     "dockerfilePath": "Dockerfile"
@@ -22,16 +23,12 @@
     "DEPOSIT_HANDLER": "YOUR_DEPOSIT_HANDLER_CONTRACT_ID",
     "WITHDRAWAL_HANDLER": "YOUR_WITHDRAWAL_HANDLER_CONTRACT_ID",
     "READER": "YOUR_READER_CONTRACT_ID",
-    "KEEPER_PRIVATE_KEY": "YOUR_KEEPER_PRIVATE_KEY_HEX",
-    "KEEPER_SECRET_KEY": "YOUR_KEEPER_SECRET_KEY",
     "KEEPER_ACCOUNT_ID": "YOUR_KEEPER_ACCOUNT_ID",
-    "ADMIN_API_TOKEN": "YOUR_ADMIN_API_TOKEN",
     "PRICE_LOOP_MS": "1000",
     "KEEPER_LOOP_MS": "1500",
     "MIN_KEEPER_BALANCE_XLM": "10",
     "KEEPER_INDEX": "0",
     "SET_PRICES_TX_FEE": "1000000",
-    "KEEPER_TX_FEE": "2000000",
-    "PYTH_API_KEY": ""
+    "KEEPER_TX_FEE": "2000000"
   }
 }

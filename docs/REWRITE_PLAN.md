@@ -1,3 +1,5 @@
+**Status:** implemented (superseded as a guide) — the greenfield Axum/Tokio rewrite this plan describes is what is on `main`. Status reviewed 2026-11-18 (#1433). Moved from the repository root `plan.md`.
+
 > **HISTORICAL — SUPERSEDED:** This greenfield rewrite plan has been completed. Keep it only as architectural history; do not follow its file paths or implementation instructions for current setup work.
 
 # SO4 Oracle + Keeper — Full Rewrite to a Production Axum Service

@@ -42,7 +42,17 @@ pub fn encode_signed_price(price: &CachedPrice) -> Result<ScVal, String> {
     Ok(ScVal::Map(Some(sc_map)))
 }
 
+/// Largest `set_prices` batch the oracle contract accepts; it rejects any
+/// larger vector (#1424). Mirrors the contract's own `MAX_PRICE_BATCH_SIZE`.
+pub const MAX_PRICE_BATCH_SIZE: usize = 20;
+
 pub fn encode_prices_vec(prices: &[&CachedPrice]) -> Result<ScVal, String> {
+    if prices.len() > MAX_PRICE_BATCH_SIZE {
+        return Err(format!(
+            "set_prices batch of {} exceeds MAX_PRICE_BATCH_SIZE ({MAX_PRICE_BATCH_SIZE})",
+            prices.len()
+        ));
+    }
     let encoded: Result<Vec<ScVal>, String> =
         prices.iter().map(|p| encode_signed_price(p)).collect();
     let vals = encoded?;
@@ -137,7 +147,7 @@ mod tests {
 
     #[test]
     fn test_strkey_to_sc_address_account() {
-        let addr = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let addr = "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7";
         let sc_addr = strkey_to_sc_address(addr).unwrap();
         assert!(matches!(sc_addr, stellar_xdr::ScAddress::Account(_)));
     }
@@ -151,8 +161,10 @@ mod tests {
         let sc_addr = strkey_to_sc_address(addr).unwrap();
         match sc_addr {
             stellar_xdr::ScAddress::Contract(contract_id) => {
-                // Round-trip: convert the Hash bytes back to a contract strkey
-                let roundtrip = stellar_strkey::Contract(contract_id.0.into()).to_string();
+                // Round-trip: wrap the Hash bytes back into a contract strkey.
+                let roundtrip =
+                    stellar_strkey::Strkey::Contract(stellar_strkey::Contract(contract_id.0 .0))
+                        .to_string();
                 assert_eq!(roundtrip, addr);
             }
             other => panic!("expected ScAddress::Contract, got {other:?}"),
@@ -163,7 +175,7 @@ mod tests {
     fn test_strkey_to_sc_address_rejects_unsupported_strkey_type() {
         // Create a muxed strkey (M... type) which is unsupported
         let pk = stellar_strkey::ed25519::PublicKey::from_string(
-            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
         )
         .unwrap();
         let muxed_strkey = stellar_strkey::ed25519::MuxedAccount {
@@ -183,8 +195,12 @@ mod tests {
         // S... secret seed is unsupported
         let err = strkey_to_sc_address("SCZANGBA5YHTNYVVV2M3SFZJ5B5Z2B6XR57DGZNH5QTW3JJDEYTHKQZV")
             .unwrap_err();
+        // stellar-strkey 0.0.18 rejects the payload during decode with a
+        // dedicated S-prefix diagnostic before `Strkey` is ever constructed, so
+        // the failure surfaces as an "invalid strkey" decode error rather than
+        // the "unsupported strkey type" arm.
         assert!(
-            err.contains("unsupported strkey type") || err.contains("prefixed"),
+            err.starts_with("invalid strkey") && err.contains("S`-prefixed"),
             "unexpected error: {err}"
         );
     }
@@ -192,7 +208,7 @@ mod tests {
     #[test]
     fn test_encode_signed_price_produces_sorted_map() {
         let price = CachedPrice {
-            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 0,
@@ -229,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_account_strkey_to_muxed_valid_account() {
-        let addr = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let addr = "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7";
         let muxed = account_strkey_to_muxed(addr).unwrap();
         match muxed {
             stellar_xdr::MuxedAccount::Ed25519(stellar_xdr::Uint256(bytes)) => {
@@ -255,7 +271,7 @@ mod tests {
     #[test]
     fn test_account_strkey_to_muxed_rejects_muxed_strkey() {
         let pk = stellar_strkey::ed25519::PublicKey::from_string(
-            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
         )
         .unwrap();
         let muxed_strkey = stellar_strkey::ed25519::MuxedAccount {
@@ -279,7 +295,7 @@ mod tests {
     #[test]
     fn test_encode_signed_price_non_hex_signature() {
         let price = CachedPrice {
-            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 0,
@@ -302,7 +318,7 @@ mod tests {
     #[test]
     fn test_encode_signed_price_wrong_length_signature() {
         let price = CachedPrice {
-            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 0,
@@ -327,7 +343,7 @@ mod tests {
     #[test]
     fn test_encode_prices_vec() {
         let price = CachedPrice {
-            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 0,
@@ -347,12 +363,23 @@ mod tests {
             }
             _ => panic!("expected ScVal::Vec"),
         }
+
+        // #1424 — exactly the contract's limit encodes; one more is rejected
+        // before it can reach the chain.
+        let full = [&price; MAX_PRICE_BATCH_SIZE];
+        match encode_prices_vec(&full).unwrap() {
+            ScVal::Vec(Some(vec)) => assert_eq!(vec.0.len(), MAX_PRICE_BATCH_SIZE),
+            _ => panic!("expected ScVal::Vec"),
+        }
+        let over = [&price; MAX_PRICE_BATCH_SIZE + 1];
+        let err = encode_prices_vec(&over).unwrap_err();
+        assert!(err.contains("MAX_PRICE_BATCH_SIZE"), "got: {err}");
     }
 
     #[test]
     fn test_encode_signed_price_uses_configured_keeper_index() {
         let price = CachedPrice {
-            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 7,

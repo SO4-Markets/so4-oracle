@@ -5,7 +5,7 @@ use shared_config::TokenConfig;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use oracle::config::{Config, Network, PriceFeedConfig, SecretString};
+use oracle::config::{Config, Network, PriceFeedConfig};
 use oracle::price_loop::run_price_cycle;
 use oracle::state::AppState;
 
@@ -35,10 +35,13 @@ fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
         deposit_handler_contract_id: "CDEPOSIT".to_string(),
         withdrawal_handler_contract_id: "CWITHDRAW".to_string(),
         reader_contract_id: "CREADER".to_string(),
-        keeper_private_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_secret_key: SecretString::new("SSECRET".to_string()),
+        keeper_private_key: Some(std::sync::Arc::new(
+            oracle::signing::signing_key_from_hex(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        )),
+        keeper_secret_key: None,
         keeper_account_id: "GACCOUNT".to_string(),
         keeper_index: 0,
         admin_api_token: None,
@@ -49,6 +52,8 @@ fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
         price_loop_interval: Duration::from_millis(1000),
         keeper_loop_interval: Duration::from_millis(1000),
         price_feed: PriceFeedConfig { tokens },
+        coinbase_base_url: oracle::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+        binance_base_url: oracle::binance::BINANCE_TICKER_PRICE_URL.to_string(),
     });
     Arc::new(AppState::new(config))
 }
@@ -72,9 +77,7 @@ fn three_source_token() -> TokenConfig {
         max_deviation_bps: 100,
         stale_after_seconds: 60,
         submit_threshold_bps: 10,
-        min: 0.0,
-        max: 0.0,
-        pyth_max_confidence_bps: 50,
+        pyth_max_confidence_bps: 100,
     }
 }
 
@@ -233,9 +236,7 @@ async fn multi_source_single_source_token_still_works_with_min_sources_1() {
         max_deviation_bps: 100,
         stale_after_seconds: 60,
         submit_threshold_bps: 10,
-        min: 0.0,
-        max: 0.0,
-        pyth_max_confidence_bps: 50,
+        pyth_max_confidence_bps: 100,
     };
 
     let multi = three_source_token();

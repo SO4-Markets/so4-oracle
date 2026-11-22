@@ -99,6 +99,32 @@ impl std::fmt::Display for SubmitError {
 
 impl std::error::Error for SubmitError {}
 
+impl SubmitError {
+    /// Whether the transaction may still confirm on-chain.
+    ///
+    /// Only [`SubmitError::PollTimeout`] qualifies: the node accepted the
+    /// transaction but it was not observed as confirmed within the poll
+    /// budget, so its outcome is genuinely undecided and the caller must not
+    /// re-submit. Every other variant is a definitive outcome — rejected
+    /// before inclusion, failed on-chain, or never sent — so a retry is safe.
+    ///
+    /// Callers use this to decide whether to keep a work key in
+    /// `in_flight_keys`; matching on the variant rather than on
+    /// `Display` text means rewording a message cannot silently flip that
+    /// decision (#719).
+    pub fn may_still_confirm(&self) -> bool {
+        matches!(self, SubmitError::PollTimeout { .. })
+    }
+
+    /// Diagnostic events attached to an on-chain failure, if any.
+    pub fn diagnostic_events(&self) -> &[String] {
+        match self {
+            SubmitError::TransactionFailed { events } => events,
+            _ => &[],
+        }
+    }
+}
+
 impl From<RpcError> for SubmitError {
     fn from(err: RpcError) -> Self {
         SubmitError::Rpc(err)
@@ -174,7 +200,7 @@ async fn send_transaction_xdr(rpc_url: &str, signed_xdr: &str) -> Result<String,
         || rpc_post(rpc_url, payload.clone()),
         SEND_TRANSACTION_RETRY_ATTEMPTS,
         SEND_TRANSACTION_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await
     .map_err(SubmitError::Rpc)?;
@@ -509,10 +535,13 @@ mod tests {
         let err = SubmitError::PollTimeout {
             hash: "abc123def456".to_string(),
         };
-        assert!(err
-            .to_string()
-            .contains(&format!("not confirmed after {MAX_POLL_ATTEMPTS} attempts")));
-        assert!(err.to_string().contains("abc123def456"));
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "transaction not confirmed after {MAX_POLL_ATTEMPTS} attempts \
+                 (hash: abc123def456); check status on next cycle"
+            )
+        );
     }
 
     #[test]
