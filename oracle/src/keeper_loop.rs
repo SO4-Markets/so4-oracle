@@ -58,6 +58,24 @@ impl std::fmt::Display for SequenceFetchError {
 
 const PRICE_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 
+/// Extra keeper intervals to wait after a cycle that was *genuinely idle* —
+/// no pending work was found, nothing failed, and neither the stale-price nor
+/// the low-balance gate fired. Idle is the steady state for a market with no
+/// orders, so backing off avoids hammering the reader contract with simulate
+/// calls that can only return "nothing to do".
+pub const IDLE_BACKOFF_MULTIPLIER: u32 = 4;
+
+/// Maximum number of keeper-loop intervals without a completed cycle before
+/// `/ready` reports `keeper_loop_stale`.
+///
+/// An idle cycle is followed by one normal tick **plus** `IDLE_BACKOFF_MULTIPLIER`
+/// extra ticks, i.e. `IDLE_BACKOFF_MULTIPLIER + 1` intervals between cycles.
+/// The additional factor of two leaves room for a slow cycle or timer jitter
+/// without hiding a genuinely wedged loop. Both this module and the readiness
+/// handler derive their behaviour from these constants so they cannot drift
+/// apart again.
+pub const KEEPER_STALE_THRESHOLD_MULTIPLIER: u32 = (IDLE_BACKOFF_MULTIPLIER + 1) * 2;
+
 impl std::error::Error for SequenceFetchError {}
 
 impl crate::retry::Retryable for SequenceFetchError {
@@ -87,11 +105,28 @@ pub async fn run_keeper_loop(state: Arc<AppState>) {
         // any `in_flight_keys` entry it leaves behind is evicted by
         // `sweep_expired_in_flight_keys` or `IN_FLIGHT_EXPIRY` once the loop
         // restarts (#806).
-        tokio::select! {
-            _ = run_keeper_cycle(Arc::clone(&state)) => {}
+        let cycle_result = tokio::select! {
+            result = run_keeper_cycle(Arc::clone(&state)) => Some(result),
             _ = state.shutdown_token.cancelled() => {
                 tracing::info!("keeper_loop shutting down mid-cycle");
                 break;
+            }
+        };
+
+        // Only a genuinely idle cycle earns an extra sleep. A cycle that
+        // executed nothing because work failed or because a gate fired must
+        // retry on the next tick — otherwise the keeper slows down exactly
+        // when it is falling behind or waiting for prices to become fresh.
+        let was_idle = matches!(&cycle_result, Some(Ok(summary)) if summary.was_idle());
+        if was_idle {
+            tokio::select! {
+                _ = tokio::time::sleep(
+                    state.config.keeper_loop_interval * IDLE_BACKOFF_MULTIPLIER
+                ) => {}
+                _ = state.shutdown_token.cancelled() => {
+                    tracing::info!("keeper_loop shutting down during idle backoff");
+                    break;
+                }
             }
         }
     }
@@ -174,6 +209,15 @@ pub struct CycleSummary {
     pub deposits_executed: usize,
     pub withdrawals_executed: usize,
     pub errors: usize,
+    /// Pending keys found at the start of the cycle, before any execution was
+    /// attempted. These are what distinguish "nothing to do" from "tried and
+    /// failed" — the latter has all three `*_executed` counts at zero too.
+    pub pending_orders: usize,
+    pub pending_deposits: usize,
+    pub pending_withdrawals: usize,
+    /// One or more pending-key lookups failed, so the counts above are a lower
+    /// bound rather than a trustworthy "no work" signal.
+    pub pending_keys_unavailable: bool,
     /// No non-stale price was available, so `set_prices` and order execution
     /// were skipped. Deposits/withdrawals still run (#1145).
     pub prices_stale: bool,
@@ -183,16 +227,19 @@ pub struct CycleSummary {
 }
 
 impl CycleSummary {
-    /// A cycle that executed nothing because submissions were gated.
-    fn skipped(prices_stale: bool, keeper_balance_low: bool) -> Self {
-        Self {
-            orders_executed: 0,
-            deposits_executed: 0,
-            withdrawals_executed: 0,
-            errors: 0,
-            prices_stale,
-            keeper_balance_low,
-        }
+    /// True only when the cycle had nothing to do. "Executed nothing" alone is
+    /// not enough: pending work that all failed, gated cycles, and failed
+    /// pending-key lookups also leave every `*_executed` count at zero, and
+    /// backing off in those cases would delay recovery precisely when the
+    /// keeper is falling behind.
+    pub fn was_idle(&self) -> bool {
+        self.pending_orders == 0
+            && self.pending_deposits == 0
+            && self.pending_withdrawals == 0
+            && self.errors == 0
+            && !self.pending_keys_unavailable
+            && !self.prices_stale
+            && !self.keeper_balance_low
     }
 }
 
@@ -281,6 +328,11 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         get_pending_keys(&state, "get_deposit_count", "get_deposit_keys"),
         get_pending_keys(&state, "get_withdrawal_count", "get_withdrawal_keys"),
     );
+    // A failed lookup is not evidence of an idle market — it means the counts
+    // below are a lower bound. Remember it so `was_idle()` never backs off on
+    // a cycle whose pending-work query failed.
+    let pending_keys_unavailable =
+        order_result.is_err() || deposit_result.is_err() || withdrawal_result.is_err();
     let order_keys = order_result.unwrap_or_else(|e| {
         warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
         Vec::new()
@@ -301,9 +353,22 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         keeper_status.pending_withdrawals = withdrawal_keys.len();
     }
 
+    let mut summary = CycleSummary {
+        orders_executed: 0,
+        deposits_executed: 0,
+        withdrawals_executed: 0,
+        errors: 0,
+        pending_orders: order_keys.len(),
+        pending_deposits: deposit_keys.len(),
+        pending_withdrawals: withdrawal_keys.len(),
+        pending_keys_unavailable,
+        prices_stale,
+        keeper_balance_low,
+    };
+
     if order_keys.is_empty() && deposit_keys.is_empty() && withdrawal_keys.is_empty() {
         info!("no_pending_work");
-        return Ok(CycleSummary::skipped(prices_stale, keeper_balance_low));
+        return Ok(summary);
     }
 
     info!(
@@ -318,10 +383,8 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
 
     if keeper_balance_low {
         warn!("keeper_balance_below_min; skipping all on-chain submissions this cycle");
-        return Ok(CycleSummary::skipped(prices_stale, keeper_balance_low));
+        return Ok(summary);
     }
-
-    let mut summary = CycleSummary::skipped(prices_stale, keeper_balance_low);
 
     // Cached account sequence, shared across every execute_handler call made
     // during this cycle so it's fetched via RPC at most once instead of once
@@ -1012,7 +1075,10 @@ async fn is_heartbeat_due(state: &Arc<AppState>, now: u64) -> bool {
     let cache = state.price_cache.read().await;
     match cache.last_full_submission {
         Some(last) => {
-            let elapsed = now.saturating_sub(last.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs()));
+            let elapsed = now.saturating_sub(
+                last.duration_since(SystemTime::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs()),
+            );
             elapsed >= PRICE_HEARTBEAT_INTERVAL_SECS
         }
         None => true,
@@ -1062,16 +1128,22 @@ async fn filter_prices_by_threshold(
         .collect()
 }
 
-async fn update_submitted_prices(state: &Arc<AppState>, prices: &BTreeMap<String, CachedPrice>, now: u64, is_heartbeat: bool) {
+async fn update_submitted_prices(
+    state: &Arc<AppState>,
+    prices: &BTreeMap<String, CachedPrice>,
+    now: u64,
+    is_heartbeat: bool,
+) {
     let mut cache = state.price_cache.write().await;
     let now_time = SystemTime::UNIX_EPOCH + Duration::from_secs(now);
     if is_heartbeat {
         cache.last_full_submission = Some(now_time);
-        cache.last_submitted_medians = Some(
-            prices.iter().map(|(s, p)| (s.clone(), p.median)).collect()
-        );
+        cache.last_submitted_medians =
+            Some(prices.iter().map(|(s, p)| (s.clone(), p.median)).collect());
     } else {
-        let submitted = cache.last_submitted_medians.get_or_insert_with(BTreeMap::new);
+        let submitted = cache
+            .last_submitted_medians
+            .get_or_insert_with(BTreeMap::new);
         for (s, p) in prices {
             submitted.insert(s.clone(), p.median);
         }
@@ -1567,6 +1639,67 @@ mod tests {
         assert_eq!(parse_u32_from_result(r#"{"u32": 42}"#).unwrap(), 42);
     }
 
+    // ── idle backoff / readiness threshold ────────────────────────────────────
+
+    fn idle_summary() -> CycleSummary {
+        CycleSummary {
+            orders_executed: 0,
+            deposits_executed: 0,
+            withdrawals_executed: 0,
+            errors: 0,
+            pending_orders: 0,
+            pending_deposits: 0,
+            pending_withdrawals: 0,
+            pending_keys_unavailable: false,
+            prices_stale: false,
+            keeper_balance_low: false,
+        }
+    }
+
+    #[test]
+    fn was_idle_is_true_only_for_a_genuinely_idle_cycle() {
+        assert!(idle_summary().was_idle());
+
+        // Pending work that was found but failed to execute is not idle.
+        let mut failing = idle_summary();
+        failing.pending_orders = 20;
+        failing.errors = 20;
+        assert!(!failing.was_idle());
+
+        // Pending work that was found but skipped by a gate is not idle.
+        for (kind, count) in [("orders", 1usize), ("deposits", 1), ("withdrawals", 1)] {
+            let mut gated = idle_summary();
+            match kind {
+                "orders" => gated.pending_orders = count,
+                "deposits" => gated.pending_deposits = count,
+                _ => gated.pending_withdrawals = count,
+            }
+            assert!(!gated.was_idle(), "{kind} pending must not back off");
+        }
+
+        let mut stale = idle_summary();
+        stale.prices_stale = true;
+        assert!(!stale.was_idle());
+
+        let mut unfunded = idle_summary();
+        unfunded.keeper_balance_low = true;
+        assert!(!unfunded.was_idle());
+
+        let mut unknown = idle_summary();
+        unknown.pending_keys_unavailable = true;
+        assert!(!unknown.was_idle());
+    }
+
+    #[test]
+    fn readiness_threshold_covers_the_idle_backoff() {
+        // An idle cycle is followed by the normal tick plus the extra backoff.
+        let idle_gap = IDLE_BACKOFF_MULTIPLIER + 1;
+        assert!(
+            KEEPER_STALE_THRESHOLD_MULTIPLIER > idle_gap,
+            "/ready must not declare an idle keeper stale before its next cycle"
+        );
+    }
+
     // ── #512: run_keeper_loop shutdown coverage ───────────────────────────────
 
     use crate::config::{Config, Network, PriceFeedConfig, SecretString};
@@ -1598,6 +1731,9 @@ mod tests {
             keeper_index: 0,
             admin_api_token: None,
             pyth_api_key: None,
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+            pyth_hermes_url: crate::pyth::PYTH_HERMES_URL.to_string(),
             min_keeper_balance_xlm: 0.0,
             set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
             keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
@@ -1675,6 +1811,9 @@ mod tests {
             keeper_index: 0,
             admin_api_token: None,
             pyth_api_key: None,
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+            pyth_hermes_url: crate::pyth::PYTH_HERMES_URL.to_string(),
             min_keeper_balance_xlm: 0.0,
             set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
             keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,

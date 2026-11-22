@@ -92,7 +92,17 @@ PRICE_FEED_CONFIG=/path/to/tokens.json
 
 # Pyth authentication (optional now, mandatory once Pyth enforces auth)
 # PYTH_API_KEY=<your-pyth-api-key>
+
+# Source endpoints (optional; default to the production providers).
+# Useful to point a test deployment at a mock server.
+# COINBASE_BASE_URL=https://api.coinbase.com/v2/exchange-rates?currency=
+# BINANCE_BASE_URL=https://data-api.binance.vision/api/v3/ticker/price
+# PYTH_HERMES_URL=https://pyth.dourolabs.app/hermes/api/latest_price_feeds
 ```
+
+An idle keeper (no pending orders, deposits or withdrawals) backs off for
+`4 × KEEPER_LOOP_MS` after each cycle. `/ready` accounts for that backoff and
+only reports `keeper_loop_stale` after `10 × KEEPER_LOOP_MS`.
 
 > **Note:** `NETWORK_PASSPHRASE` is not read by the binary — the correct
 > passphrase is selected automatically based on `STELLAR_NETWORK`. You do

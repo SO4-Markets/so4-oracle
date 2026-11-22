@@ -29,6 +29,9 @@ Optional defaults:
   `/oracle/failed-submissions`) respond `503`; when set, they require
   `Authorization: Bearer <token>`
 - `PYTH_API_KEY` — optional API key for Pyth price feeds
+- `COINBASE_BASE_URL`, `BINANCE_BASE_URL`, `PYTH_HERMES_URL` — optional
+  per-source base URLs (default to the production providers). Override them
+  to point a real `AppState` at a mock server in integration tests.
 
 - `BIND_ADDR=0.0.0.0:8080`
 - `STELLAR_NETWORK=testnet`

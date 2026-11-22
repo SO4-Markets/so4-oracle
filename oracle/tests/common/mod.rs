@@ -5,7 +5,10 @@ use std::time::Duration;
 
 use shared_config::TokenConfig;
 
+use oracle::binance::BINANCE_TICKER_PRICE_URL;
+use oracle::coinbase::COINBASE_EXCHANGE_RATES_URL;
 use oracle::config::{Config, Network, PriceFeedConfig, SecretString};
+use oracle::pyth::PYTH_HERMES_URL;
 use oracle::state::AppState;
 
 pub fn test_config(rpc_url: &str, horizon_url: &str) -> Arc<Config> {
@@ -51,6 +54,9 @@ pub fn test_config_with_tokens(
         keeper_loop_interval: Duration::from_millis(1500),
         price_feed: PriceFeedConfig { tokens },
         pyth_api_key: None,
+        coinbase_base_url: COINBASE_EXCHANGE_RATES_URL.to_string(),
+        binance_base_url: BINANCE_TICKER_PRICE_URL.to_string(),
+        pyth_hermes_url: PYTH_HERMES_URL.to_string(),
     })
 }
 
@@ -122,6 +128,9 @@ pub fn test_state(rpc_url: &str, tokens: Vec<TokenConfig>) -> Arc<AppState> {
         keeper_loop_interval: Duration::from_millis(1000),
         price_feed: PriceFeedConfig { tokens },
         pyth_api_key: None,
+        coinbase_base_url: COINBASE_EXCHANGE_RATES_URL.to_string(),
+        binance_base_url: BINANCE_TICKER_PRICE_URL.to_string(),
+        pyth_hermes_url: PYTH_HERMES_URL.to_string(),
     });
     Arc::new(AppState::new(config))
 }

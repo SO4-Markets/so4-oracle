@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `oracle_http_request_duration_seconds` histogram, which were recorded but
   never emitted
 - `SubmitError::may_still_confirm` and `SubmitError::diagnostic_events`
+- `COINBASE_BASE_URL`, `BINANCE_BASE_URL` and `PYTH_HERMES_URL` overrides for
+  the three price sources, so integration tests can use a mock server
+- Shared `IDLE_BACKOFF_MULTIPLIER` / `KEEPER_STALE_THRESHOLD_MULTIPLIER`
+  constants used by both the keeper loop and `/ready`
 
 ### Fixed
 - The keeper's in-flight-key decision now branches on the `SubmitError`
@@ -34,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (RUSTSEC-2026-0258); `cargo deny check advisories` is now clean
 - `oracle` crate declares its license, so `cargo deny check licenses` passes
 - `ConfigError` derives `Clone`/`Eq` so it can be embedded in `EnvError`
+- `/ready` no longer returns `keeper_loop_stale` during the idle backoff: its
+  threshold is now derived from the same constants as the keeper loop
+- Idle backoff is only applied when a cycle found no pending work, had no
+  errors, and neither the stale-price nor low-balance gate fired; failed work
+  and gated cycles retry on the next tick
+- Coinbase, Binance and Pyth fetches take their base URL from `Config` instead
+  of a compile-time production constant
+- Pyth prices with a `publish_time` more than `MAX_FUTURE_SKEW_SECONDS` ahead
+  of the local clock are rejected; smaller future skew is warned about and
+  treated as age zero rather than silently passing the staleness check
 
 ### Changed
 - `TokenConfig.min` and `TokenConfig.max` removed. They were documented as

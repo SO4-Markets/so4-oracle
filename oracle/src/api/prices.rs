@@ -125,10 +125,14 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResp
         }
     }
 
-    // Check keeper loop is not stale (must have run within 3x the loop interval)
+    // Check keeper loop is not stale. An idle cycle is deliberately followed
+    // by `IDLE_BACKOFF_MULTIPLIER` extra intervals of sleep, so a fixed 3x
+    // threshold would fail health checks on a perfectly healthy idle keeper.
+    // Both sides derive from the same constants in `keeper_loop`.
     {
         let cycle = state.cycle_status.read().await;
-        let stale_threshold = state.config.keeper_loop_interval * 3;
+        let stale_threshold = state.config.keeper_loop_interval
+            * crate::keeper_loop::KEEPER_STALE_THRESHOLD_MULTIPLIER;
         let is_stale = cycle
             .last_keeper_cycle_at
             .map(|last| last.elapsed().unwrap_or_default() > stale_threshold)

@@ -151,6 +151,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
             30_000,
         ),
         crate::pyth::fetch_pyth_prices(
+            &state.config.pyth_hermes_url,
             &pyth_feed_ids,
             state.config.pyth_api_key.as_ref().map(|key| key.as_str()),
         )
@@ -191,7 +192,9 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
         .collect();
 
     let binance_prices = if !binance_symbols.is_empty() {
-        match crate::binance::fetch_spot_prices(&binance_symbols).await {
+        match crate::binance::fetch_spot_prices(&state.config.binance_base_url, &binance_symbols)
+            .await
+        {
             Ok(results) => {
                 let map: std::collections::HashMap<String, i128> = results.into_iter().collect();
                 Some(map)
@@ -376,6 +379,7 @@ async fn build_cached_price(
         match fetch_source_with_retry(
             source,
             token,
+            &state.config,
             state.config.pyth_api_key.as_ref().map(|key| key.as_str()),
             pyth_prices,
             pyth_batch_failed,
@@ -442,6 +446,7 @@ async fn build_cached_price(
 async fn fetch_source_with_retry(
     source: &str,
     token: &TokenConfig,
+    config: &crate::config::Config,
     pyth_api_key: Option<&str>,
     pyth_prices: &std::collections::HashMap<String, crate::pyth::PythPriceFeed>,
     pyth_batch_failed: bool,
@@ -452,6 +457,7 @@ async fn fetch_source_with_retry(
             fetch_source_price(
                 source,
                 token,
+                config,
                 pyth_api_key,
                 pyth_prices,
                 pyth_batch_failed,
@@ -469,6 +475,7 @@ async fn fetch_source_with_retry(
 async fn fetch_source_price(
     source: &str,
     token: &TokenConfig,
+    config: &crate::config::Config,
     pyth_api_key: Option<&str>,
     pyth_prices: &std::collections::HashMap<String, crate::pyth::PythPriceFeed>,
     pyth_batch_failed: bool,
@@ -489,9 +496,12 @@ async fn fetch_source_price(
             } else {
                 // Batch request failed or no batch was made — fall back to a
                 // single-symbol request so this token still gets a price.
-                let results = crate::binance::fetch_spot_prices(std::slice::from_ref(symbol))
-                    .await
-                    .map_err(PriceSourceError::Binance)?;
+                let results = crate::binance::fetch_spot_prices(
+                    &config.binance_base_url,
+                    std::slice::from_ref(symbol),
+                )
+                .await
+                .map_err(PriceSourceError::Binance)?;
                 results
                     .into_iter()
                     .find(|(got_symbol, _)| got_symbol == symbol)
@@ -506,7 +516,7 @@ async fn fetch_source_price(
                 .coinbase_symbol
                 .as_ref()
                 .ok_or_else(|| PriceSourceError::Config("missing coinbase_symbol".to_string()))?;
-            crate::coinbase::fetch_spot_price(symbol)
+            crate::coinbase::fetch_spot_price(&config.coinbase_base_url, symbol)
                 .await
                 .map_err(PriceSourceError::Coinbase)
         }
@@ -543,7 +553,7 @@ async fn fetch_source_price(
                     feed_id = %feed_id,
                     "Pyth feed not found in batch, falling back to individual request"
                 );
-                crate::pyth::fetch_pyth_prices(&[feed_id], pyth_api_key)
+                crate::pyth::fetch_pyth_prices(&config.pyth_hermes_url, &[feed_id], pyth_api_key)
                     .await
                     .and_then(|mut feeds| {
                         feeds.remove(feed_id).ok_or_else(|| {
@@ -678,6 +688,9 @@ mod tests {
             keeper_index: 0,
             admin_api_token: None,
             pyth_api_key: None,
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+            pyth_hermes_url: crate::pyth::PYTH_HERMES_URL.to_string(),
             min_keeper_balance_xlm: 0.0,
             set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
             keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
@@ -714,6 +727,9 @@ mod tests {
             keeper_index: 0,
             admin_api_token: None,
             pyth_api_key: None,
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+            pyth_hermes_url: crate::pyth::PYTH_HERMES_URL.to_string(),
             min_keeper_balance_xlm: 0.0,
             set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
             keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
