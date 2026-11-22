@@ -53,20 +53,6 @@ impl std::fmt::Display for SourceFailure {
 
 impl std::error::Error for SourceFailure {}
 
-impl CachedPrice {
-    pub fn is_stale(&self, stale_after_seconds: u64, now: u64) -> bool {
-        // #1041 — when the wall clock moves backward relative to the cached
-        // timestamp (NTP step, VM live-migration, container clock correction),
-        // `saturating_sub` silently clamps the age to 0, reporting the price
-        // as maximally fresh. Treat `timestamp > now` as its own suspicious
-        // condition: the price is stale because the age is indeterminate.
-        match now.checked_sub(self.timestamp) {
-            Some(age) => age >= stale_after_seconds,
-            None => true,
-        }
-    }
-}
-
 impl std::fmt::Display for PriceSourceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -106,6 +92,10 @@ pub async fn run_price_loop(state: Arc<AppState>) {
                 tracing::info!("price_loop shutting down");
                 break;
             }
+        }
+        if state.keeper_balance_below_min.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!("keeper balance below minimum; skipping price cycle");
+            continue;
         }
         tokio::select! {
             _ = state.shutdown_token.cancelled() => {
