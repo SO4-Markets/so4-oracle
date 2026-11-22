@@ -204,7 +204,7 @@ async fn send_transaction_xdr(rpc_url: &str, signed_xdr: &str) -> Result<String,
         || rpc_post(rpc_url, payload.clone()),
         SEND_TRANSACTION_RETRY_ATTEMPTS,
         SEND_TRANSACTION_RETRY_BASE_DELAY_MS,
-        30_000,
+        crate::retry::MAX_BACKOFF_DELAY_MS,
     )
     .await
     .map_err(SubmitError::Rpc)?;
@@ -266,7 +266,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                         "transient RPC/network error; will retry"
                     );
                     sleep_ms(crate::retry::jitter(backoff_ms)).await;
-                    backoff_ms = (backoff_ms * 2).min(30_000);
+                    backoff_ms = (backoff_ms * 2).min(crate::retry::MAX_BACKOFF_DELAY_MS);
                     continue;
                 } else {
                     return Err(SubmitError::Rpc(rpc_err));

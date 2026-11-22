@@ -1,20 +1,18 @@
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+
 /// Constant-time byte slice comparison to avoid timing side-channels.
 ///
 /// Returns `true` only when `left` and `right` have identical length and
-/// contents.  Both branches of every byte comparison are always evaluated so
-/// the execution time does not reveal the position of the first differing byte.
+/// contents. Both sides are hashed to fixed-size SHA-256 digests first, so the
+/// comparison does the same work whatever the supplied token's length, and the
+/// digests are compared with `subtle::ConstantTimeEq`, whose constant-time
+/// behaviour is maintained against compiler optimisation rather than left to
+/// a hand-rolled loop (#1444).
 pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    let max_len = left.len().max(right.len());
-    // XOR the lengths — non-zero when they differ.
-    let mut diff = left.len() ^ right.len();
-
-    for i in 0..max_len {
-        let a = left.get(i).copied().unwrap_or(0);
-        let b = right.get(i).copied().unwrap_or(0);
-        diff |= (a ^ b) as usize;
-    }
-
-    diff == 0
+    let left = Sha256::digest(left);
+    let right = Sha256::digest(right);
+    left.as_slice().ct_eq(right.as_slice()).into()
 }
 
 #[cfg(test)]

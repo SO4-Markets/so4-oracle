@@ -230,6 +230,7 @@ async fn failed_submissions_returns_total_count() {
             network: "testnet".to_string(),
             token: "CADDR".to_string(),
             symbol: "BTC".to_string(),
+            source: None,
             min: 0,
             max: 0,
             tx_hash: None,
@@ -276,6 +277,7 @@ async fn failed_submissions_filters_by_operation() {
             network: "testnet".to_string(),
             token: String::new(),
             symbol: String::new(),
+            source: None,
             min: 0,
             max: 0,
             tx_hash: None,
@@ -289,6 +291,7 @@ async fn failed_submissions_filters_by_operation() {
             network: "testnet".to_string(),
             token: String::new(),
             symbol: String::new(),
+            source: None,
             min: 0,
             max: 0,
             tx_hash: None,
@@ -335,6 +338,7 @@ async fn failed_submissions_respects_limit() {
                 network: "testnet".to_string(),
                 token: String::new(),
                 symbol: String::new(),
+                source: None,
                 min: 0,
                 max: 0,
                 tx_hash: None,
@@ -450,7 +454,7 @@ async fn keeper_balance_returns_200_when_horizon_healthy() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.5000000"}]
         })))
         .mount(&horizon_mock)
@@ -482,7 +486,10 @@ async fn keeper_balance_returns_200_when_horizon_healthy() {
     assert!(json.get("balance_xlm").is_some());
     assert!(json.get("min_balance_xlm").is_some());
     assert!(json.get("is_funded").is_some());
-    assert_eq!(json["balance_xlm"], 100.5);
+    // Spendable: 100.5 XLM total minus the 1 XLM reserve of an account with no
+    // subentries (#1215, #1446).
+    assert_eq!(json["balance_xlm"], 99.5);
+    assert_eq!(json["balance_stroops"], 1_005_000_000i64);
     assert_eq!(json["is_funded"], true);
 }
 
@@ -492,7 +499,7 @@ async fn keeper_balance_reports_unfunded_when_below_minimum() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "3.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -519,6 +526,6 @@ async fn keeper_balance_reports_unfunded_when_below_minimum() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["balance_xlm"], 3.0);
+    assert_eq!(json["balance_xlm"], 2.0);
     assert_eq!(json["is_funded"], false);
 }

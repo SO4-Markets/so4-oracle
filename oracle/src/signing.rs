@@ -71,14 +71,44 @@ pub fn sign_price(
     max: i128,
     timestamp: u64,
 ) -> Result<Signature, SigningError> {
-    let key_bytes = hex::decode(private_key_hex).map_err(|_| SigningError::InvalidHexKey)?;
-    if key_bytes.len() != 32 {
-        return Err(SigningError::InvalidKeyLength);
-    }
+    let signing_key = signing_key_from_hex(private_key_hex)?;
+    Ok(sign_price_with_key(
+        &signing_key,
+        network_passphrase,
+        ledger_seq,
+        token_strkey,
+        min,
+        max,
+        timestamp,
+    ))
+}
 
-    let key_array: [u8; 32] = key_bytes.try_into().unwrap();
-    let signing_key = SigningKey::from_bytes(&key_array);
+/// Decode a hex ed25519 seed into a `SigningKey` (#1226). Intermediate buffers
+/// are zeroised, and `SigningKey` itself wipes its seed on drop, so decode
+/// once at startup and reuse the key instead of re-decoding per signature.
+pub fn signing_key_from_hex(private_key_hex: &str) -> Result<SigningKey, SigningError> {
+    let key_bytes = zeroize::Zeroizing::new(
+        hex::decode(private_key_hex).map_err(|_| SigningError::InvalidHexKey)?,
+    );
+    let key_array: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new(
+        key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| SigningError::InvalidKeyLength)?,
+    );
+    Ok(SigningKey::from_bytes(&key_array))
+}
 
+/// Sign a price with an already-decoded key (no per-call key decoding, #1226).
+pub fn sign_price_with_key(
+    signing_key: &SigningKey,
+    network_passphrase: &str,
+    ledger_seq: u32,
+    token_strkey: &str,
+    min: i128,
+    max: i128,
+    timestamp: u64,
+) -> Signature {
     let payload = build_price_message(
         network_passphrase,
         ledger_seq,
@@ -87,15 +117,35 @@ pub fn sign_price(
         max,
         timestamp,
     );
-    let signature = signing_key.sign(&payload);
-
-    Ok(signature)
+    signing_key.sign(&payload)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ed25519_dalek::Verifier;
+
+    // #1226 — signing with a key decoded once must match per-call decoding.
+    #[test]
+    fn sign_price_with_key_matches_sign_price() {
+        let hex_key = "1111111111111111111111111111111111111111111111111111111111111111";
+        let key = signing_key_from_hex(hex_key).unwrap();
+        let a = sign_price(hex_key, "net", 7, "tok", 10, 20, 100).unwrap();
+        let b = sign_price_with_key(&key, "net", 7, "tok", 10, 20, 100);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn signing_key_from_hex_rejects_bad_input() {
+        assert!(matches!(
+            signing_key_from_hex("not hex"),
+            Err(SigningError::InvalidHexKey)
+        ));
+        assert!(matches!(
+            signing_key_from_hex("1111"),
+            Err(SigningError::InvalidKeyLength)
+        ));
+    }
 
     #[test]
     fn test_sign_price_validates() {

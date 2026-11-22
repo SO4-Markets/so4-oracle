@@ -5,9 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+No version has been released or tagged yet (#1435). `version = "0.1.0"` in
+`Cargo.toml` is the pre-release placeholder, not a published release; the
+first tag should be cut from a commit whose CI is green. Until then every
+entry below is on `main` but unreleased.
+
+Each PR that changes behaviour, configuration or deployment adds a line here
+under `[Unreleased]` (see `AGENTS.md` §3).
+
 ## [Unreleased]
 
 ### Added
+- Boot-time bounds for `PRICE_LOOP_MS` / `KEEPER_LOOP_MS` (250–60000 ms, and `PRICE_LOOP_MS` below every token's `stale_after_seconds`), a `KEEPER_INDEX` cap of 255, and `PYTH_API_KEY` shape validation; startup warnings for pyth tokens with no key and for tokens one source outage away from two-source aggregation; the `oracle_token_sources_available` gauge (#1464, #1465, #1466, #1467)
 - `rust-toolchain.toml` to pin stable toolchain for reproducible builds (#979)
 - Package metadata (version, edition, license, repository, description) to workspace `Cargo.toml` (#977)
 - Missing env vars (`SET_PRICES_TX_FEE`, `KEEPER_TX_FEE`, `PYTH_API_KEY`) to `oracle/README.md` (#974)
@@ -23,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the three price sources, so integration tests can use a mock server
 - Shared `IDLE_BACKOFF_MULTIPLIER` / `KEEPER_STALE_THRESHOLD_MULTIPLIER`
   constants used by both the keeper loop and `/ready`
+- `docs/ENVIRONMENT.md`, the single environment-variable reference, and the `env-docs` CI job (`scripts/check-env-docs.sh`) that checks it against the code (#1432)
+- `docs/README.md` index linked from `README.md`; plan documents carry a `Status:` line and `plan.md` moved to `docs/REWRITE_PLAN.md` (#1433, #1434)
 
 ### Fixed
 - The keeper's in-flight-key decision now branches on the `SubmitError`
@@ -48,8 +59,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pyth prices with a `publish_time` more than `MAX_FUTURE_SKEW_SECONDS` ahead
   of the local clock are rejected; smaller future skew is warned about and
   treated as age zero rather than silently passing the staleness check
+- `keeper_loop::record_error` now records the transaction hash for post-submission failures (poll timeouts) instead of always storing `None`, so `/oracle/failed-submissions` exposes a hash to look up on a block explorer for ambiguous outcomes (#721)
+- Binance, Coinbase, and Pyth HTTP 429 responses are now classified as retryable (matching `RpcError`), so a rate limit triggers backoff and a retry instead of permanently abandoning the price source for the cycle (#708)
+- `oracle.service` start limit raised from 3 restarts per 60s to 50 per 300s and moved to the `[Unit]` section, so a crash loop no longer leaves the oracle permanently down pending a manual `systemctl reset-failed` (#544)
 
 ### Changed
+- `SET_PRICES_TX_FEE` and `KEEPER_TX_FEE` are capped at 10000000 stroops (1 XLM)
+  per transaction; a fee above 2x its default is accepted but logged at
+  startup (#1463)
+- `MIN_KEEPER_BALANCE_XLM=0` now logs a startup warning that it disables the
+  keeper balance gate (#1462)
+- `shared/config` crate docs explain its split from `oracle::config`, and every
+  `TokenConfig` field documents its unit, range and interactions, tabulated in
+  `docs/ENVIRONMENT.md` (#1460, #1461)
 - `TokenConfig.min` and `TokenConfig.max` removed. They were documented as
   "used by the API server for display" but nothing read them; the API serves
   runtime percentile bounds from `CachedPrice` instead. **Breaking for any
@@ -60,24 +82,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Metrics::record_keeper_cycle` takes a `KeeperCycleTally` instead of seven
   positional arguments
 
-## [0.1.0] - 2026-09-25
-
-### Added
-- Initial release of SO4 Oracle
-- Price fetching and aggregation from multiple sources (Binance, Coinbase, Pyth)
-- Keeper loop for executing pending orders, deposits, and withdrawals on-chain
-- HTTP API for price feeds and operational endpoints
-- Structured JSON request logging with request IDs
-- Prometheus metrics at `/metrics`
-- Circuit breaker for price source failures
-- Admin API with token-based authentication
-- Docker, systemd, Fly.io, and Railway deployment support
-
-### Fixed
-- Circuit breaker threshold and recovery behavior
-- Keeper retry and restart logic
-- Price aggregation edge cases
-- Various security improvements
-
-[Unreleased]: https://github.com/SO4-Markets/so4-oracle/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/SO4-Markets/so4-oracle/releases/tag/v0.1.0
+### Tests
+- Added coverage for `validate_pyth_price` rejecting a malformed (non-numeric) `conf` field, previously unexercised (#712)
+- Added coverage for 429/5xx/4xx retry classification in `BinancePriceError`, `CoinbasePriceError`, and `PythPriceError`, plus poll-timeout hash recovery and `record_error` hash storage in the keeper loop (#708, #721)

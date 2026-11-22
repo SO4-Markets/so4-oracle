@@ -9,7 +9,7 @@ mod common;
 
 fn test_cached_price() -> CachedPrice {
     CachedPrice {
-        token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+        token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
         symbol: "TUSDC".to_string(),
         display_symbol: "USDC".to_string(),
         min: 1_000_000_000_000_000_000_000_000_000_000,
@@ -68,17 +68,23 @@ async fn http_get_prices_with_empty_cache() {
 
     tokio::spawn(async move { axum::serve(listener, app).await.ok() });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Poll /health until the server is accepting connections, eliminating the timing race
+    let client = reqwest::Client::new();
+    let health_url = format!("http://{}/health", addr);
+    for _ in 0..20 {
+        if client.get(&health_url).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
-    let response = reqwest::Client::new()
+    let response = client
         .get(format!("http://{}/prices", addr))
         .send()
-        .await;
+        .await
+        .expect("request should succeed after server is ready");
 
-    // May fail due to timing, but if successful, should be 503
-    if let Ok(resp) = response {
-        assert_eq!(resp.status(), 503);
-    }
+    assert_eq!(response.status(), 503);
 }
 
 #[tokio::test]

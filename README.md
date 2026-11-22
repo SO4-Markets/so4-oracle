@@ -31,6 +31,55 @@ so4-oracle  (single statically-deployed binary)
       → record results; never panics the loop
 ```
 
+### The two loops and shared state
+
+`main.rs` builds one `AppState` (config, HTTP client, `PriceCache`, cycle and
+keeper status, failure/blacklist counters, and the decoded signing keys) and
+spawns two tokio tasks that share it.
+
+- **Price loop** (`oracle/src/price_loop.rs`, `PRICE_LOOP_MS`, default 1s) —
+  fetches every configured source (Binance, Coinbase, Pyth, fixed), validates
+  and aggregates min/max/median per token, signs the payload with the decoded
+  `KEEPER_PRIVATE_KEY`, writes the result into `PriceCache`, and submits
+  `set_prices` to the oracle contract when medians move.
+- **Keeper loop** (`oracle/src/keeper_loop.rs`, `KEEPER_LOOP_MS`, default
+  1.5s) — polls the reader contract for pending orders, deposits and
+  withdrawals; refreshes prices for the tokens that pending work touches
+  (again via `set_prices`); then executes — or freezes — each item on its
+  handler contract. Every error is recorded and the loop continues; it never
+  panics (`panic = "abort"` in the release profile would take the process
+  down).
+
+`PriceCache` is the bridge between the loops and the API: the price loop
+writes signed prices into it, `GET /prices` serves it to the frontend, and
+the keeper loop reads it to decide which tokens need a fresh submission
+before executing work. Cycle/keeper status and the failure ring buffer in
+`AppState` back the admin endpoints.
+
+### On-chain contracts each side talks to
+
+| Contract env var       | Used by                    | For                                          |
+| ---------------------- | -------------------------- | -------------------------------------------- |
+| `ORACLE_CONTRACT_ID`   | price loop, keeper loop    | `set_prices` submissions                     |
+| `READER`               | keeper loop                | polling pending orders/deposits/withdrawals  |
+| `DATA_STORE`           | keeper loop                | read-side state behind the reader queries    |
+| `ORDER_HANDLER`        | keeper loop                | `execute_order` / `freeze_order`             |
+| `DEPOSIT_HANDLER`      | keeper loop                | executing / freezing deposits                |
+| `WITHDRAWAL_HANDLER`   | keeper loop                | executing / freezing withdrawals             |
+
+`ROLE_STORE` is the on-chain role store the handler contracts authorize
+against; the service requires its address at boot and validates it is
+distinct from the other contract IDs.
+
+### Failure states an operator will encounter
+
+| Failure state            | What it means                                                                                     | Where to look                                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Frozen order/deposit/withdrawal | repeated freeze/execute failures abandoned the key (`MAX_CONSECUTIVE_FREEZE_FAILURES`, `MAX_CONSECUTIVE_EXECUTION_FAILURES`) | `GET /keeper/status` recent executions, `GET /oracle/failed-submissions`, `oracle_blacklisted_keys` metric |
+| Blacklisted key          | the key is permanently skipped until cleared; a replacement must be posted on-chain               | `DELETE /keeper/blacklist/{key}` clears it for retry                                                    |
+| Stale prices             | sources failing or the price cycle has stalled                                                    | `GET /prices` timestamps, `GET /oracle/status`, `oracle_last_set_prices_timestamp_seconds` metric       |
+| Low keeper balance       | balance fell below `MIN_KEEPER_BALANCE_XLM`; execution halts until the account is funded          | `GET /keeper/balance`, `/ready` reports `503`, `oracle_keeper_balance_below_min` metric                 |
+
 ## Deployed Contract Reference
 
 Testnet oracle:
@@ -47,66 +96,25 @@ NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 STELLAR_RPC_URL=https://soroban-testnet.stellar.org
 ```
 
-## Required Environment Variables.
+## Required Environment Variables
 
-The names below are the exact names the binary reads at startup via
-`Config::from_env()`. Using any other name (e.g. `ORDER_HANDLER_CONTRACT_ID`)
-will silently be ignored and the process will exit with a "required env var
-not set" error (#499).
+Every variable the binary reads — name, whether it is required, its default
+and what it does — is listed in **[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)**,
+the single reference (CI checks it against the code). Start from
+`.env.example`:
 
 ```bash
-# Network configuration
-STELLAR_NETWORK=testnet           # "testnet" (default) or "mainnet"
-STELLAR_RPC_URL=https://soroban-testnet.stellar.org  # required on mainnet; optional on testnet
-HORIZON_URL=https://horizon-testnet.stellar.org      # optional; defaults to network default
-
-# Contract IDs — use the short names exactly as shown
-ORACLE_CONTRACT_ID=CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY
-ORDER_HANDLER=CC35OFZVWUTAZPV3B6UKSDVAVORZEWUUMOMTHO33H4YR4C5FKPEFODKY
-DEPOSIT_HANDLER=CDWOFIP4YQJGMCYAOWLSRBAWN2OTJUG2I5WOFC32O2TX2SRU56RWBE5C
-WITHDRAWAL_HANDLER=CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE
-READER=CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC
-DATA_STORE=CCZ3VKBEDLNBO2JM3EXL3SNBDJOV5BTN52FVQPER7F6D5GCE53PITQ3J
-ROLE_STORE=CBSUAIAMIFFS4AXQYZ7KR7FNO7IMKAPS5WF4DXANVXDTPKH2F7YUIN6Q
-
-# Keeper configuration
-KEEPER_PRIVATE_KEY=<64-hex-char ed25519 private key>
-KEEPER_SECRET_KEY=<S...-strkey seed>
-KEEPER_ACCOUNT_ID=<G...-public key>
-KEEPER_INDEX=0
-MIN_KEEPER_BALANCE_XLM=10
-# Optional inclusion fees (stroops); defaults match historical hardcoded values
-SET_PRICES_TX_FEE=1000000
-KEEPER_TX_FEE=2000000
-
-# API configuration
-BIND_ADDR=0.0.0.0:8080
-ADMIN_API_TOKEN=<optional admin token>
-
-# Loop intervals (milliseconds)
-PRICE_LOOP_MS=1000
-KEEPER_LOOP_MS=1500
-
-# Price feed configuration (optional; falls back to embedded config/tokens.json)
-PRICE_FEED_CONFIG=/path/to/tokens.json
-
-# Pyth authentication (optional now, mandatory once Pyth enforces auth)
-# PYTH_API_KEY=<your-pyth-api-key>
-
-# Source endpoints (optional; default to the production providers).
-# Useful to point a test deployment at a mock server.
-# COINBASE_BASE_URL=https://api.coinbase.com/v2/exchange-rates?currency=
-# BINANCE_BASE_URL=https://data-api.binance.vision/api/v3/ticker/price
-# PYTH_HERMES_URL=https://pyth.dourolabs.app/hermes/api/latest_price_feeds
+cp .env.example .env   # then fill in the contract IDs and keeper keys
 ```
+
+Names are read verbatim: a near-miss such as `ORDER_HANDLER_CONTRACT_ID` is
+silently ignored and the process exits with a "required env var not set"
+error (#499). `NETWORK_PASSPHRASE` is not read — the passphrase follows
+`STELLAR_NETWORK`.
 
 An idle keeper (no pending orders, deposits or withdrawals) backs off for
 `4 × KEEPER_LOOP_MS` after each cycle. `/ready` accounts for that backoff and
 only reports `keeper_loop_stale` after `10 × KEEPER_LOOP_MS`.
-
-> **Note:** `NETWORK_PASSPHRASE` is not read by the binary — the correct
-> passphrase is selected automatically based on `STELLAR_NETWORK`. You do
-> not need to set it.
 
 ## Development
 
@@ -189,26 +197,66 @@ sudo systemctl enable oracle
 sudo systemctl start oracle
 ```
 
+The unit restarts on any exit with a 5-second delay, and systemd's start limit
+allows 50 restarts per 5 minutes — enough for a bad deploy or a transient boot
+dependency to self-heal. If the limit is ever exhausted (check with
+`systemctl status oracle`), clear it with:
+
+```bash
+sudo systemctl reset-failed oracle
+sudo systemctl start oracle
+```
+
 ### Fly.io
 
 ```bash
-# Deploy to Fly.io
-fly deploy
+# Set secrets BEFORE deploying (never in fly.toml: its [env] block is committed and shown by `fly config show`)
+fly secrets set KEEPER_PRIVATE_KEY=<hex> KEEPER_SECRET_KEY=<S...> ADMIN_API_TOKEN=<token>
+fly secrets set PYTH_API_KEY=<key>   # optional
 
-# Set secrets
-fly secrets set KEEPER_PRIVATE_KEY=<key>
-fly secrets set KEEPER_SECRET_KEY=<secret>
-fly secrets set KEEPER_ACCOUNT_ID=<account>
+# Deploy to Fly.io (secrets are already in place; the app starts with them)
+fly deploy
 ```
+
+Non-secret settings (network, contract IDs, `KEEPER_ACCOUNT_ID`, loop
+intervals, fees) live in `fly.toml`'s `[env]`; edit the `YOUR_…` placeholders there.
+
+> **Both manifests must be edited before the first deploy (#1427).** Every
+> `YOUR_…` value in `fly.toml` and `railway.json` is a placeholder that
+> `Config::from_env()` rejects (`STELLAR_NETWORK` must be `testnet` or
+> `mainnet`, contract IDs and `KEEPER_ACCOUNT_ID` must be valid strkeys), so
+> deploying a manifest as committed starts a container that exits at boot and
+> is restarted in a loop (`min_machines_running = 1` on Fly,
+> `restartPolicyMaxRetries: 100` on Railway). The boot log names the first
+> invalid variable.
 
 ### Railway
 
 ```bash
 # Deploy to Railway
 railway up
-
-# Set environment variables in Railway dashboard
 ```
+
+Replace every `YOUR_…` placeholder in `railway.json`'s `variables` first (or
+override it in the dashboard) — see the boot-loop note under Fly.io above.
+
+`railway.json` only carries non-secret variables. Add `KEEPER_PRIVATE_KEY`,
+`KEEPER_SECRET_KEY`, `ADMIN_API_TOKEN` (and optionally `PYTH_API_KEY`) in the
+Railway dashboard under the service's **Variables** tab, and mark each one
+**Sealed** so its value can't be viewed or exported afterwards. Never add them
+to `railway.json`, which is committed to the repo.
+
+> **Secrets never go in a tracked manifest (#1232).** CI's `manifest-secrets`
+> job fails if `KEEPER_PRIVATE_KEY`, `KEEPER_SECRET_KEY`, `ADMIN_API_TOKEN` or
+> `PYTH_API_KEY` is assigned in `fly.toml` or `railway.json`.
+
+## Documentation
+
+- [docs/README.md](docs/README.md) — index of everything under `docs/`
+- [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) — every environment variable, its default and whether it is required
+- [docs/RUNBOOK.md](docs/RUNBOOK.md) — operator runbook: symptoms, diagnosis, remediation
+- [docs/KEEPER_STATE_MACHINE.md](docs/KEEPER_STATE_MACHINE.md) — the keeper failure state machine
+- [docs/RISK_MECHANICS.md](docs/RISK_MECHANICS.md) — design-only reference for the external liquidation/ADL/insurance-fund contracts (not implemented in this service)
 
 ## Endpoints
 

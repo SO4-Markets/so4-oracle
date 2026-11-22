@@ -74,7 +74,7 @@ async fn get_ready_returns_200_when_healthy() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -138,7 +138,7 @@ async fn get_ready_retries_transient_keeper_balance_failure() {
                 ResponseTemplate::new(500).set_body_string("transient horizon error")
             } else {
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                    "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
                     "balances": [{"asset_type": "native", "balance": "100.0000000"}]
                 }))
             }
@@ -200,7 +200,7 @@ async fn get_ready_retries_transient_rpc_failure() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -301,7 +301,7 @@ async fn get_ready_returns_503_when_keeper_loop_stale() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -357,7 +357,7 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -406,21 +406,9 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
                         }))
                     }
                 }
-                "getAccount" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": {
-                        "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
-                        "sequence": "100",
-                        "subentries": 0,
-                        "inflationDestination": "",
-                        "homeDomain": "",
-                        "thresholds": {"low": 1, "med": 1, "high": 1},
-                        "signers": [],
-                        "data": {},
-                        "balances": []
-                    }
-                })),
+                "getLedgerEntries" => {
+                    ResponseTemplate::new(200).set_body_json(common::account_entry_response(100))
+                }
                 "sendTransaction" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -466,13 +454,19 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
         withdrawal_handler_contract_id: "CCA5HRHMG6E6BVYRICSLZ5CK5KNPAAKXQ7XWDM34WWVGNHWHA26GRVVE"
             .to_string(),
         reader_contract_id: "CC6OZUHF3LVO6PNP3V2EB36ORB3YSVYSH3LWD3RFLO4NUO3BYCXSWSYC".to_string(),
-        keeper_private_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_secret_key: SecretString::new(
-            "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-        ),
-        keeper_account_id: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+        keeper_private_key: Some(std::sync::Arc::new(
+            oracle::signing::signing_key_from_hex(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        )),
+        keeper_secret_key: Some(std::sync::Arc::new(
+            oracle::chain::tx_builder::signing_key_from_secret(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+        )),
+        keeper_account_id: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
         keeper_index: 0,
         admin_api_token: Some(SecretString::new("test-admin-token".to_string())),
         pyth_api_key: None,
@@ -584,7 +578,7 @@ async fn get_ready_returns_503_when_price_cache_empty() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -634,7 +628,7 @@ async fn get_ready_returns_503_when_price_loop_stale() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -694,7 +688,7 @@ async fn get_ready_returns_503_when_keeper_balance_low() {
     // 5 XLM is below the 10 XLM minimum configured by test_config
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "5.0000000"}]
         })))
         .mount(&horizon_mock)

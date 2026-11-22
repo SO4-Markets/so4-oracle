@@ -80,9 +80,12 @@ impl std::error::Error for PythPriceError {}
 impl crate::retry::Retryable for PythPriceError {
     fn is_retryable(&self) -> bool {
         match self {
-            // Network errors and 5xx HTTP errors are transient
+            // Network errors and transient HTTP statuses (408/425/429/5xx)
+            // are retried. Hermes answers an over-rate-limited client with
+            // 429 (#708); the status table is shared with every other source
+            // via is_transient_http_status (#1448).
             Self::NetworkError(_) => true,
-            Self::HttpError { status, .. } => *status >= 500,
+            Self::HttpError { status, .. } => crate::retry::is_transient_http_status(*status),
             // Stale prices might become fresh on retry
             Self::StalePrice { .. } => true,
             // Parse/JSON/config/validation errors are permanent failures
@@ -164,12 +167,19 @@ pub fn normalize_pyth_price(price_str: &str, exponent: i32) -> Result<i128, Pyth
         })
 }
 
+/// Price with its observation timestamp for staleness tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriceWithTimestamp {
+    pub price: i128,
+    pub observation_time: u64,
+}
+
 pub fn validate_pyth_price(
     data: &PythPriceData,
     now_seconds: u64,
     stale_after_seconds: u64,
     max_confidence_bps: u32,
-) -> Result<i128, PythPriceError> {
+) -> Result<PriceWithTimestamp, PythPriceError> {
     let price = normalize_pyth_price(&data.price, data.expo)?;
     let publish_time = data
         .publish_time
@@ -229,7 +239,10 @@ pub fn validate_pyth_price(
         }
     }
 
-    Ok(price)
+    Ok(PriceWithTimestamp {
+        price,
+        observation_time: publish_time,
+    })
 }
 
 // URL-injecting twin of the batched fetch path, used by the mock-server tests below.
@@ -243,8 +256,7 @@ pub(crate) async fn fetch_pyth_price_with_url(
     let query = format!("ids[]={feed_id}");
     let url_string = format!("{base_url}?{query}");
 
-    let response = crate::http::client()
-        .get(&url_string)
+    let response = crate::http::with_correlation(crate::http::client().get(&url_string))
         .send()
         .await
         .map_err(|err| PythPriceError::NetworkError(err.to_string()))?;
@@ -278,6 +290,7 @@ pub(crate) async fn fetch_pyth_price_with_url(
         stale_after_seconds,
         max_confidence_bps,
     )
+    .map(|priced| priced.price)
 }
 
 /// Fetches all requested feeds in a single Hermes request. `base_url` comes
@@ -301,7 +314,7 @@ pub async fn fetch_pyth_prices(
         .join("&");
     let url_string = format!("{base_url}?{query}");
 
-    let mut request = crate::http::client().get(&url_string);
+    let mut request = crate::http::with_correlation(crate::http::client().get(&url_string));
     if let Some(key) = api_key {
         request = request.bearer_auth(key);
     }
@@ -338,6 +351,96 @@ pub async fn fetch_pyth_prices(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::retry::Retryable;
+
+    // #1449 — every variant is classified on purpose. `variant` has no
+    // wildcard arm, so a new variant fails to compile until it is listed, and
+    // the coverage check fails until it has a case.
+    #[test]
+    fn every_variant_is_classified() {
+        fn variant(err: &PythPriceError) -> &'static str {
+            match err {
+                PythPriceError::NetworkError(_) => "NetworkError",
+                PythPriceError::HttpError { .. } => "HttpError",
+                PythPriceError::JsonError(_) => "JsonError",
+                PythPriceError::PriceParseError(_) => "PriceParseError",
+                PythPriceError::MissingFeedId(_) => "MissingFeedId",
+                PythPriceError::StalePrice { .. } => "StalePrice",
+                PythPriceError::ConfidenceTooWide { .. } => "ConfidenceTooWide",
+                PythPriceError::MissingPublishTime => "MissingPublishTime",
+                PythPriceError::InvalidPublishTime(_) => "InvalidPublishTime",
+            }
+        }
+        let http = |status| PythPriceError::HttpError {
+            status,
+            body: String::new(),
+        };
+        let stale = PythPriceError::StalePrice {
+            age_seconds: 120,
+            max_age_seconds: 60,
+        };
+        let wide = PythPriceError::ConfidenceTooWide {
+            confidence_bps: 500.0,
+            max_bps: 100,
+        };
+        let cases = [
+            (PythPriceError::NetworkError("x".into()), true),
+            (http(429), true),
+            (http(503), true),
+            (http(404), false),
+            (PythPriceError::JsonError("x".into()), false),
+            (PythPriceError::PriceParseError("x".into()), false),
+            (PythPriceError::MissingFeedId("x".into()), false),
+            (stale, true),
+            (wide, false),
+            (PythPriceError::MissingPublishTime, false),
+            (PythPriceError::InvalidPublishTime(-1), false),
+        ];
+        let seen: std::collections::HashSet<_> = cases.iter().map(|(e, _)| variant(e)).collect();
+        assert_eq!(seen.len(), 9);
+        for (err, expected) in &cases {
+            assert_eq!(err.is_retryable(), *expected, "{err:?}");
+        }
+    }
+
+    // #708 — a 429 from Hermes means "slow down", not "give up". It must be
+    // retried with backoff instead of being classified as a permanent failure.
+    #[test]
+    fn http_error_429_is_retryable() {
+        let err = PythPriceError::HttpError {
+            status: 429,
+            body: "too many requests".to_string(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn http_error_5xx_is_retryable_and_4xx_is_not() {
+        for status in [500, 502, 503] {
+            let err = PythPriceError::HttpError {
+                status,
+                body: String::new(),
+            };
+            assert!(err.is_retryable(), "status {status} should be retryable");
+        }
+        for status in [400, 401, 404] {
+            let err = PythPriceError::HttpError {
+                status,
+                body: String::new(),
+            };
+            assert!(
+                !err.is_retryable(),
+                "status {status} should not be retryable"
+            );
+        }
+    }
+
+    // A price parse error is permanent: a malformed `conf` will not become
+    // numeric on a retry, so the source must not be retried.
+    #[test]
+    fn price_parse_error_is_not_retryable() {
+        assert!(!PythPriceError::PriceParseError("invalid price".to_string()).is_retryable());
+    }
 
     #[test]
     fn normalize_pyth_price_positive_exponent() {
@@ -371,8 +474,9 @@ mod tests {
             expo: -8,
             publish_time: Some(1_000),
         };
-        let price = validate_pyth_price(&data, 1_010, 60, 50).unwrap();
-        assert_eq!(price, FLOAT_PRECISION);
+        let result = validate_pyth_price(&data, 1_010, 60, 50).unwrap();
+        assert_eq!(result.price, FLOAT_PRECISION);
+        assert_eq!(result.observation_time, 1_000);
     }
 
     #[test]
@@ -433,6 +537,25 @@ mod tests {
         };
         let err = validate_pyth_price(&data, 1_010, 60, 50).unwrap_err();
         assert!(matches!(err, PythPriceError::PriceParseError(_)));
+    }
+
+    #[test]
+    fn validate_pyth_price_rejects_malformed_conf() {
+        // #712 — every other test feeds `conf` a numeric string, leaving the
+        // parse-failure branch of the `if let Some(conf)` block unexercised. A
+        // non-numeric `conf` (malformed Hermes response) must surface as
+        // PriceParseError rather than being silently ignored or panicking.
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: Some("not-a-number".to_string()),
+            expo: -8,
+            publish_time: Some(1_000),
+        };
+        let err = validate_pyth_price(&data, 1_010, 60, 50).unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::PriceParseError(_)),
+            "expected PriceParseError for malformed conf, got {err:?}"
+        );
     }
 
     // #603 — a feed that omits `conf` skips the confidence check; it must not
@@ -831,8 +954,8 @@ mod tests {
             publish_time: Some(1_000),
         };
         // now=1_010, age=10 < stale_after=60 → accepted
-        let price = validate_pyth_price(&data, 1_010, 60, 100).unwrap();
-        assert_eq!(price, 45 * FLOAT_PRECISION);
+        let result = validate_pyth_price(&data, 1_010, 60, 100).unwrap();
+        assert_eq!(result.price, 45 * FLOAT_PRECISION);
     }
 
     // #366 — normalize_pyth_price rejects a positive exponent with PriceParseError

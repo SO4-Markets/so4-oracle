@@ -22,6 +22,43 @@ env:
 # point release break clippy with no code change, and leaves the declared MSRV
 # validated by nothing but `cargo check`.
 jobs:
+  # -- Deployment manifest secrets (#1232) -------------------------------
+  manifest-secrets:
+    name: No secrets in deploy manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Prove the check can fail before trusting a pass (#1439).
+      - run: bash scripts/check-manifest-secrets.sh --self-test
+      - run: bash scripts/check-manifest-secrets.sh
+      - run: bash scripts/check-manifest-env.sh
+
+  # -- Dependency policy (#1440) ------------------------------------------
+  # Restores the cargo-deny job: without it, deny.toml's
+  # `multiple-versions = "deny"` (and the license/source rules) are never
+  # evaluated, so duplicate crates slip in one issue at a time.
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.MSRV }}
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny check bans licenses sources
+
+  # -- Environment variable reference (#1432) ---------------------------
+  env-docs:
+    name: Env var reference matches the code
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: bash scripts/check-env-docs.sh
+
   # -- MSRV enforcement ---------------------------------------------------
   msrv:
     name: MSRV check
@@ -51,7 +88,8 @@ jobs:
           toolchain: ${{ env.MSRV }}
           components: rustfmt
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo fmt --all -- --check
+      # Gate commands are defined once, in the Makefile (#1437).
+      - run: make fmt-check
 
   clippy:
     name: clippy
@@ -64,7 +102,7 @@ jobs:
           toolchain: ${{ env.MSRV }}
           components: clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: make clippy
 
   test:
     name: cargo test
@@ -85,7 +123,7 @@ jobs:
           wget -q https://github.com/prometheus/prometheus/releases/download/v2.53.1/prometheus-2.53.1.linux-amd64.tar.gz
           tar xzf prometheus-2.53.1.linux-amd64.tar.gz
           sudo cp prometheus-2.53.1.linux-amd64/promtool /usr/local/bin/
-      - run: cargo test --all --locked
+      - run: make test
 
   build:
     name: release build
@@ -97,7 +135,7 @@ jobs:
         with:
           toolchain: ${{ env.MSRV }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo build --release --all --locked
+      - run: make release
 
   audit:
     name: cargo audit
@@ -118,11 +156,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: docker build -t so4-oracle .
       - name: Login to GitHub Container Registry
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: docker/login-action@v2
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -138,7 +176,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: ${{ env.MSRV }}
