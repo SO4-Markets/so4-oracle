@@ -335,10 +335,15 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
     // price — flowing.
     if !prices_stale {
         let now = crate::current_timestamp_secs();
-        let is_heartbeat = is_heartbeat_due(&state, now);
-        let submit_prices = filter_prices_by_threshold(&state, &prices, now, is_heartbeat);
+        let is_heartbeat = is_heartbeat_due(&state, now).await;
+        let submit_prices =
+            filter_prices_by_threshold(&state, &fresh_prices, now, is_heartbeat).await;
         if !submit_prices.is_empty() || is_heartbeat {
-            let prices_to_submit = if is_heartbeat { prices.clone() } else { submit_prices };
+            let prices_to_submit = if is_heartbeat {
+                fresh_prices.clone()
+            } else {
+                submit_prices
+            };
             let tx_hash = set_prices_on_chain(&state, &prices_to_submit).await?;
             info!(hash = %tx_hash, "set_prices_confirmed");
             update_submitted_prices(&state, &prices_to_submit, now, is_heartbeat).await;
@@ -1017,12 +1022,16 @@ async fn is_heartbeat_due(state: &Arc<AppState>, now: u64) -> bool {
 async fn filter_prices_by_threshold(
     state: &Arc<AppState>,
     prices: &BTreeMap<String, CachedPrice>,
-    now: u64,
+    _now: u64,
     is_heartbeat: bool,
 ) -> BTreeMap<String, CachedPrice> {
-    let cache = state.price_cache.read().await;
-    let last_submitted = cache.last_submitted_medians.as_ref();
-    drop(cache);
+    let last_submitted = state
+        .price_cache
+        .read()
+        .await
+        .last_submitted_medians
+        .clone();
+    let last_submitted = last_submitted.as_ref();
 
     let token_thresholds: std::collections::HashMap<String, u32> = state
         .config
@@ -1038,10 +1047,10 @@ async fn filter_prices_by_threshold(
             if is_heartbeat {
                 return true;
             }
-            let threshold = token_thresholds.get(symbol).copied().unwrap_or(0);
+            let threshold = token_thresholds.get(*symbol).copied().unwrap_or(0);
             let last_median = last_submitted.and_then(|m| m.get(*symbol)).copied();
             match (last_median, threshold) {
-                (Some(last), 0) => true,
+                (Some(_last), 0) => true,
                 (Some(last), thresh) => {
                     let change = (price.median - last).abs();
                     change > (thresh as i128)
