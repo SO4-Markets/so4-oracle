@@ -234,7 +234,9 @@ fn validate_pyth_api_key(key: &str) -> Result<(), String> {
         return Err("must not contain whitespace (check for a stray space or newline)".to_string());
     }
     if key.chars().count() < MIN_PYTH_API_KEY_LEN {
-        return Err(format!("must be at least {MIN_PYTH_API_KEY_LEN} characters (truncated?)"));
+        return Err(format!(
+            "must be at least {MIN_PYTH_API_KEY_LEN} characters (truncated?)"
+        ));
     }
     Ok(())
 }
@@ -414,8 +416,7 @@ impl Config {
         let keeper_private_key = if !keeper_private_key_raw.is_empty() {
             collect_or_default!(
                 (|| {
-                    let value =
-                        validate_hex_key("KEEPER_PRIVATE_KEY", keeper_private_key_raw, 32)?;
+                    let value = validate_hex_key("KEEPER_PRIVATE_KEY", keeper_private_key_raw, 32)?;
                     crate::signing::signing_key_from_hex(&value)
                         .map(|key| Some(std::sync::Arc::new(key)))
                         .map_err(|err| EnvError::InvalidVar {
@@ -434,8 +435,7 @@ impl Config {
         let keeper_secret_key = if !keeper_secret_key_raw.is_empty() {
             collect_or_default!(
                 (|| {
-                    let value =
-                        validate_strkey("KEEPER_SECRET_KEY", keeper_secret_key_raw, 'S')?;
+                    let value = validate_strkey("KEEPER_SECRET_KEY", keeper_secret_key_raw, 'S')?;
                     crate::chain::tx_builder::signing_key_from_secret(&value)
                         .map(|key| Some(std::sync::Arc::new(key)))
                         .map_err(|err| EnvError::InvalidVar {
@@ -1482,7 +1482,7 @@ mod tests {
             ),
             (
                 "KEEPER_SECRET_KEY",
-                "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+                "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV".to_string(),
             ),
             (
                 "KEEPER_ACCOUNT_ID",
@@ -1640,7 +1640,7 @@ mod tests {
 
     #[test]
     fn validate_strkey_accepts_s_prefixed() {
-        let value = "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let value = "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV";
         let result = validate_strkey("KEEPER_SECRET_KEY", value.to_string(), 'S');
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), value);
@@ -1677,7 +1677,7 @@ mod tests {
 
     #[test]
     fn validate_strkey_rejects_s_prefixed_for_account() {
-        let value = "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let value = "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV";
         let result = validate_strkey("KEEPER_ACCOUNT_ID", value.to_string(), 'G');
         assert!(result.is_err());
     }
@@ -1725,7 +1725,7 @@ mod tests {
         let mut env = valid_env();
         env.insert(
             "KEEPER_ACCOUNT_ID",
-            "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV".to_string(),
         );
 
         let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
@@ -1989,7 +1989,10 @@ mod tests {
             env.insert(var, value.to_string());
 
             let err = Config::from_lookup(|key| env.get(key).cloned()).unwrap_err();
-            assert!(invalid_var_names(&err).contains(&var), "{var}={value}: {err}");
+            assert!(
+                invalid_var_names(&err).contains(&var),
+                "{var}={value}: {err}"
+            );
         }
     }
 
@@ -2034,7 +2037,13 @@ mod tests {
 
             let err = Config::from_lookup(|k| env.get(k).cloned()).unwrap_err();
             assert!(invalid_var_names(&err).contains(&"PYTH_API_KEY"), "{err}");
-            assert!(!err.to_string().contains(key), "error must not echo the key");
+            assert!(
+                !err.to_string().contains(key),
+                "error must not echo the key"
+            );
+        }
+    }
+
     #[test]
     fn parse_price_feed_config_rejects_staleness_above_contract_window() {
         let json = r#"[{"symbol":"TUSDC","stellar_address":"CCFTOPHUPSUDO2MB4X5D3XYJ2HRJ7NJPAW4UVPAVN7ZLE63EZLSMXDUO","sources":["fixed"],"min_sources":1,"fixed_price":"1000000000000000000000000000000","stale_after_seconds":271}]"#;
@@ -2085,6 +2094,8 @@ mod tests {
             "expected a token-config error, got: {err}"
         );
         assert!(err.to_string().contains("PRICE_LOOP_MS"), "{err}");
+    }
+
     // #1463 — a mistyped extra three zeros must fail at boot, naming the limit.
     #[test]
     fn config_from_lookup_rejects_tx_fees_above_the_cap() {
@@ -2140,6 +2151,9 @@ mod tests {
         token.sources.truncate(2);
         token.min_sources = 2;
         assert!(!outlier_rejection_can_degrade(&token));
+    }
+
+    #[test]
     fn config_from_lookup_accepts_tx_fees_at_the_cap() {
         let mut env = valid_env();
         env.insert("SET_PRICES_TX_FEE", MAX_TX_FEE_STROOPS.to_string());

@@ -93,7 +93,10 @@ pub async fn run_price_loop(state: Arc<AppState>) {
                 break;
             }
         }
-        if state.keeper_balance_below_min.load(std::sync::atomic::Ordering::Relaxed) {
+        if state
+            .keeper_balance_below_min
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             tracing::warn!("keeper balance below minimum; skipping price cycle");
             continue;
         }
@@ -543,14 +546,18 @@ async fn fetch_source_price(
                 .as_ref()
                 .ok_or_else(|| PriceSourceError::Config("missing binance_symbol".to_string()))?;
             if let Some(prices) = binance_prices {
-                prices.get(symbol).copied().map(|price| PriceWithObservationTime {
-                    price,
-                    observation_time: now,
-                }).ok_or_else(|| {
-                    PriceSourceError::Config(format!(
-                        "binance symbol not returned in batch: {symbol}"
-                    ))
-                })
+                prices
+                    .get(symbol)
+                    .copied()
+                    .map(|price| PriceWithObservationTime {
+                        price,
+                        observation_time: now,
+                    })
+                    .ok_or_else(|| {
+                        PriceSourceError::Config(format!(
+                            "binance symbol not returned in batch: {symbol}"
+                        ))
+                    })
             } else {
                 // Batch request failed or no batch was made — fall back to a
                 // single-symbol request so this token still gets a price.
@@ -861,7 +868,10 @@ mod tests {
         let built = build_cached_price(&state, &token, 7, &no_pyth, false, None).await;
         assert!(built.is_err());
         let failures = state.failures.lock().await;
-        let entry = failures.iter().next_back().expect("source failure recorded");
+        let entry = failures
+            .iter()
+            .next_back()
+            .expect("source failure recorded");
         assert_eq!(entry.operation, "source:TUSDC:fixed");
         assert_eq!(entry.source.as_deref(), Some("fixed"));
         assert_eq!(entry.symbol, "TUSDC");

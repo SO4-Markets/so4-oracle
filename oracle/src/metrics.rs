@@ -61,6 +61,14 @@ struct Counters {
     orders_executed: u64,
     deposits_executed: u64,
     withdrawals_executed: u64,
+    /// Pending counts recorded from the latest keeper cycle, rather than
+    /// scraped out of `AppState` at scrape time (#1267).
+    keeper_cycle_pending_orders: usize,
+    keeper_cycle_pending_deposits: usize,
+    keeper_cycle_pending_withdrawals: usize,
+    /// Cycles that had pending work but executed none of it — the single
+    /// most useful keeper alert.
+    keeper_cycle_all_failed_total: u64,
     submit_failures: u64,
     keeper_balance_low_count: u64,
     prices_stale_count: u64,
@@ -119,9 +127,24 @@ pub struct KeeperCycleTally {
     pub orders: usize,
     pub deposits: usize,
     pub withdrawals: usize,
+    pub pending_orders: usize,
+    pub pending_deposits: usize,
+    pub pending_withdrawals: usize,
     pub errors: usize,
     pub keeper_balance_low: bool,
     pub prices_stale: bool,
+}
+
+impl KeeperCycleTally {
+    /// Total pending work discovered at the start of the cycle.
+    pub fn pending_total(&self) -> usize {
+        self.pending_orders + self.pending_deposits + self.pending_withdrawals
+    }
+
+    /// Work was available and none of it succeeded (including gated cycles).
+    pub fn all_failed(&self) -> bool {
+        self.pending_total() > 0 && self.orders + self.deposits + self.withdrawals == 0
+    }
 }
 
 impl Metrics {
@@ -156,6 +179,12 @@ impl Metrics {
         c.orders_executed += tally.orders as u64;
         c.deposits_executed += tally.deposits as u64;
         c.withdrawals_executed += tally.withdrawals as u64;
+        c.keeper_cycle_pending_orders = tally.pending_orders;
+        c.keeper_cycle_pending_deposits = tally.pending_deposits;
+        c.keeper_cycle_pending_withdrawals = tally.pending_withdrawals;
+        if tally.all_failed() {
+            c.keeper_cycle_all_failed_total += 1;
+        }
         c.submit_failures += tally.errors as u64;
         if tally.keeper_balance_low {
             c.keeper_balance_low_count += 1;
@@ -342,14 +371,14 @@ impl Metrics {
                 // We use a static match to keep the output clean.
                 match *b {
                     0.25 => "0.25",
-                    0.5  => "0.5",
-                    1.0  => "1",
-                    2.5  => "2.5",
-                    5.0  => "5",
+                    0.5 => "0.5",
+                    1.0 => "1",
+                    2.5 => "2.5",
+                    5.0 => "5",
                     10.0 => "10",
                     30.0 => "30",
                     60.0 => "60",
-                    _    => "?",
+                    _ => "?",
                 }
             })
             .collect();
@@ -398,13 +427,13 @@ impl Metrics {
         let keeper_bucket_bounds: Vec<&str> = KEEPER_CYCLE_BUCKETS
             .iter()
             .map(|b| match *b {
-                1.0  => "1",
-                2.5  => "2.5",
-                5.0  => "5",
+                1.0 => "1",
+                2.5 => "2.5",
+                5.0 => "5",
                 10.0 => "10",
                 25.0 => "25",
                 50.0 => "50",
-                _    => "?",
+                _ => "?",
             })
             .collect();
         output.push_str(
@@ -452,6 +481,33 @@ impl Metrics {
         output.push_str(&format!(
             "oracle_withdrawals_executed_total {}\n",
             c.withdrawals_executed
+        ));
+
+        // Pending work from the most recent recorded cycle (#1267). Kept
+        // alongside the out-of-band `oracle_pending_keys` gauge so an operator
+        // can see the counts the cycle actually observed.
+        output.push_str(
+            "# HELP oracle_keeper_cycle_pending_keys Pending keys seen by the latest keeper cycle\n",
+        );
+        output.push_str("# TYPE oracle_keeper_cycle_pending_keys gauge\n");
+        output.push_str(&format!(
+            "oracle_keeper_cycle_pending_keys{{kind=\"orders\"}} {}\n",
+            c.keeper_cycle_pending_orders
+        ));
+        output.push_str(&format!(
+            "oracle_keeper_cycle_pending_keys{{kind=\"deposits\"}} {}\n",
+            c.keeper_cycle_pending_deposits
+        ));
+        output.push_str(&format!(
+            "oracle_keeper_cycle_pending_keys{{kind=\"withdrawals\"}} {}\n",
+            c.keeper_cycle_pending_withdrawals
+        ));
+
+        output.push_str("# HELP oracle_keeper_cycle_all_failed_total Cycles with pending work but no successful executions\n");
+        output.push_str("# TYPE oracle_keeper_cycle_all_failed_total counter\n");
+        output.push_str(&format!(
+            "oracle_keeper_cycle_all_failed_total {}\n",
+            c.keeper_cycle_all_failed_total
         ));
 
         output.push_str("# HELP oracle_token_fetch_ok_total Total individual token fetch successes across all price cycles\n");
@@ -612,7 +668,7 @@ impl Metrics {
     }
 }
 
-fn escape_label_value(value: &str) -> String {
+pub(crate) fn escape_label_value(value: &str) -> String {
     value
         .replace('\\', r"\\")
         .replace('\n', r"\n")
@@ -633,6 +689,9 @@ mod tests {
                 orders: 5,
                 deposits: 3,
                 withdrawals: 2,
+                pending_orders: 6,
+                pending_deposits: 3,
+                pending_withdrawals: 2,
                 errors: 1,
                 keeper_balance_low: true,
                 prices_stale: false,
@@ -660,6 +719,80 @@ mod tests {
         let prometheus = metrics.to_prometheus();
         assert!(prometheus.contains("oracle_price_cycles_total 1"));
         assert!(prometheus.contains("oracle_price_cycle_duration_seconds 0.1"));
+    }
+
+    // A gated or failed cycle with pending work must be alertable even though
+    // it executed nothing — "no work" and "all work failed" are different.
+    #[test]
+    fn keeper_cycle_all_failed_counts_only_cycles_with_pending_work() {
+        let metrics = Metrics::new();
+        let gated = KeeperCycleTally {
+            orders: 0,
+            deposits: 0,
+            withdrawals: 0,
+            pending_orders: 2,
+            pending_deposits: 1,
+            pending_withdrawals: 0,
+            errors: 0,
+            keeper_balance_low: true,
+            prices_stale: false,
+        };
+        assert!(gated.all_failed());
+        metrics.record_keeper_cycle(10, gated);
+
+        let idle = KeeperCycleTally {
+            pending_orders: 0,
+            pending_deposits: 0,
+            pending_withdrawals: 0,
+            ..KeeperCycleTally::default()
+        };
+        assert!(!idle.all_failed());
+        metrics.record_keeper_cycle(10, idle);
+
+        let partial = KeeperCycleTally {
+            orders: 1,
+            pending_orders: 3,
+            ..KeeperCycleTally::default()
+        };
+        assert!(!partial.all_failed());
+        metrics.record_keeper_cycle(10, partial);
+
+        let output = metrics.to_prometheus();
+        assert!(
+            output.contains("oracle_keeper_cycle_all_failed_total 1"),
+            "{output}"
+        );
+        // The gauge reports the *latest* cycle (the partial one, with 3
+        // pending orders), not a cumulative total.
+        assert!(
+            output.contains("oracle_keeper_cycle_pending_keys{kind=\"orders\"} 3"),
+            "{output}"
+        );
+        assert!(
+            output.contains("oracle_keeper_cycle_pending_keys{kind=\"deposits\"} 0"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn keeper_cycle_pending_counts_are_emitted_per_kind() {
+        let metrics = Metrics::new();
+        metrics.record_keeper_cycle(
+            10,
+            KeeperCycleTally {
+                orders: 1,
+                pending_orders: 4,
+                pending_deposits: 2,
+                pending_withdrawals: 7,
+                ..KeeperCycleTally::default()
+            },
+        );
+
+        let output = metrics.to_prometheus();
+        assert!(output.contains("# TYPE oracle_keeper_cycle_pending_keys gauge"));
+        assert!(output.contains("oracle_keeper_cycle_pending_keys{kind=\"orders\"} 4"));
+        assert!(output.contains("oracle_keeper_cycle_pending_keys{kind=\"deposits\"} 2"));
+        assert!(output.contains("oracle_keeper_cycle_pending_keys{kind=\"withdrawals\"} 7"));
     }
 
     #[test]

@@ -643,8 +643,9 @@ async fn keeper_cycle_rejects_non_hex_order_key() {
                         }))
                     }
                 }
-                "getLedgerEntries" => ResponseTemplate::new(200)
-                    .set_body_json(common::account_entry_response(100)),
+                "getLedgerEntries" => {
+                    ResponseTemplate::new(200).set_body_json(common::account_entry_response(100))
+                }
                 "sendTransaction" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "jsonrpc": "2.0", "id": 1,
                     "result": {
@@ -919,8 +920,9 @@ fn mount_order_exec_always_fails(
                     }))
                 }
             }
-            "getLedgerEntries" => ResponseTemplate::new(200)
-                .set_body_json(common::account_entry_response(100)),
+            "getLedgerEntries" => {
+                ResponseTemplate::new(200).set_body_json(common::account_entry_response(100))
+            }
             "sendTransaction" => {
                 let nth = mock_server_uri_submissions.fetch_add(1, Ordering::SeqCst);
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({

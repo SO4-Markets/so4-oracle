@@ -115,6 +115,30 @@ where
     serializer.serialize_str(&value.to_string())
 }
 
+/// Optional 1e30-scaled prices need the same string encoding as
+/// [`ser_i128_str`] — serde_json cannot represent these magnitudes as JSON
+/// numbers without `arbitrary_precision`.
+pub fn ser_opt_i128_str<S>(value: &Option<i128>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(v) => serializer.serialize_some(&v.to_string()),
+        None => serializer.serialize_none(),
+    }
+}
+
+/// Relative move from `last` to `current` in basis points, saturating on
+/// overflow. `None` when `last == 0`, where a relative move is undefined.
+pub fn price_delta_bps(last: i128, current: i128) -> Option<u128> {
+    if last == 0 {
+        return None;
+    }
+    let change = current.checked_sub(last)?.unsigned_abs();
+    let base = last.unsigned_abs();
+    Some(change.saturating_mul(10_000) / base)
+}
+
 #[derive(Debug, Clone)]
 pub struct RingBuffer<T> {
     capacity: usize,
@@ -333,7 +357,18 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::RingBuffer;
+    use super::{price_delta_bps, RingBuffer};
+
+    #[test]
+    fn price_delta_bps_is_relative_and_handles_zero_and_overflow() {
+        assert_eq!(price_delta_bps(10_000, 10_100), Some(100));
+        assert_eq!(price_delta_bps(10_000, 9_900), Some(100));
+        assert_eq!(price_delta_bps(10_000, 10_000), Some(0));
+        // A move from zero has no meaningful relative magnitude.
+        assert_eq!(price_delta_bps(0, 1), None);
+        // A move whose subtraction overflows i128 cannot be expressed in bps.
+        assert_eq!(price_delta_bps(i128::MAX, i128::MIN), None);
+    }
 
     #[test]
     fn ring_buffer_evicts_oldest_items_at_capacity() {
@@ -405,7 +440,7 @@ mod signing_key_state_tests {
         ));
         config.keeper_secret_key = Some(std::sync::Arc::new(
             crate::chain::tx_builder::signing_key_from_secret(
-                "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV",
             )
             .unwrap(),
         ));
@@ -433,7 +468,11 @@ mod keeper_status_snapshot_tests {
     async fn snapshot_returns_pair_when_generation_unchanged() {
         let state = AppState::new(Arc::new(Config::default_for_tests()));
         state.keeper_status.write().await.pending_orders = 3;
-        state.cycle_status.write().await.last_keeper_cycle_latency_ms = Some(7);
+        state
+            .cycle_status
+            .write()
+            .await
+            .last_keeper_cycle_latency_ms = Some(7);
 
         let (ks, cs) = state.keeper_status_snapshot().await;
         assert_eq!(ks.pending_orders, 3);

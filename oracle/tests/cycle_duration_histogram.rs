@@ -20,23 +20,17 @@ fn price_cycle_histogram_buckets_are_cumulative() {
 
     // le="0.25" must be 0 (300 ms > 250 ms)
     assert!(
-        prom.contains(
-            "oracle_price_cycle_duration_seconds_histogram_bucket{le=\"0.25\"} 0"
-        ),
+        prom.contains("oracle_price_cycle_duration_seconds_histogram_bucket{le=\"0.25\"} 0"),
         "0.25-bucket must be 0 for a 300 ms cycle:\n{prom}"
     );
     // le="0.5" must be 1 (300 ms ≤ 500 ms)
     assert!(
-        prom.contains(
-            "oracle_price_cycle_duration_seconds_histogram_bucket{le=\"0.5\"} 1"
-        ),
+        prom.contains("oracle_price_cycle_duration_seconds_histogram_bucket{le=\"0.5\"} 1"),
         "0.5-bucket must be 1 for a 300 ms cycle:\n{prom}"
     );
     // +Inf must be 1
     assert!(
-        prom.contains(
-            "oracle_price_cycle_duration_seconds_histogram_bucket{le=\"+Inf\"} 1"
-        ),
+        prom.contains("oracle_price_cycle_duration_seconds_histogram_bucket{le=\"+Inf\"} 1"),
         "+Inf bucket must be 1:\n{prom}"
     );
 }
@@ -72,15 +66,11 @@ fn price_cycle_histogram_slow_cycle_in_tail_buckets() {
     let prom = m.to_prometheus();
 
     assert!(
-        prom.contains(
-            "oracle_price_cycle_duration_seconds_histogram_bucket{le=\"30\"} 0"
-        ),
+        prom.contains("oracle_price_cycle_duration_seconds_histogram_bucket{le=\"30\"} 0"),
         "30-bucket must be 0 for a 45 s cycle:\n{prom}"
     );
     assert!(
-        prom.contains(
-            "oracle_price_cycle_duration_seconds_histogram_bucket{le=\"60\"} 1"
-        ),
+        prom.contains("oracle_price_cycle_duration_seconds_histogram_bucket{le=\"60\"} 1"),
         "60-bucket must be 1 for a 45 s cycle:\n{prom}"
     );
 }
@@ -95,21 +85,15 @@ fn keeper_cycle_histogram_buckets_are_cumulative() {
     let prom = m.to_prometheus();
 
     assert!(
-        prom.contains(
-            "oracle_keeper_cycle_duration_seconds_histogram_bucket{le=\"2.5\"} 0"
-        ),
+        prom.contains("oracle_keeper_cycle_duration_seconds_histogram_bucket{le=\"2.5\"} 0"),
         "2.5-bucket must be 0 for a 3 s keeper cycle:\n{prom}"
     );
     assert!(
-        prom.contains(
-            "oracle_keeper_cycle_duration_seconds_histogram_bucket{le=\"5\"} 1"
-        ),
+        prom.contains("oracle_keeper_cycle_duration_seconds_histogram_bucket{le=\"5\"} 1"),
         "5-bucket must be 1 for a 3 s keeper cycle:\n{prom}"
     );
     assert!(
-        prom.contains(
-            "oracle_keeper_cycle_duration_seconds_histogram_bucket{le=\"+Inf\"} 1"
-        ),
+        prom.contains("oracle_keeper_cycle_duration_seconds_histogram_bucket{le=\"+Inf\"} 1"),
         "+Inf bucket must be 1:\n{prom}"
     );
 }
@@ -157,15 +141,11 @@ fn prometheus_output_declares_histogram_type() {
     let prom = m.to_prometheus();
 
     assert!(
-        prom.contains(
-            "# TYPE oracle_price_cycle_duration_seconds_histogram histogram"
-        ),
+        prom.contains("# TYPE oracle_price_cycle_duration_seconds_histogram histogram"),
         "price histogram TYPE line must be present:\n{prom}"
     );
     assert!(
-        prom.contains(
-            "# TYPE oracle_keeper_cycle_duration_seconds_histogram histogram"
-        ),
+        prom.contains("# TYPE oracle_keeper_cycle_duration_seconds_histogram histogram"),
         "keeper histogram TYPE line must be present:\n{prom}"
     );
 }

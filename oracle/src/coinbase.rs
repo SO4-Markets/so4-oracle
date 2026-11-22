@@ -151,32 +151,24 @@ pub(crate) async fn fetch_spot_price_with_url(
         .filter(|stripped| !stripped.is_empty())
         .unwrap_or(symbol);
 
-    let (clean_url, use_query) =
-        if base_url.contains("currency=") || base_url.contains("exchange-rates") {
-            (
-                base_url
-                    .trim_end_matches("?currency=")
-                    .trim_end_matches("&currency="),
-                true,
-            )
-        } else {
-            (base_url, false)
-        };
+    // The request shape is fixed: the currency is always a query parameter.
+    // A caller may still hand us a base URL ending in `?currency=` (the
+    // production constant does), so strip that suffix rather than sniffing
+    // for magic substrings to decide between query and path-append. A plain
+    // `http://host/path` base URL therefore produces `…/path?currency=BTC`
+    // too, and a future Coinbase path change cannot silently flip the shape
+    // of the request (#1264).
+    let clean_url = base_url
+        .trim_end_matches("?currency=")
+        .trim_end_matches("&currency=");
 
-    let response = if use_query {
-        crate::http::with_correlation(
-            crate::http::client()
-                .get(clean_url)
-                .query(&[("currency", base_currency)]),
-        )
-        .send()
-        .await
-    } else {
-        let url_str = format!("{}{}", clean_url, base_currency);
-        crate::http::with_correlation(crate::http::client().get(&url_str))
-            .send()
-            .await
-    }
+    let response = crate::http::with_correlation(
+        crate::http::client()
+            .get(clean_url)
+            .query(&[("currency", base_currency)]),
+    )
+    .send()
+    .await
     .map_err(|err| CoinbasePriceError::NetworkError(err.to_string()))?;
 
     let status = response.status().as_u16();
@@ -358,12 +350,12 @@ mod tests {
 
     /// #347 / #794 — a raw "SOLUSDT" symbol must be stripped to "SOL" *before*
     /// the Coinbase request is built. Drives the real `fetch_spot_price_with_url`
-    /// via wiremock and asserts the outgoing request path is the stripped base,
+    /// via wiremock and asserts the outgoing query carries the stripped base,
     /// instead of re-checking `parse_coinbase_response_body` with an
     /// already-stripped symbol (which never exercises the strip at all).
     #[tokio::test]
     async fn coinbase_strips_usdt_suffix() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
@@ -374,7 +366,8 @@ mod tests {
             }
         }"#;
         Mock::given(method("GET"))
-            .and(path("/SOL"))
+            .and(path("/"))
+            .and(query_param("currency", "SOL"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
             .mount(&server)
             .await;
@@ -387,17 +380,14 @@ mod tests {
 
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0].url.path(),
-            "/SOL",
-            "the USDT suffix must be stripped from the request URL"
-        );
+        assert_eq!(requests[0].url.path(), "/");
+        assert_eq!(requests[0].url.query(), Some("currency=SOL"));
     }
 
     /// #347 / #794 — the "USD" suffix is stripped the same way.
     #[tokio::test]
     async fn coinbase_strips_usd_suffix() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
@@ -408,7 +398,8 @@ mod tests {
             }
         }"#;
         Mock::given(method("GET"))
-            .and(path("/ADA"))
+            .and(path("/"))
+            .and(query_param("currency", "ADA"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
             .mount(&server)
             .await;
@@ -421,11 +412,8 @@ mod tests {
 
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0].url.path(),
-            "/ADA",
-            "the USD suffix must be stripped from the request URL"
-        );
+        assert_eq!(requests[0].url.path(), "/");
+        assert_eq!(requests[0].url.query(), Some("currency=ADA"));
     }
 
     // #363 — verify the USD rate is extracted and scaled to 1e30 precision
@@ -481,7 +469,7 @@ mod tests {
     /// the test body (which could never catch a regression in the real code).
     #[tokio::test]
     async fn coinbase_exact_usdt_strips_to_self() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
@@ -492,7 +480,8 @@ mod tests {
             }
         }"#;
         Mock::given(method("GET"))
-            .and(path("/USDT"))
+            .and(path("/"))
+            .and(query_param("currency", "USDT"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
             .mount(&server)
             .await;
@@ -505,17 +494,14 @@ mod tests {
 
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0].url.path(),
-            "/USDT",
-            "an exact \"USDT\" symbol must not be stripped to an empty request path"
-        );
+        assert_eq!(requests[0].url.path(), "/");
+        assert_eq!(requests[0].url.query(), Some("currency=USDT"));
     }
 
     /// #795 — same degenerate case for an exact "USD" symbol.
     #[tokio::test]
     async fn coinbase_exact_usd_strips_to_self() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
@@ -526,7 +512,8 @@ mod tests {
             }
         }"#;
         Mock::given(method("GET"))
-            .and(path("/USD"))
+            .and(path("/"))
+            .and(query_param("currency", "USD"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
             .mount(&server)
             .await;
@@ -539,11 +526,8 @@ mod tests {
 
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0].url.path(),
-            "/USD",
-            "an exact \"USD\" symbol must not be stripped to an empty request path"
-        );
+        assert_eq!(requests[0].url.path(), "/");
+        assert_eq!(requests[0].url.query(), Some("currency=USD"));
     }
 
     // #364 — a response body without a USD key must return MissingUsdRate
@@ -607,7 +591,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_spot_price_strips_usdt_suffix_success() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
@@ -618,9 +602,10 @@ mod tests {
             }
         }"#;
 
-        // "BTCUSDT" → base "BTC" → URL path should be "/BTC"
+        // "BTCUSDT" → base "BTC" → ?currency=BTC
         Mock::given(method("GET"))
-            .and(path("/BTC"))
+            .and(path("/"))
+            .and(query_param("currency", "BTC"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
             .mount(&server)
             .await;
@@ -634,7 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_spot_price_strips_usd_suffix_success() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
@@ -646,7 +631,8 @@ mod tests {
         }"#;
 
         Mock::given(method("GET"))
-            .and(path("/ETH"))
+            .and(path("/"))
+            .and(query_param("currency", "ETH"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
             .mount(&server)
             .await;
@@ -660,7 +646,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_spot_price_no_suffix_success() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
@@ -672,7 +658,8 @@ mod tests {
         }"#;
 
         Mock::given(method("GET"))
-            .and(path("/XLM"))
+            .and(path("/"))
+            .and(query_param("currency", "XLM"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
             .mount(&server)
             .await;
@@ -728,14 +715,10 @@ mod tests {
         ));
     }
 
-    /// #706 — every other HTTP test builds `base_url` as `"{uri}/"`, which
-    /// contains neither `"currency="` nor `"exchange-rates"`, so they all
-    /// exercise the `use_query = false` (`format!`-concatenated) branch that
-    /// production never takes. The real `COINBASE_EXCHANGE_RATES_URL` shape
-    /// (`.../v2/exchange-rates?currency=`) drives `use_query = true` — the
-    /// `reqwest .query()` path. This test covers that branch at the HTTP
-    /// level: `?currency=` is trimmed, and the currency arrives as a real
-    /// query parameter.
+    /// #706 / #1264 — the production `COINBASE_EXCHANGE_RATES_URL` ends in
+    /// `?currency=`. That suffix is trimmed and the currency is sent as a
+    /// real query parameter. The request shape no longer depends on whether
+    /// the base URL happens to contain this substring.
     #[tokio::test]
     async fn fetch_spot_price_production_url_shape_uses_query_param_branch() {
         use wiremock::matchers::{method, path, query_param};
@@ -771,5 +754,41 @@ mod tests {
             Some("currency=BTC"),
             "currency must be sent as a query parameter, not concatenated into the path"
         );
+    }
+
+    /// #1264 — a plain `http://host:port/path` base URL contains neither
+    /// magic substring, so the old sniffing code appended the currency to the
+    /// path. The request shape is now fixed: the path is preserved and the
+    /// currency is always a query parameter.
+    #[tokio::test]
+    async fn plain_base_url_sends_currency_as_query_parameter() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = r#"{
+            "data": {
+                "currency": "BTC",
+                "rates": { "USD": "50000.0" }
+            }
+        }"#;
+
+        Mock::given(method("GET"))
+            .and(path("/path"))
+            .and(query_param("currency", "BTC"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let base_url = format!("{}/path", server.uri());
+        let result = super::fetch_spot_price_with_url(&base_url, "BTC")
+            .await
+            .unwrap();
+        assert_eq!(result, 50000 * FLOAT_PRECISION);
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/path");
+        assert_eq!(requests[0].url.query(), Some("currency=BTC"));
     }
 }

@@ -15,17 +15,36 @@ use crate::chain::scval::{account_strkey_to_muxed, strkey_to_sc_address};
 /// guaranteed `tx_too_late` before the key is retried.
 pub const TX_MAX_TIME_SECS: u64 = 60;
 
-/// `max_time`: Unix timestamp of the transaction's hard deadline.
-/// Pass `0` to omit time bounds (e.g. for simulation calls where sequence is 0).
+/// Per-transaction parameters shared by every `build_invoke_tx` caller.
+/// Grouping them keeps the builder below clippy's argument-count limit and
+/// makes it impossible to transpose `fee` and `sequence` at a call site.
+#[derive(Debug, Clone)]
+pub struct TxParams {
+    pub fee: u32,
+    pub sequence: u64,
+    pub soroban_data: Option<SorobanTransactionData>,
+    /// Unix timestamp of the transaction's hard deadline. `0` omits time
+    /// bounds (e.g. for simulation calls where the sequence is also 0).
+    pub max_time: u64,
+}
+
+impl TxParams {
+    pub fn new(fee: u32, sequence: u64, max_time: u64) -> Self {
+        Self {
+            fee,
+            sequence,
+            soroban_data: None,
+            max_time,
+        }
+    }
+}
+
 pub fn build_invoke_tx(
     source_account: &str,
     contract_id: &str,
     method: &str,
     args: Vec<ScVal>,
-    fee: u32,
-    sequence: u64,
-    soroban_data: Option<SorobanTransactionData>,
-    max_time: u64,
+    params: TxParams,
 ) -> Result<Transaction, String> {
     let source_muxed = account_strkey_to_muxed(source_account)?;
     let contract_addr = strkey_to_sc_address(contract_id)?;
@@ -56,15 +75,15 @@ pub fn build_invoke_tx(
         .try_into()
         .map_err(|e| format!("failed to build operations VecM: {e}"))?;
 
-    let ext = match soroban_data {
+    let ext = match params.soroban_data {
         Some(data) => TransactionExt::V1(data),
         None => TransactionExt::V0,
     };
 
-    let cond = if max_time > 0 {
+    let cond = if params.max_time > 0 {
         Preconditions::Time(TimeBounds {
             min_time: TimePoint(0),
-            max_time: TimePoint(max_time),
+            max_time: TimePoint(params.max_time),
         })
     } else {
         Preconditions::None
@@ -72,8 +91,8 @@ pub fn build_invoke_tx(
 
     Ok(Transaction {
         source_account: source_muxed,
-        fee,
-        seq_num: SequenceNumber(sequence as i64),
+        fee: params.fee,
+        seq_num: SequenceNumber(params.sequence as i64),
         cond,
         memo: Memo::None,
         operations,
@@ -203,10 +222,7 @@ mod tests {
             "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY",
             "set_prices",
             vec![ScVal::Void],
-            100,
-            1,
-            None,
-            0,
+            TxParams::new(100, 1, 0),
         )
         .unwrap();
 
@@ -224,10 +240,7 @@ mod tests {
             "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY",
             "set_prices",
             vec![ScVal::Void],
-            100,
-            1,
-            None,
-            max_time,
+            TxParams::new(100, 1, max_time),
         )
         .unwrap();
 
@@ -249,10 +262,7 @@ mod tests {
             "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY",
             "set_prices",
             vec![ScVal::Void],
-            100,
-            1,
-            None,
-            0,
+            TxParams::new(100, 1, 0),
         )
         .unwrap();
 
@@ -277,10 +287,7 @@ mod tests {
             "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY",
             "set_prices",
             vec![ScVal::Void],
-            100,
-            1,
-            None,
-            0,
+            TxParams::new(100, 1, 0),
         );
         assert!(err.is_err());
     }

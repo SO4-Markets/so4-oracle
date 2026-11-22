@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,7 +11,9 @@ use serde::Serialize;
 use tracing::info;
 
 use super::{AdminAuth, ApiError};
-use crate::state::{AppState, CachedPrice, FailedSubmission};
+use crate::state::{
+    price_delta_bps, ser_opt_i128_str, AppState, CachedPrice, FailedSubmission, PriceCache,
+};
 
 // #1280 — failure counters and last-cycle timestamps moved here from the public
 // /health probe so they are only visible to authenticated admin callers.
@@ -40,6 +43,57 @@ pub struct OracleStatusResponse {
     pub last_price_cycle_secs_ago: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_keeper_cycle_secs_ago: Option<u64>,
+    /// Unix time of the last full `set_prices` heartbeat. Distinct from
+    /// `last_cycle_time` (price fetch) and from `cache.last_updated`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_full_submission: Option<u64>,
+    /// Per-token submission state, keyed by symbol, so an operator can see
+    /// what was actually published and how far the current median has moved.
+    pub submission_states: BTreeMap<String, TokenSubmissionState>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TokenSubmissionState {
+    #[serde(serialize_with = "ser_opt_i128_str")]
+    pub last_submitted_median: Option<i128>,
+    #[serde(serialize_with = "ser_opt_i128_str")]
+    pub current_median: Option<i128>,
+    pub delta_bps: Option<u128>,
+    pub threshold_bps: u32,
+}
+
+/// Build the per-token submission view from one consistent cache read.
+fn token_submission_states(
+    state: &AppState,
+    cache: &PriceCache,
+) -> BTreeMap<String, TokenSubmissionState> {
+    state
+        .config
+        .price_feed
+        .tokens
+        .iter()
+        .map(|token| {
+            let key = token.lookup_key();
+            let last_submitted_median = cache
+                .last_submitted_medians
+                .as_ref()
+                .and_then(|medians| medians.get(&key))
+                .copied();
+            let current_median = cache.prices.get(&key).map(|price| price.median);
+            let delta_bps = last_submitted_median
+                .zip(current_median)
+                .and_then(|(last, current)| price_delta_bps(last, current));
+            (
+                token.symbol.clone(),
+                TokenSubmissionState {
+                    last_submitted_median,
+                    current_median,
+                    delta_bps,
+                    threshold_bps: token.submit_threshold_bps,
+                },
+            )
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -81,15 +135,11 @@ pub async fn oracle_status(
     drop(cycle);
 
     let metrics = state.metrics.to_response();
-    let prices = state
-        .price_cache
-        .read()
-        .await
-        .prices
-        .values()
-        .cloned()
-        .collect();
-    let recent_errors = state.failures.lock().await.iter().rev().cloned().collect();
+    let cache = state.price_cache.read().await;
+    let prices = cache.prices.values().cloned().collect();
+    let submission_states = token_submission_states(&state, &cache);
+    let last_full_submission = cache.last_full_submission.and_then(system_time_secs);
+    drop(cache);
     let preflight = state.preflight_result.read().await.clone();
     let recent_errors: Vec<_> = state
         .failures
@@ -119,13 +169,9 @@ pub async fn oracle_status(
         .await
         .ok()
         .and_then(Result::ok)
-        .map(|stroops| stroops as f64 / crate::keeper::XLM_IN_STROOPS as f64);
-    )
-    .await
-    .ok()
-    // Spendable balance, net of the account reserve, the same figure
-    // /keeper/balance reports and the minimum is checked against (#1447).
-    .map(|balance| crate::keeper::stroops_to_xlm(balance.spendable_stroops));
+        // Spendable balance, net of the account reserve, the same figure
+        // /keeper/balance reports and the minimum is checked against (#1447).
+        .map(|balance| crate::keeper::stroops_to_xlm(balance.spendable_stroops));
 
     Json(OracleStatusResponse {
         last_cycle_time,
@@ -139,6 +185,8 @@ pub async fn oracle_status(
         submit_failures: metrics.submit_failures,
         last_price_cycle_secs_ago,
         last_keeper_cycle_secs_ago,
+        last_full_submission,
+        submission_states,
     })
 }
 
@@ -272,6 +320,34 @@ pub async fn metrics(_auth: AdminAuth, State(state): State<Arc<AppState>>) -> Re
             "oracle_last_set_prices_timestamp_seconds {}\n",
             last_ts
         ));
+
+        // Heartbeat timestamp. `last_updated` above is set when a price is
+        // *cached*, which can keep moving even when nothing is submitted.
+        prometheus.push_str("# HELP oracle_last_full_submission_timestamp_seconds Unix timestamp of the last full set_prices heartbeat\n");
+        prometheus.push_str("# TYPE oracle_last_full_submission_timestamp_seconds gauge\n");
+        let last_full_ts = cache
+            .last_full_submission
+            .and_then(system_time_secs)
+            .unwrap_or(0);
+        prometheus.push_str(&format!(
+            "oracle_last_full_submission_timestamp_seconds {}\n",
+            last_full_ts
+        ));
+
+        // Relative distance from the last published median, so a stall just
+        // below submit_threshold_bps is visible before it becomes an outage.
+        let submission_states = token_submission_states(&state, &cache);
+        prometheus.push_str("# HELP oracle_price_delta_bps Basis points between the last submitted median and the current median\n");
+        prometheus.push_str("# TYPE oracle_price_delta_bps gauge\n");
+        for (symbol, state) in &submission_states {
+            if let Some(delta) = state.delta_bps {
+                prometheus.push_str(&format!(
+                    "oracle_price_delta_bps{{symbol=\"{}\"}} {}\n",
+                    crate::metrics::escape_label_value(symbol),
+                    delta
+                ));
+            }
+        }
     }
 
     // Pending work counts from KeeperStatus (#1267).
@@ -347,7 +423,10 @@ pub async fn keeper_balance(
             budget_secs = ADMIN_EXTERNAL_BUDGET.as_secs(),
             "keeper balance lookup exceeded its budget"
         );
-        return Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"));
+        return Err(ApiError::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream_timeout",
+        ));
     };
 
     match result {
@@ -557,6 +636,79 @@ mod tests {
         assert!(!blacklist.contains_key(&key));
         assert!(!freezes.contains_key(&key));
         assert!(!executions.contains_key(&key));
+    }
+
+    fn submission_test_state() -> Arc<AppState> {
+        let mut config = Config::default_for_tests();
+        config.price_feed.tokens.push(shared_config::TokenConfig {
+            symbol: "TUSDC".to_string(),
+            stellar_address: "GADDR".to_string(),
+            submit_threshold_bps: 10,
+            ..Default::default()
+        });
+        Arc::new(AppState::new(Arc::new(config)))
+    }
+
+    fn cached_price(median: i128) -> CachedPrice {
+        CachedPrice {
+            token_address: "GADDR".to_string(),
+            symbol: "TUSDC".to_string(),
+            display_symbol: "USDC".to_string(),
+            keeper_index: 0,
+            min: median,
+            max: median,
+            median,
+            timestamp: 0,
+            ledger_seq: 1,
+            sources_used: vec!["test".to_string()],
+            signature: String::new(),
+        }
+    }
+
+    async fn seed_submission_state(state: &AppState) {
+        let mut cache = state.price_cache.write().await;
+        cache.last_full_submission =
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000));
+        cache.last_submitted_medians = Some(BTreeMap::from([("gaddr".to_string(), 10_000i128)]));
+        cache
+            .prices
+            .insert("gaddr".to_string(), cached_price(10_100));
+    }
+
+    #[tokio::test]
+    async fn oracle_status_exposes_last_submission_state() {
+        let state = submission_test_state();
+        seed_submission_state(&state).await;
+
+        let Json(body) = oracle_status(AdminAuth, State(Arc::clone(&state))).await;
+
+        assert_eq!(body.last_full_submission, Some(1_700_000_000));
+        let entry = &body.submission_states["TUSDC"];
+        assert_eq!(entry.last_submitted_median, Some(10_000));
+        assert_eq!(entry.current_median, Some(10_100));
+        assert_eq!(entry.delta_bps, Some(100), "1% move = 100 bps");
+        assert_eq!(entry.threshold_bps, 10);
+    }
+
+    #[tokio::test]
+    async fn metrics_exposes_last_submission_and_price_delta_gauges() {
+        let state = submission_test_state();
+        seed_submission_state(&state).await;
+
+        let response = metrics(AdminAuth, State(state)).await;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(
+            body.contains("oracle_last_full_submission_timestamp_seconds 1700000000"),
+            "{body}"
+        );
+        assert!(
+            body.contains("oracle_price_delta_bps{symbol=\"TUSDC\"} 100"),
+            "{body}"
+        );
     }
 
     // #1267 — the gauges appended after `to_prometheus` are part of the

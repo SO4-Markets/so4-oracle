@@ -318,7 +318,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(prices::failed_submissions),
         )
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found") })
-        .layer(axum::middleware::from_fn_with_state(state.clone(), track_metrics))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            track_metrics,
+        ))
         // Hard cap on concurrent requests (#1259). 512 is well above a single
         // Fly machine's realistic per-instance concurrency while still
         // bounding memory. Probes are merged in below, outside this layer.
@@ -360,22 +363,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             HeaderValue::from_static("no-store"),
         ))
         .layer(axum::middleware::from_fn(map_method_not_allowed))
-        // Request timeout: return 408 if a handler takes longer than 30 s
-        // (#1259). Applied outside the trace layer so the span captures the
-        // timeout as a 408, not as an internal server error.
+        // Request timeout: return 408 if a handler takes longer than
+        // REQUEST_TIMEOUT (#1259, #1452). Applied outside the trace layer so
+        // the span captures the timeout as a 408, not as an internal server error.
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(30),
+            REQUEST_TIMEOUT,
         ))
         // Hard cap on concurrent requests (#1259). Excess requests receive
         // 503 immediately rather than queuing, keeping /health and /ready
         // reachable even under load. 512 is well above a single Fly machine's
         // realistic per-instance concurrency while still bounding memory.
         .layer(ConcurrencyLimitLayer::new(512))
-        // Request timeout: return 408 if a handler takes longer than
-        // REQUEST_TIMEOUT (#1259, #1452). Applied outside the trace layer so
-        // the span captures the timeout as a 408, not as an internal error.
-        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
 }
 
 #[cfg(test)]
@@ -442,7 +441,8 @@ mod tests {
             .map(|v| v.to_str().unwrap().to_ascii_lowercase())
             .collect();
         assert!(
-            vary.iter().any(|v| v.split(',').any(|h| h.trim() == "origin")),
+            vary.iter()
+                .any(|v| v.split(',').any(|h| h.trim() == "origin")),
             "Vary must include Origin on /prices, got {vary:?}"
         );
 
@@ -455,9 +455,14 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert!(
-            response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none(),
+            response
+                .headers()
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none(),
             "admin route must not carry CORS headers"
         );
+    }
+
     // #1453, #1454 — probes sit outside the metrics and concurrency layers,
     // so a probe flood neither records HTTP metrics nor takes permits. Every
     // other route is still recorded.
@@ -559,7 +564,7 @@ mod tests {
     #[tokio::test]
     async fn test_secrets_redacted_from_logs_and_metrics() {
         let mut config = Config::default_for_tests();
-        let test_secret = "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let test_secret = "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV";
         let test_admin_token = "admin_super_secret_token_123";
         // #1472 — only the decoded key is kept; the raw strkey is dropped at
         // config load and must never resurface in logs or metrics.
@@ -634,6 +639,11 @@ mod tests {
             .expect("oracle/README.md has an Endpoints section");
         let table = &readme[table_start..];
         for route in routes {
+            // `/unmatched` is a metrics label for requests that matched no
+            // registered route, not an endpoint the router serves.
+            if route == "/unmatched" {
+                continue;
+            }
             assert!(
                 table.contains(route),
                 "route {route} from build_router is missing from the endpoint table in oracle/README.md"

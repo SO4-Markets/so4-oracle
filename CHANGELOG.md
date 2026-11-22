@@ -16,6 +16,8 @@ under `[Unreleased]` (see `AGENTS.md` §3).
 ## [Unreleased]
 
 ### Added
+- `CycleSummary` now returns the pending order/deposit/withdrawal counts to callers. `KeeperCycleTally` carries them into `/metrics` as `oracle_keeper_cycle_pending_keys{kind=…}` and the new `oracle_keeper_cycle_all_failed_total` counter fires when work was pending but nothing succeeded.
+- `/oracle/status` now exposes `last_full_submission` and a per-token `{last_submitted_median, current_median, delta_bps, threshold_bps}` block; `/metrics` adds `oracle_last_full_submission_timestamp_seconds` and `oracle_price_delta_bps{symbol=…}` so a stalled submission heartbeat can be diagnosed.
 - Boot-time bounds for `PRICE_LOOP_MS` / `KEEPER_LOOP_MS` (250–60000 ms, and `PRICE_LOOP_MS` below every token's `stale_after_seconds`), a `KEEPER_INDEX` cap of 255, and `PYTH_API_KEY` shape validation; startup warnings for pyth tokens with no key and for tokens one source outage away from two-source aggregation; the `oracle_token_sources_available` gauge (#1464, #1465, #1466, #1467)
 - `rust-toolchain.toml` to pin stable toolchain for reproducible builds (#979)
 - Package metadata (version, edition, license, repository, description) to workspace `Cargo.toml` (#977)
@@ -32,6 +34,9 @@ under `[Unreleased]` (see `AGENTS.md` §3).
 - `docs/README.md` index linked from `README.md`; plan documents carry a `Status:` line and `plan.md` moved to `docs/REWRITE_PLAN.md` (#1433, #1434)
 
 ### Fixed
+- Coinbase's request shape is no longer inferred from substrings in the base URL: the currency is always sent as `?currency=…`, so a plain `http://host:port/path` override produces `/path?currency=BTC` instead of `/pathBTC` (#1264).
+- `retry_with_backoff`'s non-retryable branch now has direct coverage: an error whose `is_retryable()` is false invokes the closure exactly once and is returned unchanged (#1227).
+- Repaired the broken build/test baseline: missing delimiters in `config.rs`, `http.rs`, `keeper_loop.rs` and `api/mod.rs`, a stray fragment in `/oracle/status`, stale signing-key/aggregator APIs in tests, and an invalid test keeper strkey.
 - The keeper's in-flight-key decision now branches on the `SubmitError`
   variant instead of `error.contains("not confirmed after")` (#719)
 - `TESTNET_PASSPHRASE` corrected to `Test SDF Network ; September 2015`; the

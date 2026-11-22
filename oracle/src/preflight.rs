@@ -60,7 +60,12 @@ pub async fn preflight(config: &Config) -> PreflightResult {
 
 fn check_keeper_key(config: &Config) -> PreflightCheck {
     const NAME: &str = "keeper_account_matches_secret_key";
-    let derived = derive_keeper_account_id(config.keeper_secret_key.as_str());
+    // The secret is decoded once at config load (#1226), so derive the account
+    // id from the cached signing key instead of re-parsing a raw strkey.
+    let derived = match config.keeper_secret_key.as_deref() {
+        Some(key) => Ok(account_id_from_signing_key(key)),
+        None => Err("KEEPER_SECRET_KEY is not configured".to_string()),
+    };
     match derived {
         Ok(account_id) if account_id == config.keeper_account_id => PreflightCheck {
             name: NAME,
@@ -86,24 +91,11 @@ fn check_keeper_key(config: &Config) -> PreflightCheck {
     }
 }
 
-fn derive_keeper_account_id(secret_key: &str) -> Result<String, String> {
-    let seed = stellar_strkey::ed25519::PrivateKey::from_string(secret_key)
-        .map_err(|e| format!("invalid KEEPER_SECRET_KEY strkey: {e}"))?
-        .0
-        .to_vec();
-    if seed.len() != 32 {
-        return Err(format!(
-            "KEEPER_SECRET_KEY must be 32 bytes, got {}",
-            seed.len()
-        ));
-    }
-    let mut key_array = [0u8; 32];
-    key_array.copy_from_slice(&seed);
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_array);
-    Ok(stellar_strkey::ed25519::PublicKey(
-        signing_key.verifying_key().to_bytes(),
-    )
-    .to_string())
+fn account_id_from_signing_key(signing_key: &ed25519_dalek::SigningKey) -> String {
+    let public = stellar_strkey::ed25519::PublicKey(signing_key.verifying_key().to_bytes());
+    // stellar-strkey's `to_string` returns a heapless String; `format!` gives
+    // the owned std String this module's error/details paths expect.
+    format!("{public}")
 }
 
 async fn check_keeper_balance(config: &Config) -> PreflightCheck {

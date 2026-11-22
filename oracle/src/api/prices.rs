@@ -457,7 +457,9 @@ mod tests {
 
     async fn add_price(state: &AppState, symbol: &str) {
         let mut cache = state.price_cache.write().await;
-        cache.prices.insert(symbol.to_string(), cached_price(symbol));
+        cache
+            .prices
+            .insert(symbol.to_string(), cached_price(symbol));
     }
 
     async fn mark_cycles(state: &AppState, price: bool, keeper: bool) {
