@@ -87,11 +87,24 @@ fn sign_keeper_tx(state: &AppState, tx: &stellar_xdr::Transaction) -> Result<Str
 }
 
 const PRICE_HEARTBEAT_INTERVAL_SECS: u64 = 30;
-/// When a cycle finds no pending work, the next cycle is delayed by this
-/// multiplier relative to `keeper_loop_interval` to avoid making 4 idle
-/// RPC/Horizon calls at the configured cadence (#1281). The extra sleep is
-/// added after the normal tick so the fast path (work present) is unaffected.
-const IDLE_BACKOFF_MULTIPLIER: u32 = 4;
+
+/// Extra keeper intervals to wait after a cycle that was *genuinely idle* —
+/// no pending work was found, nothing failed, and neither the stale-price nor
+/// the low-balance gate fired. Idle is the steady state for a market with no
+/// orders, so backing off avoids hammering the reader contract with simulate
+/// calls that can only return "nothing to do".
+pub const IDLE_BACKOFF_MULTIPLIER: u32 = 4;
+
+/// Maximum number of keeper-loop intervals without a completed cycle before
+/// `/ready` reports `keeper_loop_stale`.
+///
+/// An idle cycle is followed by one normal tick **plus** `IDLE_BACKOFF_MULTIPLIER`
+/// extra ticks, i.e. `IDLE_BACKOFF_MULTIPLIER + 1` intervals between cycles.
+/// The additional factor of two leaves room for a slow cycle or timer jitter
+/// without hiding a genuinely wedged loop. Both this module and the readiness
+/// handler derive their behaviour from these constants so they cannot drift
+/// apart again.
+pub const KEEPER_STALE_THRESHOLD_MULTIPLIER: u32 = (IDLE_BACKOFF_MULTIPLIER + 1) * 2;
 
 impl std::error::Error for SequenceFetchError {}
 
@@ -120,13 +133,15 @@ pub async fn run_keeper_loop(state: Arc<AppState>) {
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             tracing::warn!("keeper balance below minimum; skipping keeper cycle");
+            // A skipped cycle is not an idle cycle; don't extend the backoff.
+            was_idle = false;
             continue;
         }
 
-        // When the previous cycle found no pending work, sleep an extra
+        // When the previous cycle was genuinely idle, sleep an extra
         // IDLE_BACKOFF_MULTIPLIER * keeper_loop_interval before running again.
-        // This cuts the 4 idle RPC calls per tick down to 4 per (multiplier+1)
-        // ticks without changing the latency for cycles that have work to do.
+        // Failed work, gated cycles and failed pending-key lookups deliberately
+        // do not back off — they must retry on the next tick.
         if was_idle {
             let backoff = state.config.keeper_loop_interval * IDLE_BACKOFF_MULTIPLIER;
             tokio::select! {
@@ -146,28 +161,16 @@ pub async fn run_keeper_loop(state: Arc<AppState>) {
         // any `in_flight_keys` entry it leaves behind is evicted by
         // `sweep_expired_in_flight_keys` or `IN_FLIGHT_EXPIRY` once the loop
         // restarts (#806).
-        let cycle_result;
-        tokio::select! {
-            r = run_keeper_cycle(Arc::clone(&state)) => { cycle_result = Some(r); }
+        let cycle_result = tokio::select! {
+            result = run_keeper_cycle(Arc::clone(&state)) => Some(result),
             _ = state.shutdown_token.cancelled() => {
                 tracing::info!("keeper_loop shutting down mid-cycle");
                 break;
             }
-        }
-        was_idle = cycle_result.as_ref().is_some_and(is_idle_cycle);
-    }
-}
+        };
 
-/// Whether a finished cycle found no pending work, so the loop should add the
-/// idle backoff before the next one (#1281). A failed cycle is never idle: it
-/// retries at the normal cadence rather than backing off (#1417).
-fn is_idle_cycle(result: &Result<CycleSummary, String>) -> bool {
-    matches!(
-        result,
-        Ok(s) if s.orders_executed == 0
-            && s.deposits_executed == 0
-            && s.withdrawals_executed == 0
-    )
+        was_idle = matches!(&cycle_result, Some(Ok(summary)) if summary.was_idle());
+    }
 }
 
 /// Runs one keeper cycle under a fresh cycle id (#1455), recorded on every log
@@ -263,6 +266,15 @@ pub struct CycleSummary {
     pub deposits_executed: usize,
     pub withdrawals_executed: usize,
     pub errors: usize,
+    /// Pending keys found at the start of the cycle, before any execution was
+    /// attempted. These are what distinguish "nothing to do" from "tried and
+    /// failed" — the latter has all three `*_executed` counts at zero too.
+    pub pending_orders: usize,
+    pub pending_deposits: usize,
+    pub pending_withdrawals: usize,
+    /// One or more pending-key lookups failed, so the counts above are a lower
+    /// bound rather than a trustworthy "no work" signal.
+    pub pending_keys_unavailable: bool,
     /// No non-stale price was available, so `set_prices` and order execution
     /// were skipped. Deposits/withdrawals still run (#1145).
     pub prices_stale: bool,
@@ -272,16 +284,41 @@ pub struct CycleSummary {
 }
 
 impl CycleSummary {
-    /// A cycle that executed nothing because submissions were gated.
+    /// A zero-work summary with the two gates set; used by the pure-logic tests
+    /// below. Production paths construct `CycleSummary` explicitly so the
+    /// pending-key counts survive gating decisions.
+    #[cfg(test)]
     fn skipped(prices_stale: bool, keeper_balance_low: bool) -> Self {
         Self {
             orders_executed: 0,
             deposits_executed: 0,
             withdrawals_executed: 0,
             errors: 0,
+            pending_orders: 0,
+            pending_deposits: 0,
+            pending_withdrawals: 0,
+            pending_keys_unavailable: false,
             prices_stale,
             keeper_balance_low,
         }
+    }
+
+    /// True only when the cycle had nothing to do. "Executed nothing" alone is
+    /// not enough: pending work that all failed, gated cycles, and failed
+    /// pending-key lookups also leave every `*_executed` count at zero, and
+    /// backing off in those cases would delay recovery precisely when the
+    /// keeper is falling behind.
+    pub fn was_idle(&self) -> bool {
+        self.orders_executed == 0
+            && self.deposits_executed == 0
+            && self.withdrawals_executed == 0
+            && self.pending_orders == 0
+            && self.pending_deposits == 0
+            && self.pending_withdrawals == 0
+            && self.errors == 0
+            && !self.pending_keys_unavailable
+            && !self.prices_stale
+            && !self.keeper_balance_low
     }
 }
 
@@ -397,6 +434,11 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         get_pending_keys(&state, "get_deposit_count", "get_deposit_keys"),
         get_pending_keys(&state, "get_withdrawal_count", "get_withdrawal_keys"),
     );
+    // A failed lookup is not evidence of an idle market — it means the counts
+    // below are a lower bound. Remember it so `was_idle()` never backs off on
+    // a cycle whose pending-work query failed.
+    let pending_keys_unavailable =
+        order_result.is_err() || deposit_result.is_err() || withdrawal_result.is_err();
     let order_keys = order_result.unwrap_or_else(|e| {
         warn!(error = %e, "get_pending_keys(orders) failed, skipping orders this cycle");
         Vec::new()
@@ -417,9 +459,22 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
         keeper_status.pending_withdrawals = withdrawal_keys.len();
     }
 
+    let mut summary = CycleSummary {
+        orders_executed: 0,
+        deposits_executed: 0,
+        withdrawals_executed: 0,
+        errors: 0,
+        pending_orders: order_keys.len(),
+        pending_deposits: deposit_keys.len(),
+        pending_withdrawals: withdrawal_keys.len(),
+        pending_keys_unavailable,
+        prices_stale,
+        keeper_balance_low,
+    };
+
     if order_keys.is_empty() && deposit_keys.is_empty() && withdrawal_keys.is_empty() {
         info!("no_pending_work");
-        return Ok(CycleSummary::skipped(prices_stale, keeper_balance_low));
+        return Ok(summary);
     }
 
     info!(
@@ -434,10 +489,8 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
 
     if keeper_balance_low {
         warn!("keeper_balance_below_min; skipping all on-chain submissions this cycle");
-        return Ok(CycleSummary::skipped(prices_stale, keeper_balance_low));
+        return Ok(summary);
     }
-
-    let mut summary = CycleSummary::skipped(prices_stale, keeper_balance_low);
 
     // Cached account sequence, shared across every execute_handler call made
     // during this cycle so it's fetched via RPC at most once instead of once
@@ -1213,6 +1266,20 @@ fn poll_timeout_hash(error: &str) -> Option<String> {
     let start = error.find("(hash: ")? + "(hash: ".len();
     let end = error[start..].find(')')? + start;
     let hash = &error[start..end];
+/// Extract the transaction hash embedded in a poll-timeout error message.
+///
+/// `SubmitError::PollTimeout` renders it as `(hash: <64 hex chars>)`; an
+/// absent, empty or malformed hash yields `None` (#721).
+/// Recover the transaction hash embedded in a poll-timeout error message, if
+/// any. Used so `/oracle/failed-submissions` can hand operators a hash to look
+/// up for ambiguous outcomes (#721).
+#[cfg(test)]
+fn poll_timeout_hash(error: &str) -> Option<String> {
+    const MARKER: &str = "(hash: ";
+    let rest = &error[error.find(MARKER)? + MARKER.len()..];
+    let hash: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+    (hash.len() == 64).then_some(hash)
+    let hash = &rest[..rest.find(')')?];
     (!hash.is_empty()).then(|| hash.to_string())
 }
 
@@ -1406,8 +1473,10 @@ async fn set_price_batch_on_chain(
         vec![prices_scval],
         state.config.set_prices_tx_fee,
         sequence,
-        None,
-        max_time,
+        tx_builder::InvokeTxOptions {
+            soroban_data: None,
+            max_time,
+        },
     )?;
 
     let signed_xdr = sign_keeper_tx(state, &tx)?;
@@ -1617,8 +1686,10 @@ async fn execute_handler(
         ],
         state.config.keeper_tx_fee,
         sequence,
-        None,
-        max_time,
+        tx_builder::InvokeTxOptions {
+            soroban_data: None,
+            max_time,
+        },
     )?;
 
     let signed_xdr = sign_keeper_tx(state, &tx)?;
@@ -1794,8 +1865,10 @@ async fn simulate_contract_call_once(
         scval_args,
         100,
         0, // sequence number is irrelevant for simulation
-        None,
-        0, // no time bound for simulation
+        tx_builder::InvokeTxOptions {
+            soroban_data: None,
+            max_time: 0, // no time bound for simulation
+        },
     )
     .map_err(SimulateError::Build)?;
 
@@ -1892,15 +1965,18 @@ async fn record_error(
     error: &str,
     tx_hash: Option<String>,
 ) {
-    state.failures.lock().await.push(FailedSubmission {
+    // Handler callers pass `execute_order:<key>` (and the deposit/withdrawal
+    // equivalents). Split the key out of the label instead of hiding it there;
+    // whole-cycle failures such as `keeper_cycle` have no key at all.
+    let (operation, key) = match operation.split_once(':') {
+        Some((operation, key)) => (operation.to_string(), Some(key.to_string())),
+        None => (operation.to_string(), None),
+    };
+    state.failures.lock().await.push(FailedSubmission::Keeper {
         at: SystemTime::now(),
-        operation: operation.to_string(),
+        operation,
         network: state.config.network.as_str().to_string(),
-        token: String::new(),
-        symbol: String::new(),
-        source: None,
-        min: 0,
-        max: 0,
+        key,
         // Carry the hash whenever the failure happened *after* submission
         // (a poll timeout), so `/oracle/failed-submissions` hands an operator
         // something to look up on a block explorer for exactly the ambiguous
@@ -2041,6 +2117,10 @@ mod tests {
             deposits_executed: deposits,
             withdrawals_executed: withdrawals,
             errors: 0,
+            pending_orders: 0,
+            pending_deposits: 0,
+            pending_withdrawals: 0,
+            pending_keys_unavailable: false,
             prices_stale: false,
             keeper_balance_low: false,
         }
@@ -2048,14 +2128,18 @@ mod tests {
 
     #[test]
     fn idle_cycle_classification() {
-        assert!(is_idle_cycle(&Ok(summary(0, 0, 0))));
-        assert!(!is_idle_cycle(&Ok(summary(1, 0, 0))));
-        assert!(!is_idle_cycle(&Ok(summary(0, 1, 0))));
-        assert!(!is_idle_cycle(&Ok(summary(0, 0, 1))));
-        // A gated cycle executed nothing, so it backs off like any idle one.
-        assert!(is_idle_cycle(&Ok(CycleSummary::skipped(true, true))));
-        // A failed cycle is not idle: it must not add the backoff.
-        assert!(!is_idle_cycle(&Err("rpc down".to_string())));
+        assert!(summary(0, 0, 0).was_idle());
+        assert!(!summary(1, 0, 0).was_idle());
+        assert!(!summary(0, 1, 0).was_idle());
+        assert!(!summary(0, 0, 1).was_idle());
+        // A gated cycle executed nothing but must NOT back off: it has to retry
+        // on the next tick so prices/low balance recover promptly.
+        assert!(!CycleSummary::skipped(true, true).was_idle());
+        // Work that was found and failed also must not back off.
+        let mut failed = summary(0, 0, 0);
+        failed.pending_orders = 20;
+        failed.errors = 20;
+        assert!(!failed.was_idle());
     }
 
     #[test]
@@ -2087,6 +2171,10 @@ mod tests {
         const {
             assert!(POST_SET_PRICES_SETTLE_MS * 10 <= KEEPER_CYCLE_TIMEOUT_SECS * 1_000);
         };
+        }
+        let settle_ms = POST_SET_PRICES_SETTLE_MS;
+        let cycle_ms = KEEPER_CYCLE_TIMEOUT_SECS.saturating_mul(1_000);
+        assert!(settle_ms.saturating_mul(10) <= cycle_ms);
     }
 
     // ── #719: the in-flight-key decision must not depend on message text ─────
@@ -2213,6 +2301,67 @@ mod tests {
         assert_eq!(parse_u32_from_result(r#"{"u32": 42}"#).unwrap(), 42);
     }
 
+    // ── idle backoff / readiness threshold ────────────────────────────────────
+
+    fn idle_summary() -> CycleSummary {
+        CycleSummary {
+            orders_executed: 0,
+            deposits_executed: 0,
+            withdrawals_executed: 0,
+            errors: 0,
+            pending_orders: 0,
+            pending_deposits: 0,
+            pending_withdrawals: 0,
+            pending_keys_unavailable: false,
+            prices_stale: false,
+            keeper_balance_low: false,
+        }
+    }
+
+    #[test]
+    fn was_idle_is_true_only_for_a_genuinely_idle_cycle() {
+        assert!(idle_summary().was_idle());
+
+        // Pending work that was found but failed to execute is not idle.
+        let mut failing = idle_summary();
+        failing.pending_orders = 20;
+        failing.errors = 20;
+        assert!(!failing.was_idle());
+
+        // Pending work that was found but skipped by a gate is not idle.
+        for (kind, count) in [("orders", 1usize), ("deposits", 1), ("withdrawals", 1)] {
+            let mut gated = idle_summary();
+            match kind {
+                "orders" => gated.pending_orders = count,
+                "deposits" => gated.pending_deposits = count,
+                _ => gated.pending_withdrawals = count,
+            }
+            assert!(!gated.was_idle(), "{kind} pending must not back off");
+        }
+
+        let mut stale = idle_summary();
+        stale.prices_stale = true;
+        assert!(!stale.was_idle());
+
+        let mut unfunded = idle_summary();
+        unfunded.keeper_balance_low = true;
+        assert!(!unfunded.was_idle());
+
+        let mut unknown = idle_summary();
+        unknown.pending_keys_unavailable = true;
+        assert!(!unknown.was_idle());
+    }
+
+    #[test]
+    fn readiness_threshold_covers_the_idle_backoff() {
+        // An idle cycle is followed by the normal tick plus the extra backoff.
+        let idle_gap = IDLE_BACKOFF_MULTIPLIER + 1;
+        assert!(
+            KEEPER_STALE_THRESHOLD_MULTIPLIER > idle_gap,
+            "/ready must not declare an idle keeper stale before its next cycle"
+        );
+    }
+
     // ── #721: poll-timeout hash recovery ────────────────────────────────────
 
     #[test]
@@ -2303,14 +2452,15 @@ mod tests {
             keeper_index: 0,
             admin_api_token: None,
             pyth_api_key: None,
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+            pyth_hermes_url: crate::pyth::PYTH_HERMES_URL.to_string(),
             min_keeper_balance_xlm: 0.0,
             set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
             keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
             price_loop_interval: Duration::from_millis(50),
             keeper_loop_interval: Duration::from_millis(50),
             price_feed: PriceFeedConfig { tokens: vec![] },
-            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
-            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         Arc::new(AppState::new(Arc::new(config)))
     }
@@ -2338,8 +2488,9 @@ mod tests {
         let failures = state.failures.lock().await;
         let recorded: Vec<_> = failures.iter().collect();
         assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].tx_hash.as_deref(), Some(hash.as_str()));
-        assert_eq!(recorded[0].operation, "execute_deposit:abcd");
+        assert_eq!(recorded[0].tx_hash(), Some(hash.as_str()));
+        assert_eq!(recorded[0].operation(), "execute_deposit");
+        assert_eq!(recorded[0].key(), Some("abcd"));
     }
 
     #[tokio::test]
@@ -2357,7 +2508,7 @@ mod tests {
         let failures = state.failures.lock().await;
         let recorded: Vec<_> = failures.iter().collect();
         assert_eq!(recorded.len(), 1);
-        assert!(recorded[0].tx_hash.is_none());
+        assert!(recorded[0].tx_hash().is_none());
     }
 
     #[tokio::test]
@@ -2433,6 +2584,9 @@ mod tests {
             keeper_index: 0,
             admin_api_token: None,
             pyth_api_key: None,
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+            pyth_hermes_url: crate::pyth::PYTH_HERMES_URL.to_string(),
             min_keeper_balance_xlm: 0.0,
             set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
             keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
@@ -2472,8 +2626,6 @@ mod tests {
                     },
                 ],
             },
-            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
-            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         let state = Arc::new(AppState::new(Arc::new(config)));
 
@@ -2587,6 +2739,9 @@ mod tests {
             keeper_index: 0,
             admin_api_token: None,
             pyth_api_key: None,
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+            pyth_hermes_url: crate::pyth::PYTH_HERMES_URL.to_string(),
             min_keeper_balance_xlm: 0.0,
             set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
             keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
@@ -2602,6 +2757,8 @@ mod tests {
                     ..Default::default()
                 }],
             },
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         Arc::new(AppState::new(Arc::new(config)))
     }
@@ -2705,12 +2862,18 @@ mod keeper_tx_tests {
     // #1411 — a cached SigningKey must sign identically to the per-call decode.
     #[test]
     fn sign_keeper_tx_uses_cached_key_when_present() {
+        const SECRET: &str = "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT";
         let mut config = Config::default_for_tests();
         let key = crate::chain::tx_builder::signing_key_from_secret(
             "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT",
         )
         .unwrap();
         config.keeper_secret_key = Some(std::sync::Arc::new(key.clone()));
+        config.keeper_secret_key = Some(std::sync::Arc::new(
+            crate::chain::tx_builder::signing_key_from_secret(SECRET).unwrap(),
+        ));
+        let key = Arc::new(ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]));
+        config.keeper_secret_key = Some(Arc::clone(&key));
         let state = AppState::new(Arc::new(config));
         assert!(state.tx_signing_key.is_some());
 
@@ -2722,6 +2885,11 @@ mod keeper_tx_tests {
             &state.config.network_passphrase,
         )
         .expect("key signing succeeds");
+            SECRET,
+            &key,
+            &state.config.network_passphrase,
+        )
+        .expect("cached-key signing succeeds");
         assert_eq!(got, expected, "signature must be byte-identical");
     }
 
@@ -2743,7 +2911,12 @@ mod keeper_tx_tests {
     fn price_batches_split_at_max_price_batch_size() {
         let cache = |n: usize| -> BTreeMap<String, CachedPrice> {
             (0..n)
-                .map(|i| (format!("k{i:03}"), threshold_price(i as i128)))
+                .map(|i| {
+                    (
+                        format!("k{i:03}"),
+                        crate::keeper_loop::tests::threshold_price(i as i128),
+                    )
+                })
                 .collect()
         };
 

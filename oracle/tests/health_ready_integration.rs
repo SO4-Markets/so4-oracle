@@ -470,6 +470,9 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
         keeper_index: 0,
         admin_api_token: Some(SecretString::new("test-admin-token".to_string())),
         pyth_api_key: None,
+        coinbase_base_url: oracle::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+        binance_base_url: oracle::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+        pyth_hermes_url: oracle::pyth::PYTH_HERMES_URL.to_string(),
         min_keeper_balance_xlm: 10.0,
         set_prices_tx_fee: oracle::config::DEFAULT_SET_PRICES_TX_FEE,
         keeper_tx_fee: oracle::config::DEFAULT_KEEPER_TX_FEE,
@@ -482,8 +485,6 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
                 "1000000000000000000000000000000",
             )],
         },
-        coinbase_base_url: oracle::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
-        binance_base_url: oracle::binance::BINANCE_TICKER_PRICE_URL.to_string(),
     });
 
     let state = Arc::new(AppState::new(config));

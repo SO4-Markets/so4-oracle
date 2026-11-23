@@ -191,6 +191,7 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
             MAX_BACKOFF_DELAY_MS,
         ),
         crate::pyth::fetch_pyth_prices(
+            &state.config.pyth_hermes_url,
             &pyth_feed_ids,
             state.config.pyth_api_key.as_ref().map(|key| key.as_str()),
         )
@@ -232,11 +233,8 @@ async fn execute_price_cycle(state: Arc<AppState>) -> (usize, usize, usize) {
         .collect();
 
     let binance_prices = if !binance_symbols.is_empty() {
-        match crate::binance::fetch_spot_prices_with_url(
-            &state.config.binance_base_url,
-            &binance_symbols,
-        )
-        .await
+        match crate::binance::fetch_spot_prices(&state.config.binance_base_url, &binance_symbols)
+            .await
         {
             Ok(results) => {
                 let map: std::collections::HashMap<String, i128> = results.into_iter().collect();
@@ -428,11 +426,15 @@ async fn build_cached_price(
         match fetch_source_with_retry(
             source,
             token,
+            &state.config,
             state.config.pyth_api_key.as_ref().map(|key| key.as_str()),
             pyth_prices,
             pyth_batch_failed,
             binance_prices,
-            &state.config.coinbase_base_url,
+            PriceSourceUrls {
+                coinbase: &state.config.coinbase_base_url,
+                binance: &state.config.binance_base_url,
+            },
         )
         .await
         {
@@ -494,25 +496,35 @@ async fn build_cached_price(
     signed_cached_price(state, token, ledger_seq, aggregate)
 }
 
+/// Configured exchange base URLs, threaded from `Config` into each fetch.
+/// Bundled into one value to keep the source-fetch helper signatures small.
+#[derive(Clone, Copy)]
+struct PriceSourceUrls<'a> {
+    coinbase: &'a str,
+    binance: &'a str,
+}
+
 async fn fetch_source_with_retry(
     source: &str,
     token: &TokenConfig,
+    config: &crate::config::Config,
     pyth_api_key: Option<&str>,
     pyth_prices: &std::collections::HashMap<String, crate::pyth::PythPriceFeed>,
     pyth_batch_failed: bool,
     binance_prices: Option<&std::collections::HashMap<String, i128>>,
-    coinbase_base_url: &str,
+    urls: PriceSourceUrls<'_>,
 ) -> Result<PriceWithObservationTime, SourceFailure> {
     crate::retry::retry_with_backoff(
         || async {
             fetch_source_price(
                 source,
                 token,
+                config,
                 pyth_api_key,
                 pyth_prices,
                 pyth_batch_failed,
                 binance_prices,
-                coinbase_base_url,
+                urls,
             )
             .await
         },
@@ -532,11 +544,12 @@ async fn fetch_source_with_retry(
 async fn fetch_source_price(
     source: &str,
     token: &TokenConfig,
+    config: &crate::config::Config,
     pyth_api_key: Option<&str>,
     pyth_prices: &std::collections::HashMap<String, crate::pyth::PythPriceFeed>,
     pyth_batch_failed: bool,
     binance_prices: Option<&std::collections::HashMap<String, i128>>,
-    coinbase_base_url: &str,
+    urls: PriceSourceUrls<'_>,
 ) -> Result<PriceWithObservationTime, PriceSourceError> {
     let now = crate::current_timestamp_secs();
     match source {
@@ -561,9 +574,16 @@ async fn fetch_source_price(
             } else {
                 // Batch request failed or no batch was made — fall back to a
                 // single-symbol request so this token still gets a price.
-                let results = crate::binance::fetch_spot_prices(std::slice::from_ref(symbol))
-                    .await
-                    .map_err(PriceSourceError::Binance)?;
+                let results = crate::binance::fetch_spot_prices(
+                    &config.binance_base_url,
+                    std::slice::from_ref(symbol),
+                )
+                .await
+                .map_err(PriceSourceError::Binance)?;
+                let results =
+                    crate::binance::fetch_spot_prices(urls.binance, std::slice::from_ref(symbol))
+                        .await
+                        .map_err(PriceSourceError::Binance)?;
                 results
                     .into_iter()
                     .find(|(got_symbol, _)| got_symbol == symbol)
@@ -581,7 +601,8 @@ async fn fetch_source_price(
                 .coinbase_symbol
                 .as_ref()
                 .ok_or_else(|| PriceSourceError::Config("missing coinbase_symbol".to_string()))?;
-            crate::coinbase::fetch_spot_price_with_url(coinbase_base_url, symbol)
+            crate::coinbase::fetch_spot_price(&config.coinbase_base_url, symbol)
+            crate::coinbase::fetch_spot_price_with_url(urls.coinbase, symbol)
                 .await
                 .map(|price| PriceWithObservationTime {
                     price,
@@ -626,7 +647,7 @@ async fn fetch_source_price(
                     feed_id = %feed_id,
                     "Pyth feed not found in batch, falling back to individual request"
                 );
-                crate::pyth::fetch_pyth_prices(&[feed_id], pyth_api_key)
+                crate::pyth::fetch_pyth_prices(&config.pyth_hermes_url, &[feed_id], pyth_api_key)
                     .await
                     .and_then(|mut feeds| {
                         feeds.remove(feed_id).ok_or_else(|| {
@@ -734,7 +755,7 @@ async fn record_error_with_context(
     error: impl Into<String>,
     ctx: ErrorContext,
 ) {
-    state.failures.lock().await.push(FailedSubmission {
+    state.failures.lock().await.push(FailedSubmission::Price {
         at: SystemTime::now(),
         operation: operation.into(),
         network: state.config.network.as_str().to_string(),
@@ -756,6 +777,13 @@ mod tests {
     use crate::config::{Config, Network, PriceFeedConfig};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Duration;
+
+    fn test_urls() -> PriceSourceUrls<'static> {
+        PriceSourceUrls {
+            coinbase: crate::coinbase::COINBASE_EXCHANGE_RATES_URL,
+            binance: crate::binance::BINANCE_TICKER_PRICE_URL,
+        }
+    }
 
     fn test_state(token: TokenConfig) -> Arc<AppState> {
         let config = Config {
@@ -782,6 +810,9 @@ mod tests {
             keeper_index: 0,
             admin_api_token: None,
             pyth_api_key: None,
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+            pyth_hermes_url: crate::pyth::PYTH_HERMES_URL.to_string(),
             min_keeper_balance_xlm: 0.0,
             set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
             keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
@@ -790,8 +821,6 @@ mod tests {
             price_feed: PriceFeedConfig {
                 tokens: vec![token],
             },
-            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
-            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         Arc::new(AppState::new(Arc::new(config)))
     }
@@ -854,9 +883,13 @@ mod tests {
         let state = test_state(token.clone());
         let no_pyth = std::collections::HashMap::new();
 
-        let failure = fetch_source_with_retry("fixed", &token, None, &no_pyth, false, None, "")
-            .await
-            .unwrap_err();
+        let config = crate::config::Config::default_for_tests();
+        let failure =
+            fetch_source_with_retry("fixed", &token, &config, None, &no_pyth, false, None)
+        let failure =
+            fetch_source_with_retry("fixed", &token, None, &no_pyth, false, None, test_urls())
+                .await
+                .unwrap_err();
         assert_eq!(failure.source, "fixed");
         assert_eq!(failure.symbol, "TUSDC");
         assert_eq!(failure.token, "CTOKEN");
@@ -877,6 +910,21 @@ mod tests {
         assert_eq!(entry.symbol, "TUSDC");
         assert_eq!(entry.token, "CTOKEN");
         assert_eq!(entry.ledger_seq, 7);
+        assert_eq!(entry.operation(), "source:TUSDC:fixed");
+        let FailedSubmission::Price {
+            source,
+            symbol,
+            token,
+            ledger_seq,
+            ..
+        } = entry
+        else {
+            panic!("expected a price failure record");
+        };
+        assert_eq!(source.as_deref(), Some("fixed"));
+        assert_eq!(symbol, "TUSDC");
+        assert_eq!(token, "CTOKEN");
+        assert_eq!(*ledger_seq, 7);
     }
 
     // ── #1416: unit coverage for the pure parts of the price path ───────────
@@ -976,9 +1024,14 @@ mod tests {
         let no_pyth = std::collections::HashMap::new();
         let started = tokio::time::Instant::now();
 
-        let failure = fetch_source_with_retry("nope", &token, None, &no_pyth, false, None, "")
+        let config = crate::config::Config::default_for_tests();
+        let failure = fetch_source_with_retry("nope", &token, &config, None, &no_pyth, false, None)
             .await
             .unwrap_err();
+        let failure =
+            fetch_source_with_retry("nope", &token, None, &no_pyth, false, None, test_urls())
+                .await
+                .unwrap_err();
 
         assert!(matches!(failure.error, PriceSourceError::Unsupported(_)));
         assert_eq!(started.elapsed(), Duration::ZERO);
@@ -992,9 +1045,14 @@ mod tests {
         let started = tokio::time::Instant::now();
 
         // Batch failed and the feed is absent: a retryable network error.
-        let failure = fetch_source_with_retry("pyth", &token, None, &no_pyth, true, None, "")
+        let config = crate::config::Config::default_for_tests();
+        let failure = fetch_source_with_retry("pyth", &token, &config, None, &no_pyth, true, None)
             .await
             .unwrap_err();
+        let failure =
+            fetch_source_with_retry("pyth", &token, None, &no_pyth, true, None, test_urls())
+                .await
+                .unwrap_err();
 
         assert!(matches!(
             failure.error,
@@ -1030,14 +1088,15 @@ mod tests {
             keeper_index: 0,
             admin_api_token: None,
             pyth_api_key: None,
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+            pyth_hermes_url: crate::pyth::PYTH_HERMES_URL.to_string(),
             min_keeper_balance_xlm: 0.0,
             set_prices_tx_fee: crate::config::DEFAULT_SET_PRICES_TX_FEE,
             keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
             price_loop_interval: Duration::from_millis(50),
             keeper_loop_interval: Duration::from_millis(50),
             price_feed: PriceFeedConfig { tokens: vec![] },
-            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
-            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         Arc::new(AppState::new(Arc::new(config)))
     }

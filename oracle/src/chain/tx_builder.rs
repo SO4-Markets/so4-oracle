@@ -25,6 +25,16 @@ pub const TX_MAX_TIME_SECS: u64 = 60;
     clippy::too_many_arguments,
     reason = "parameters mirror the independent Soroban transaction inputs at every call site"
 )]
+#[allow(clippy::too_many_arguments)]
+/// Soroban-specific options for [`build_invoke_tx`], grouped to keep the
+/// constructor's argument count within clippy's limit.
+pub struct InvokeTxOptions {
+    pub soroban_data: Option<SorobanTransactionData>,
+    /// Unix timestamp of the transaction's hard deadline. `0` omits time
+    /// bounds (e.g. for simulation calls where sequence is 0).
+    pub max_time: u64,
+}
+
 pub fn build_invoke_tx(
     source_account: &str,
     contract_id: &str,
@@ -32,8 +42,7 @@ pub fn build_invoke_tx(
     args: Vec<ScVal>,
     fee: u32,
     sequence: u64,
-    soroban_data: Option<SorobanTransactionData>,
-    max_time: u64,
+    options: InvokeTxOptions,
 ) -> Result<Transaction, String> {
     let source_muxed = account_strkey_to_muxed(source_account)?;
     let contract_addr = strkey_to_sc_address(contract_id)?;
@@ -64,15 +73,15 @@ pub fn build_invoke_tx(
         .try_into()
         .map_err(|e| format!("failed to build operations VecM: {e}"))?;
 
-    let ext = match soroban_data {
+    let ext = match options.soroban_data {
         Some(data) => TransactionExt::V1(data),
         None => TransactionExt::V0,
     };
 
-    let cond = if max_time > 0 {
+    let cond = if options.max_time > 0 {
         Preconditions::Time(TimeBounds {
             min_time: TimePoint(0),
-            max_time: TimePoint(max_time),
+            max_time: TimePoint(options.max_time),
         })
     } else {
         Preconditions::None
@@ -203,6 +212,49 @@ fn sha256_hash(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use ed25519_dalek::{SigningKey, Verifier, VerifyingKey};
+    use stellar_xdr::ReadXdr;
+
+    fn decode_envelope(xdr: &str) -> TransactionV1Envelope {
+        let bytes = STANDARD.decode(xdr).expect("envelope must be valid base64");
+        match TransactionEnvelope::from_xdr(bytes, Limits::none())
+            .expect("envelope must be valid XDR")
+        {
+            TransactionEnvelope::Tx(v1) => v1,
+            other => panic!("expected a v1 transaction envelope, got {other:?}"),
+        }
+    }
+
+    /// Rebuild the signing payload exactly as the network verifier does and
+    /// check the decorated signature against `verifying_key`.
+    fn signature_verifies_under(
+        envelope: &TransactionV1Envelope,
+        tx: &Transaction,
+        verifying_key: &VerifyingKey,
+        passphrase: &str,
+    ) -> bool {
+        let payload = TransactionSignaturePayload {
+            network_id: stellar_xdr::Hash(compute_network_id(passphrase)),
+            tagged_transaction: TransactionSignaturePayloadTaggedTransaction::Tx(tx.clone()),
+        };
+        let payload_bytes = payload.to_xdr(Limits::none()).unwrap();
+        let payload_hash = sha256_hash(&payload_bytes);
+
+        let sig_bytes: [u8; 64] = envelope.signatures[0]
+            .signature
+            .0
+            .as_slice()
+            .try_into()
+            .expect("decorated signature must be 64 bytes");
+        verifying_key
+            .verify(
+                &payload_hash,
+                &ed25519_dalek::Signature::from_bytes(&sig_bytes),
+            )
+            .is_ok()
+    }
 
     #[test]
     fn test_build_invoke_tx_produces_valid_transaction() {
@@ -213,8 +265,10 @@ mod tests {
             vec![ScVal::Void],
             100,
             1,
-            None,
-            0,
+            InvokeTxOptions {
+                soroban_data: None,
+                max_time: 0,
+            },
         )
         .unwrap();
 
@@ -234,8 +288,10 @@ mod tests {
             vec![ScVal::Void],
             100,
             1,
-            None,
-            max_time,
+            InvokeTxOptions {
+                soroban_data: None,
+                max_time,
+            },
         )
         .unwrap();
 
@@ -248,10 +304,15 @@ mod tests {
         );
     }
 
+    /// `sign_transaction` produces the envelope for every transaction this
+    /// service submits. Assert the whole contract: exact transaction bytes,
+    /// signature hint, signature over the network-id-derived payload, and
+    /// rejection under a different passphrase (the MAINNET_PASSPHRASE bug
+    /// class this repo has already shipped).
     #[test]
-    fn test_sign_transaction_produces_base64() {
-        use base64::Engine;
-
+    fn test_sign_transaction_signs_the_given_tx_for_the_given_network() {
+        let secret_hex = "1111111111111111111111111111111111111111111111111111111111111111";
+        let passphrase = "Test SDF Network ; September 2015";
         let tx = build_invoke_tx(
             "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY",
@@ -259,23 +320,62 @@ mod tests {
             vec![ScVal::Void],
             100,
             1,
+            InvokeTxOptions {
+                soroban_data: None,
+                max_time: 0,
+            },
+        )
+        .unwrap();
+
+        let xdr = sign_transaction(&tx, secret_hex, passphrase).unwrap();
+        let envelope = decode_envelope(&xdr);
+
+        assert_eq!(
+            envelope.tx, tx,
+            "envelope must wrap exactly the transaction that was passed in"
+        );
+        assert_eq!(envelope.signatures.len(), 1);
+
+        let key_bytes: [u8; 32] = hex::decode(secret_hex).unwrap().try_into().unwrap();
+        let verifying_key = SigningKey::from_bytes(&key_bytes).verifying_key();
+        let pubkey = verifying_key.to_bytes();
+        assert_eq!(
+            envelope.signatures[0].hint,
+            SignatureHint([pubkey[28], pubkey[29], pubkey[30], pubkey[31]]),
+            "signature hint must be the last four bytes of the signer's public key"
+        );
+
+        assert!(
+            signature_verifies_under(&envelope, &tx, &verifying_key, passphrase),
+            "signature must verify over the submitted tx with the expected network id"
+        );
+
+        // A signature over a different payload must not verify, even with the
+        // correct key — catches signing the wrong tx or the wrong network.
+        let different_tx = build_invoke_tx(
+            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY",
+            "set_prices",
+            vec![ScVal::Void],
+            100,
+            2,
             None,
             0,
         )
         .unwrap();
-
-        let xdr = sign_transaction(
-            &tx,
-            "1111111111111111111111111111111111111111111111111111111111111111",
-            "Test SDF Network ; September 2015",
-        )
-        .unwrap();
-
-        assert!(!xdr.is_empty());
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(&xdr)
-            .unwrap();
-        assert!(!decoded.is_empty());
+        assert!(
+            !signature_verifies_under(&envelope, &different_tx, &verifying_key, passphrase),
+            "signature must not verify against a different transaction"
+        );
+        assert!(
+            !signature_verifies_under(
+                &envelope,
+                &tx,
+                &verifying_key,
+                "Public Global Stellar Network ; September 2015",
+            ),
+            "signature must not verify under a different network passphrase"
+        );
     }
 
     #[test]
@@ -287,8 +387,10 @@ mod tests {
             vec![ScVal::Void],
             100,
             1,
-            None,
-            0,
+            InvokeTxOptions {
+                soroban_data: None,
+                max_time: 0,
+            },
         );
         assert!(err.is_err());
     }
@@ -314,6 +416,19 @@ mod tests {
         assert_eq!(
             actual, expected,
             "MAINNET_PASSPHRASE in network_config.rs does not match the well-known mainnet passphrase"
+        );
+    }
+
+    /// `FUTURENET_PASSPHRASE` is exported even though `Config` currently only
+    /// resolves testnet/mainnet, which makes it an easy constant to edit by
+    /// hand. Pin its network-id hash so a silent change is caught here too.
+    #[test]
+    fn compute_network_id_matches_known_futurenet_hash() {
+        let expected = sha256_hash(b"Test SDF Futurenet ; October 2022");
+        let actual = compute_network_id(crate::network_config::FUTURENET_PASSPHRASE);
+        assert_eq!(
+            actual, expected,
+            "FUTURENET_PASSPHRASE in network_config.rs does not match the well-known futurenet passphrase"
         );
     }
 }

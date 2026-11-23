@@ -64,14 +64,39 @@ fn check_keeper_key(config: &Config) -> PreflightCheck {
         Some(key) => Ok(derive_keeper_account_id(key)),
         None => Err("KEEPER_SECRET_KEY is not configured".to_string()),
     };
+    // `KEEPER_SECRET_KEY` is decoded once at config load (#1472/1473), so a
+    // missing key is already a boot failure — report it as a hard check here
+    // rather than parsing the strkey again.
+    let Some(signing_key) = config.keeper_secret_key.as_deref() else {
+        return PreflightCheck {
+            name: NAME,
+            ok: false,
+            hard: true,
+            detail: "KEEPER_SECRET_KEY is not configured".to_string(),
+        };
+    };
+    let raw = signing_key.verifying_key().to_bytes();
+    let public_bytes: [u8; 32] = core::array::from_fn(|i| raw[i]);
+    // `PublicKey::to_string()` returns strkey's fixed-capacity string type;
+    // format! gives us a plain String comparable with Config's field.
+    let account_id = format!("{}", stellar_strkey::ed25519::PublicKey(public_bytes));
+    if account_id == config.keeper_account_id {
+        PreflightCheck {
+    let derived = config
+        .keeper_secret_key
+        .as_ref()
+        .map(|key| derive_keeper_account_id(key));
     match derived {
-        Ok(account_id) if account_id == config.keeper_account_id => PreflightCheck {
+        Some(Ok(account_id)) if account_id == config.keeper_account_id => PreflightCheck {
             name: NAME,
             ok: true,
             hard: true,
             detail: format!("KEEPER_ACCOUNT_ID matches derived key {account_id}"),
+        }
+    } else {
+        PreflightCheck {
         },
-        Ok(account_id) => PreflightCheck {
+        Some(Ok(account_id)) => PreflightCheck {
             name: NAME,
             ok: false,
             hard: true,
@@ -79,12 +104,20 @@ fn check_keeper_key(config: &Config) -> PreflightCheck {
                 "KEEPER_ACCOUNT_ID {} does not match KEEPER_SECRET_KEY-derived account {}",
                 config.keeper_account_id, account_id
             ),
+        }
+    }
         },
-        Err(error) => PreflightCheck {
+        Some(Err(error)) => PreflightCheck {
             name: NAME,
             ok: false,
             hard: true,
             detail: error,
+        },
+        None => PreflightCheck {
+            name: NAME,
+            ok: false,
+            hard: true,
+            detail: "KEEPER_SECRET_KEY is not configured".to_string(),
         },
     }
 }
@@ -94,6 +127,9 @@ fn derive_keeper_account_id(signing_key: &ed25519_dalek::SigningKey) -> String {
         .to_string()
         .as_str()
         .to_string()
+fn derive_keeper_account_id(signing_key: &ed25519_dalek::SigningKey) -> Result<String, String> {
+    let strkey = stellar_strkey::ed25519::PublicKey(signing_key.verifying_key().to_bytes());
+    Ok(strkey.to_string().as_str().to_string())
 }
 
 async fn check_keeper_balance(config: &Config) -> PreflightCheck {

@@ -1,4 +1,4 @@
-﻿pub const TESTNET_RPC_URL: &str = "https://soroban-testnet.stellar.org";
+pub const TESTNET_RPC_URL: &str = "https://soroban-testnet.stellar.org";
 pub const FUTURENET_RPC_URL: &str = "https://rpc-futurenet.stellar.org";
 
 pub const MAINNET_PASSPHRASE: &str = "Public Global Stellar Network ; November 2015";

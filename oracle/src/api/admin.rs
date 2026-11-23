@@ -441,7 +441,7 @@ mod tests {
     }
 
     fn failure(operation: String) -> FailedSubmission {
-        FailedSubmission {
+        FailedSubmission::Price {
             at: SystemTime::now(),
             operation,
             network: "testnet".to_string(),
@@ -483,8 +483,8 @@ mod tests {
         let Json(body) = oracle_status(AdminAuth, State(Arc::clone(&state))).await;
 
         assert_eq!(body.recent_errors.len(), 20);
-        assert_eq!(body.recent_errors[0].operation, "op-24");
-        assert_eq!(body.recent_errors[19].operation, "op-5");
+        assert_eq!(body.recent_errors[0].operation(), "op-24");
+        assert_eq!(body.recent_errors[19].operation(), "op-5");
         assert_eq!(body.price_cycle_count, 1);
         assert_eq!(body.submit_failures, 1);
         assert_eq!(body.keeper_balance, None, "Horizon is unreachable");

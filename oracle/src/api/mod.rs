@@ -379,6 +379,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // REQUEST_TIMEOUT (#1259, #1452). Applied outside the trace layer so
         // the span captures the timeout as a 408, not as an internal error.
         .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
         ))
@@ -640,6 +641,9 @@ mod tests {
             !routes.is_empty(),
             "no route literals found in build_router"
         );
+        // `/unmatched` is the synthetic matched-path label used by the
+        // telemetry middleware, not a registered route.
+        routes.retain(|route| *route != "/unmatched");
 
         let table_start = readme
             .find("## Endpoints")

@@ -133,8 +133,18 @@ pub fn parse_coinbase_http_result(
     parse_coinbase_http_response(status_code, &body, expected_currency)
 }
 
-pub async fn fetch_spot_price(symbol: &str) -> Result<i128, CoinbasePriceError> {
-    fetch_spot_price_with_url(COINBASE_EXCHANGE_RATES_URL, symbol).await
+/// Fetch a spot price from the caller-supplied Coinbase base URL.
+///
+/// There is deliberately no parameterless variant: the price loop always
+/// passes `Config::coinbase_base_url`, so tests can point a real `AppState` at
+/// a mock server instead of silently reaching production (#1264).
+/// Fetches a spot price from the configured Coinbase base URL.
+///
+/// Callers pass `Config::coinbase_base_url` (production constant by default,
+/// overridable with `COINBASE_BASE_URL` for tests) — the fetch path never uses
+/// the production constant directly (#1264).
+pub async fn fetch_spot_price(base_url: &str, symbol: &str) -> Result<i128, CoinbasePriceError> {
+    fetch_spot_price_with_url(base_url, symbol).await
 }
 
 pub(crate) async fn fetch_spot_price_with_url(
@@ -678,9 +688,9 @@ mod tests {
             .await;
 
         let base_url = format!("{}/", server.uri());
-        let result = super::fetch_spot_price_with_url(&base_url, "XLM")
-            .await
-            .unwrap();
+        // Exercise the public entry point, not just the URL-injecting twin:
+        // the live path must take its URL from the caller (#1264).
+        let result = super::fetch_spot_price(&base_url, "XLM").await.unwrap();
         assert_eq!(result, FLOAT_PRECISION);
     }
 

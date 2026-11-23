@@ -72,7 +72,9 @@ struct Counters {
     submit_failures: u64,
     keeper_balance_low_count: u64,
     prices_stale_count: u64,
-    last_metrics_update: u64,
+    /// Mirrors the `oracle_last_cycle_metrics_update` Prometheus gauge: only
+    /// price/keeper cycle (and cycle-adjacent source) events advance it.
+    last_cycle_metrics_update: u64,
     http_requests_in_flight: u64,
     http_requests_total: BTreeMap<HttpRouteLabels, u64>,
     http_request_duration_buckets: BTreeMap<String, [u64; 7]>,
@@ -114,7 +116,10 @@ pub struct MetricsResponse {
     pub submit_failures: u64,
     pub keeper_balance_low_count: u64,
     pub prices_stale_count: u64,
-    pub last_metrics_update: u64,
+    /// Timestamp of the last price/keeper cycle metrics update. Named to match
+    /// the `oracle_last_cycle_metrics_update` Prometheus gauge; HTTP request
+    /// and auth metrics deliberately do not advance it.
+    pub last_cycle_metrics_update: u64,
 }
 
 /// What a single keeper cycle did, as reported by the keeper loop.
@@ -295,7 +300,7 @@ impl Metrics {
     /// section as the counters it accompanies, instead of a separate
     /// unsynchronized atomic store.
     fn stamp(c: &mut Counters) {
-        c.last_metrics_update = SystemTime::now()
+        c.last_cycle_metrics_update = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
@@ -316,7 +321,7 @@ impl Metrics {
             submit_failures: c.submit_failures,
             keeper_balance_low_count: c.keeper_balance_low_count,
             prices_stale_count: c.prices_stale_count,
-            last_metrics_update: c.last_metrics_update,
+            last_cycle_metrics_update: c.last_cycle_metrics_update,
         }
     }
 
@@ -550,7 +555,7 @@ impl Metrics {
         output.push_str("# TYPE oracle_last_cycle_metrics_update gauge\n");
         output.push_str(&format!(
             "oracle_last_cycle_metrics_update {}\n",
-            c.last_metrics_update
+            c.last_cycle_metrics_update
         ));
 
         output.push_str("# HELP oracle_keeper_balance_low_count Total number of cycles with keeper balance below minimum\n");
@@ -740,6 +745,21 @@ mod tests {
         assert!(prometheus.contains(
             "oracle_token_source_fetch_failures_total{symbol=\"A\\\"B\",token=\"C\\\\D\",source=\"line\\nfeed\"} 1"
         ));
+    }
+
+    /// The exposed timestamp is cycle-scoped (it matches the
+    /// `oracle_last_cycle_metrics_update` gauge), so HTTP instrumentation must
+    /// not make it look like a price/keeper cycle ran.
+    #[test]
+    fn http_metrics_do_not_advance_last_cycle_metrics_update() {
+        let metrics = Metrics::new();
+
+        metrics.record_http_request("/oracle/status", "GET", 200, 5);
+        metrics.record_http_auth_failure("/admin/status");
+        assert_eq!(metrics.to_response().last_cycle_metrics_update, 0);
+
+        metrics.record_price_cycle(10, 1, 0);
+        assert!(metrics.to_response().last_cycle_metrics_update > 0);
     }
 
     #[test]
