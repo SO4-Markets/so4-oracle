@@ -60,6 +60,10 @@ pub async fn preflight(config: &Config) -> PreflightResult {
 
 fn check_keeper_key(config: &Config) -> PreflightCheck {
     const NAME: &str = "keeper_account_matches_secret_key";
+    let derived = match config.keeper_secret_key.as_ref() {
+        Some(key) => Ok(derive_keeper_account_id(key)),
+        None => Err("KEEPER_SECRET_KEY is not configured".to_string()),
+    };
     // `KEEPER_SECRET_KEY` is decoded once at config load (#1472/1473), so a
     // missing key is already a boot failure — report it as a hard check here
     // rather than parsing the strkey again.
@@ -118,6 +122,11 @@ fn check_keeper_key(config: &Config) -> PreflightCheck {
     }
 }
 
+fn derive_keeper_account_id(signing_key: &ed25519_dalek::SigningKey) -> String {
+    stellar_strkey::ed25519::PublicKey(signing_key.verifying_key().to_bytes())
+        .to_string()
+        .as_str()
+        .to_string()
 fn derive_keeper_account_id(signing_key: &ed25519_dalek::SigningKey) -> Result<String, String> {
     let strkey = stellar_strkey::ed25519::PublicKey(signing_key.verifying_key().to_bytes());
     Ok(strkey.to_string().as_str().to_string())

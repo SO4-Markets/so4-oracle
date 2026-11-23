@@ -16,6 +16,10 @@ under `[Unreleased]` (see `AGENTS.md` §3).
 ## [Unreleased]
 
 ### Added
+- `oracle_build_info{version,commit,rustc,network}` gauge on `/metrics`. The
+  commit and compiler are injected at build time by `oracle/build.rs`, and
+  `network` comes from `Config`, so a scrape identifies the exact deploy and
+  distinguishes two accidentally co-located instances
 - Boot-time bounds for `PRICE_LOOP_MS` / `KEEPER_LOOP_MS` (250–60000 ms, and `PRICE_LOOP_MS` below every token's `stale_after_seconds`), a `KEEPER_INDEX` cap of 255, and `PYTH_API_KEY` shape validation; startup warnings for pyth tokens with no key and for tokens one source outage away from two-source aggregation; the `oracle_token_sources_available` gauge (#1464, #1465, #1466, #1467)
 - `rust-toolchain.toml` to pin stable toolchain for reproducible builds (#979)
 - Package metadata (version, edition, license, repository, description) to workspace `Cargo.toml` (#977)
@@ -37,6 +41,13 @@ under `[Unreleased]` (see `AGENTS.md` §3).
 - Test-only `COINBASE_BASE_URL` / `BINANCE_BASE_URL` config overrides, threaded through both price fetch paths, and a CI check that no tracked `*.rs` file starts with a UTF-8 BOM (#1264)
 
 ### Fixed
+- Jitter can no longer scale a positive delay to zero (which turned retry
+  loops into busy loops) or above its input (which defeated the max-delay cap);
+  the factor is now injectable for property tests
+- `poll_until_confirmed` no longer sleeps after its final attempt and uses one
+  16 s cap for every backoff path, keeping its total budget inside the 50 s
+  keeper-cycle timeout. Tests now use the shipped constants and assert the
+  actual sleep sequence instead of `cfg(test)`-only 1 ms values
 - The keeper's in-flight-key decision now branches on the `SubmitError`
   variant instead of `error.contains("not confirmed after")` (#719)
 - `TESTNET_PASSPHRASE` corrected to `Test SDF Network ; September 2015`; the

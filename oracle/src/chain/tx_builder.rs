@@ -17,6 +17,14 @@ pub const TX_MAX_TIME_SECS: u64 = 60;
 
 /// `max_time`: Unix timestamp of the transaction's hard deadline.
 /// Pass `0` to omit time bounds (e.g. for simulation calls where sequence is 0).
+///
+/// The eight parameters mirror the Soroban `build_invoke_tx` call sites (fee,
+/// sequence, optional Soroban data and deadline are independent inputs), so
+/// bundling them would only add indirection at every call site.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "parameters mirror the independent Soroban transaction inputs at every call site"
+)]
 #[allow(clippy::too_many_arguments)]
 /// Soroban-specific options for [`build_invoke_tx`], grouped to keep the
 /// constructor's argument count within clippy's limit.

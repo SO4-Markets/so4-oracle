@@ -485,7 +485,7 @@ mod tests {
             app.clone().oneshot(request).await.unwrap();
         }
 
-        let metrics = state.metrics.to_prometheus();
+        let metrics = state.metrics.to_prometheus(state.config.network.as_str());
         assert!(metrics.contains("route=\"/prices\""), "{metrics}");
         assert!(!metrics.contains("route=\"/health\""), "{metrics}");
         assert!(!metrics.contains("route=\"/ready\""), "{metrics}");
@@ -603,7 +603,7 @@ mod tests {
         let _ = app.clone().oneshot(successful_request).await;
         let _ = app.clone().oneshot(failing_request).await;
 
-        let metrics_out = state.metrics.to_prometheus();
+        let metrics_out = state.metrics.to_prometheus(state.config.network.as_str());
 
         assert!(
             !metrics_out.contains(test_secret),

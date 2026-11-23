@@ -22,7 +22,7 @@ const ACCOUNT_SEQUENCE_RETRY_BASE_DELAY_MS: u64 = 100;
 const SIMULATE_RETRY_ATTEMPTS: u32 = 3;
 const SIMULATE_RETRY_BASE_DELAY_MS: u64 = 100;
 /// Hard cap on a single keeper cycle — closes #490.
-const KEEPER_CYCLE_TIMEOUT_SECS: u64 = 50;
+pub(crate) const KEEPER_CYCLE_TIMEOUT_SECS: u64 = 50;
 /// The oracle contract rejects a `SignedPrice` whose `ledger_seq` is more than
 /// 60 ledgers behind the current ledger. Keep a 10-ledger margin so a price
 /// cannot cross the window between the probe and submission (#1292).
@@ -1257,6 +1257,15 @@ fn is_poll_timeout(error: &str) -> bool {
     error.contains("(hash: ")
 }
 
+/// Recover the transaction hash from a poll-timeout error string.
+#[cfg(test)]
+fn poll_timeout_hash(error: &str) -> Option<String> {
+    if !is_poll_timeout(error) {
+        return None;
+    }
+    let start = error.find("(hash: ")? + "(hash: ".len();
+    let end = error[start..].find(')')? + start;
+    let hash = &error[start..end];
 /// Extract the transaction hash embedded in a poll-timeout error message.
 ///
 /// `SubmitError::PollTimeout` renders it as `(hash: <64 hex chars>)`; an
@@ -2161,6 +2170,7 @@ mod tests {
         // #956 — the settle delay must not eat a meaningful share of the cycle timeout.
         const {
             assert!(POST_SET_PRICES_SETTLE_MS * 10 <= KEEPER_CYCLE_TIMEOUT_SECS * 1_000);
+        };
         }
         let settle_ms = POST_SET_PRICES_SETTLE_MS;
         let cycle_ms = KEEPER_CYCLE_TIMEOUT_SECS.saturating_mul(1_000);
@@ -2737,6 +2747,8 @@ mod tests {
             keeper_tx_fee: crate::config::DEFAULT_KEEPER_TX_FEE,
             price_loop_interval: Duration::from_millis(50),
             keeper_loop_interval: Duration::from_millis(50),
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
             price_feed: PriceFeedConfig {
                 tokens: vec![shared_config::TokenConfig {
                     symbol: "TUSDC".to_string(),
@@ -2852,6 +2864,11 @@ mod keeper_tx_tests {
     fn sign_keeper_tx_uses_cached_key_when_present() {
         const SECRET: &str = "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT";
         let mut config = Config::default_for_tests();
+        let key = crate::chain::tx_builder::signing_key_from_secret(
+            "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT",
+        )
+        .unwrap();
+        config.keeper_secret_key = Some(std::sync::Arc::new(key.clone()));
         config.keeper_secret_key = Some(std::sync::Arc::new(
             crate::chain::tx_builder::signing_key_from_secret(SECRET).unwrap(),
         ));
@@ -2864,6 +2881,10 @@ mod keeper_tx_tests {
         let got = sign_keeper_tx(&state, &tx).expect("cached-key signing succeeds");
         let expected = crate::chain::tx_builder::sign_transaction_with_key(
             &tx,
+            &key,
+            &state.config.network_passphrase,
+        )
+        .expect("key signing succeeds");
             SECRET,
             &key,
             &state.config.network_passphrase,
