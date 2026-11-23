@@ -272,6 +272,7 @@ pub(crate) async fn fetch_pyth_price_with_url(
         stale_after_seconds,
         max_confidence_bps,
     )
+    .map(|priced| priced.price)
 }
 
 /// Fetches all requested feeds in a single Hermes request. The bearer token is

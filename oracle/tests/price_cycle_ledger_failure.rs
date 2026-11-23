@@ -77,7 +77,8 @@ async fn ledger_failure_records_error_in_failures() {
     );
     let entry = &entries[0];
     assert_eq!(
-        entry.operation, "get_latest_ledger",
+        entry.operation(),
+        "get_latest_ledger",
         "operation field must be 'get_latest_ledger'"
     );
 }
@@ -226,7 +227,7 @@ async fn two_ledger_failures_each_recorded_separately() {
         "each failed cycle must produce a separate error record"
     );
     for entry in &entries {
-        assert_eq!(entry.operation, "get_latest_ledger");
+        assert_eq!(entry.operation(), "get_latest_ledger");
     }
 }
 
@@ -245,7 +246,7 @@ async fn ledger_failure_error_message_is_non_empty() {
     let failures = state.failures.lock().await;
     let entries: Vec<_> = failures.iter().collect();
     assert!(
-        !entries[0].error.is_empty(),
+        !entries[0].error().is_empty(),
         "error message must be non-empty"
     );
 }
@@ -286,8 +287,8 @@ async fn timeout_rpc_error_also_records_failure() {
     let failures = state.failures.lock().await;
     let entries: Vec<_> = failures.iter().collect();
     assert!(!entries.is_empty());
-    assert_eq!(entries[0].operation, "get_latest_ledger");
-    assert!(entries[0].error.contains("request timed out") || !entries[0].error.is_empty());
+    assert_eq!(entries[0].operation(), "get_latest_ledger");
+    assert!(entries[0].error().contains("request timed out") || !entries[0].error().is_empty());
 }
 
 #[tokio::test]

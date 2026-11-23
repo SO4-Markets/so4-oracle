@@ -29,7 +29,13 @@ pub(crate) const READY_CHECK_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Deserialize)]
 pub struct FailedSubmissionsQuery {
+    /// Optional **prefix** filter on the failure's operation label. This is a
+    /// prefix match, not equality: `?operation=execute` matches `execute_order`,
+    /// `execute_deposit` and `execute_withdrawal`, while `?operation=order`
+    /// matches nothing (the labels start with `execute_`).
     pub operation: Option<String>,
+    /// Maximum records to return (default 100, capped at the ring buffer size).
+    /// Does not affect `matched_count` or `total_count`.
     pub limit: Option<usize>,
 }
 
@@ -63,6 +69,10 @@ pub struct HealthResponse {
 #[derive(Debug, Serialize)]
 pub struct FailuresResponse {
     pub failures: Vec<FailedSubmission>,
+    /// Records matching `?operation=` before `?limit=` is applied.
+    pub matched_count: usize,
+    /// Records in the in-process ring buffer before filtering or limiting.
+    /// Paged callers can use this to tell how many records exist overall.
     pub total_count: usize,
 }
 
@@ -296,28 +306,38 @@ pub async fn prices(
     Ok(Json(cache.prices.values().cloned().collect()))
 }
 
+/// Returns the in-process failure ring buffer, newest first.
+///
+/// `?operation=` is a **prefix** match on the record's operation label (see
+/// [`FailedSubmissionsQuery::operation`]); it is deliberately not an equality
+/// filter so one query can collect every `execute_*` failure. `?limit=` caps
+/// only the returned page. The response reports both `matched_count` (after
+/// filtering, before limiting) and `total_count` (the whole buffer) so paginated
+/// callers can tell how many records exist overall.
 pub async fn failed_submissions(
     _auth: AdminAuth,
     query: FailedSubmissionsQuery,
     State(state): State<Arc<AppState>>,
 ) -> Json<FailuresResponse> {
     let all_failures = state.failures.lock().await;
+    let total_count = all_failures.len();
     let failures_iter = all_failures.iter().rev();
 
     let filtered: Vec<FailedSubmission> = match &query.operation {
         Some(op) => failures_iter
-            .filter(|f| f.operation.starts_with(op.as_str()))
+            .filter(|f| f.operation().starts_with(op.as_str()))
             .cloned()
             .collect(),
         None => failures_iter.cloned().collect(),
     };
 
-    let total_count = filtered.len();
+    let matched_count = filtered.len();
     let limit = query.limit.unwrap_or(100).min(256);
     let failures: Vec<_> = filtered.into_iter().take(limit).collect();
 
     Json(FailuresResponse {
         failures,
+        matched_count,
         total_count,
     })
 }
@@ -457,7 +477,9 @@ mod tests {
 
     async fn add_price(state: &AppState, symbol: &str) {
         let mut cache = state.price_cache.write().await;
-        cache.prices.insert(symbol.to_string(), cached_price(symbol));
+        cache
+            .prices
+            .insert(symbol.to_string(), cached_price(symbol));
     }
 
     async fn mark_cycles(state: &AppState, price: bool, keeper: bool) {
@@ -565,7 +587,7 @@ mod tests {
     }
 
     fn failure(operation: &str) -> FailedSubmission {
-        FailedSubmission {
+        FailedSubmission::Price {
             at: std::time::SystemTime::now(),
             operation: operation.to_string(),
             network: "testnet".to_string(),
@@ -606,8 +628,9 @@ mod tests {
 
         let body = query_failures(state, Some("source:"), None).await;
 
-        assert_eq!(body.total_count, 2);
-        let operations: Vec<_> = body.failures.iter().map(|f| &f.operation).collect();
+        assert_eq!(body.matched_count, 2);
+        assert_eq!(body.total_count, 3);
+        let operations: Vec<_> = body.failures.iter().map(|f| f.operation()).collect();
         assert_eq!(operations, ["source:ETH:pyth", "source:BTC:binance"]);
     }
 
@@ -626,7 +649,7 @@ mod tests {
         let small = query_failures(state, None, Some(5)).await;
 
         assert_eq!(defaulted.failures.len(), 100);
-        assert_eq!(capped.failures.len(), capped.total_count.min(256));
+        assert_eq!(capped.failures.len(), capped.matched_count.min(256));
         assert_eq!(small.failures.len(), 5);
         assert_eq!(small.total_count, defaulted.total_count);
     }

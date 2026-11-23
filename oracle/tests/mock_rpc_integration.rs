@@ -62,7 +62,8 @@ fn mock_rpc_integration_with_mocked_source_prices() {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let result = oracle::prices::aggregate_prices(&prices, &sources, 2, 1000);
+    let observation_times = vec![oracle::current_timestamp_secs(); prices.len()];
+    let result = oracle::prices::aggregate_prices(&prices, &sources, &observation_times, 2, 1000);
 
     assert!(
         result.is_ok(),

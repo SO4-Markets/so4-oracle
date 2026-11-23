@@ -342,14 +342,14 @@ impl Metrics {
                 // We use a static match to keep the output clean.
                 match *b {
                     0.25 => "0.25",
-                    0.5  => "0.5",
-                    1.0  => "1",
-                    2.5  => "2.5",
-                    5.0  => "5",
+                    0.5 => "0.5",
+                    1.0 => "1",
+                    2.5 => "2.5",
+                    5.0 => "5",
                     10.0 => "10",
                     30.0 => "30",
                     60.0 => "60",
-                    _    => "?",
+                    _ => "?",
                 }
             })
             .collect();
@@ -398,13 +398,13 @@ impl Metrics {
         let keeper_bucket_bounds: Vec<&str> = KEEPER_CYCLE_BUCKETS
             .iter()
             .map(|b| match *b {
-                1.0  => "1",
-                2.5  => "2.5",
-                5.0  => "5",
+                1.0 => "1",
+                2.5 => "2.5",
+                5.0 => "5",
                 10.0 => "10",
                 25.0 => "25",
                 50.0 => "50",
-                _    => "?",
+                _ => "?",
             })
             .collect();
         output.push_str(

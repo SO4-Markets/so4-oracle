@@ -8,7 +8,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use oracle::stellar_rpc::{
-    get_account_balance_stroops, get_latest_ledger_sequence, parse_latest_ledger_response,
+    get_account_balance, get_latest_ledger_sequence, parse_latest_ledger_response,
 };
 use oracle::submit::{parse_get_transaction_response, parse_send_response};
 
@@ -26,7 +26,10 @@ const HORIZON_ACCOUNT: &str = include_str!("fixtures/rpc/horizon_account.json");
 
 #[test]
 fn get_latest_ledger_fixture_parses() {
-    assert_eq!(parse_latest_ledger_response(LATEST_LEDGER).unwrap(), 2_539_605);
+    assert_eq!(
+        parse_latest_ledger_response(LATEST_LEDGER).unwrap(),
+        2_539_605
+    );
 }
 
 #[tokio::test]
@@ -90,8 +93,8 @@ async fn horizon_account_fixture_yields_the_native_balance() {
         .mount(&horizon)
         .await;
 
-    let balance = get_account_balance_stroops(&horizon.uri(), KEEPER).await;
-    assert_eq!(balance.unwrap(), 99_999_999_800);
+    let balance = get_account_balance(&horizon.uri(), KEEPER).await;
+    assert_eq!(balance.unwrap().balance_stroops, 99_999_999_800);
 }
 
 /// Drift check against public testnet (#1423). Run on demand with

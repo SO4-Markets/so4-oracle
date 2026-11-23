@@ -318,7 +318,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(prices::failed_submissions),
         )
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found") })
-        .layer(axum::middleware::from_fn_with_state(state.clone(), track_metrics))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            track_metrics,
+        ))
         // Hard cap on concurrent requests (#1259). 512 is well above a single
         // Fly machine's realistic per-instance concurrency while still
         // bounding memory. Probes are merged in below, outside this layer.
@@ -375,7 +378,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Request timeout: return 408 if a handler takes longer than
         // REQUEST_TIMEOUT (#1259, #1452). Applied outside the trace layer so
         // the span captures the timeout as a 408, not as an internal error.
-        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
 }
 
 #[cfg(test)]
@@ -442,7 +448,8 @@ mod tests {
             .map(|v| v.to_str().unwrap().to_ascii_lowercase())
             .collect();
         assert!(
-            vary.iter().any(|v| v.split(',').any(|h| h.trim() == "origin")),
+            vary.iter()
+                .any(|v| v.split(',').any(|h| h.trim() == "origin")),
             "Vary must include Origin on /prices, got {vary:?}"
         );
 
@@ -455,9 +462,14 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert!(
-            response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none(),
+            response
+                .headers()
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none(),
             "admin route must not carry CORS headers"
         );
+    }
+
     // #1453, #1454 — probes sit outside the metrics and concurrency layers,
     // so a probe flood neither records HTTP metrics nor takes permits. Every
     // other route is still recorded.
@@ -559,7 +571,7 @@ mod tests {
     #[tokio::test]
     async fn test_secrets_redacted_from_logs_and_metrics() {
         let mut config = Config::default_for_tests();
-        let test_secret = "SAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let test_secret = "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT";
         let test_admin_token = "admin_super_secret_token_123";
         // #1472 — only the decoded key is kept; the raw strkey is dropped at
         // config load and must never resurface in logs or metrics.
@@ -628,6 +640,9 @@ mod tests {
             !routes.is_empty(),
             "no route literals found in build_router"
         );
+        // `/unmatched` is the synthetic matched-path label used by the
+        // telemetry middleware, not a registered route.
+        routes.retain(|route| *route != "/unmatched");
 
         let table_start = readme
             .find("## Endpoints")

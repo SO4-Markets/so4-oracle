@@ -142,7 +142,10 @@ mod tests {
             assert!(is_transient_http_status(status), "{status} should retry");
         }
         for status in [200, 301, 400, 401, 403, 404, 409, 422, 499] {
-            assert!(!is_transient_http_status(status), "{status} should not retry");
+            assert!(
+                !is_transient_http_status(status),
+                "{status} should not retry"
+            );
         }
     }
 

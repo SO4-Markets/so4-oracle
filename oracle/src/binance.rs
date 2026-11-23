@@ -125,10 +125,16 @@ fn build_spot_price_url_for(base_url: &str, symbols: &[String]) -> String {
     }
 }
 
+/// Fetches spot prices from the configured Binance base URL.
+///
+/// Callers pass `Config::binance_base_url` (production constant by default,
+/// overridable with `BINANCE_BASE_URL` for tests) — the fetch path never uses
+/// the production constant directly (#1264).
 pub async fn fetch_spot_prices(
+    base_url: &str,
     symbols: &[String],
 ) -> Result<Vec<(String, i128)>, BinancePriceError> {
-    fetch_spot_prices_with_url(BINANCE_TICKER_PRICE_URL, symbols).await
+    fetch_spot_prices_with_url(base_url, symbols).await
 }
 
 pub(crate) async fn fetch_spot_prices_with_url(

@@ -89,7 +89,6 @@ pub async fn oracle_status(
         .values()
         .cloned()
         .collect();
-    let recent_errors = state.failures.lock().await.iter().rev().cloned().collect();
     let preflight = state.preflight_result.read().await.clone();
     let recent_errors: Vec<_> = state
         .failures
@@ -119,13 +118,9 @@ pub async fn oracle_status(
         .await
         .ok()
         .and_then(Result::ok)
-        .map(|stroops| stroops as f64 / crate::keeper::XLM_IN_STROOPS as f64);
-    )
-    .await
-    .ok()
-    // Spendable balance, net of the account reserve, the same figure
-    // /keeper/balance reports and the minimum is checked against (#1447).
-    .map(|balance| crate::keeper::stroops_to_xlm(balance.spendable_stroops));
+        // Spendable balance, net of the account reserve, the same figure
+        // /keeper/balance reports and the minimum is checked against (#1447).
+        .map(|balance| crate::keeper::stroops_to_xlm(balance.spendable_stroops));
 
     Json(OracleStatusResponse {
         last_cycle_time,
@@ -347,7 +342,10 @@ pub async fn keeper_balance(
             budget_secs = ADMIN_EXTERNAL_BUDGET.as_secs(),
             "keeper balance lookup exceeded its budget"
         );
-        return Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"));
+        return Err(ApiError::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream_timeout",
+        ));
     };
 
     match result {
@@ -443,7 +441,7 @@ mod tests {
     }
 
     fn failure(operation: String) -> FailedSubmission {
-        FailedSubmission {
+        FailedSubmission::Price {
             at: SystemTime::now(),
             operation,
             network: "testnet".to_string(),
@@ -485,8 +483,8 @@ mod tests {
         let Json(body) = oracle_status(AdminAuth, State(Arc::clone(&state))).await;
 
         assert_eq!(body.recent_errors.len(), 20);
-        assert_eq!(body.recent_errors[0].operation, "op-24");
-        assert_eq!(body.recent_errors[19].operation, "op-5");
+        assert_eq!(body.recent_errors[0].operation(), "op-24");
+        assert_eq!(body.recent_errors[19].operation(), "op-5");
         assert_eq!(body.price_cycle_count, 1);
         assert_eq!(body.submit_failures, 1);
         assert_eq!(body.keeper_balance, None, "Horizon is unreachable");

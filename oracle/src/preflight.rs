@@ -60,15 +60,18 @@ pub async fn preflight(config: &Config) -> PreflightResult {
 
 fn check_keeper_key(config: &Config) -> PreflightCheck {
     const NAME: &str = "keeper_account_matches_secret_key";
-    let derived = derive_keeper_account_id(config.keeper_secret_key.as_str());
+    let derived = config
+        .keeper_secret_key
+        .as_ref()
+        .map(|key| derive_keeper_account_id(key));
     match derived {
-        Ok(account_id) if account_id == config.keeper_account_id => PreflightCheck {
+        Some(Ok(account_id)) if account_id == config.keeper_account_id => PreflightCheck {
             name: NAME,
             ok: true,
             hard: true,
             detail: format!("KEEPER_ACCOUNT_ID matches derived key {account_id}"),
         },
-        Ok(account_id) => PreflightCheck {
+        Some(Ok(account_id)) => PreflightCheck {
             name: NAME,
             ok: false,
             hard: true,
@@ -77,33 +80,24 @@ fn check_keeper_key(config: &Config) -> PreflightCheck {
                 config.keeper_account_id, account_id
             ),
         },
-        Err(error) => PreflightCheck {
+        Some(Err(error)) => PreflightCheck {
             name: NAME,
             ok: false,
             hard: true,
             detail: error,
         },
+        None => PreflightCheck {
+            name: NAME,
+            ok: false,
+            hard: true,
+            detail: "KEEPER_SECRET_KEY is not configured".to_string(),
+        },
     }
 }
 
-fn derive_keeper_account_id(secret_key: &str) -> Result<String, String> {
-    let seed = stellar_strkey::ed25519::PrivateKey::from_string(secret_key)
-        .map_err(|e| format!("invalid KEEPER_SECRET_KEY strkey: {e}"))?
-        .0
-        .to_vec();
-    if seed.len() != 32 {
-        return Err(format!(
-            "KEEPER_SECRET_KEY must be 32 bytes, got {}",
-            seed.len()
-        ));
-    }
-    let mut key_array = [0u8; 32];
-    key_array.copy_from_slice(&seed);
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_array);
-    Ok(stellar_strkey::ed25519::PublicKey(
-        signing_key.verifying_key().to_bytes(),
-    )
-    .to_string())
+fn derive_keeper_account_id(signing_key: &ed25519_dalek::SigningKey) -> Result<String, String> {
+    let strkey = stellar_strkey::ed25519::PublicKey(signing_key.verifying_key().to_bytes());
+    Ok(strkey.to_string().as_str().to_string())
 }
 
 async fn check_keeper_balance(config: &Config) -> PreflightCheck {
