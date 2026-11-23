@@ -313,7 +313,8 @@ pub async fn metrics(_auth: AdminAuth, State(state): State<Arc<AppState>>) -> Re
             let age = price.age_seconds(now_secs);
             prometheus.push_str(&format!(
                 "oracle_price_age_seconds{{symbol=\"{}\"}} {}\n",
-                symbol, age
+                crate::metrics::escape_label_value(symbol),
+                age
             ));
         }
         // last_set_prices timestamp (#1267).
