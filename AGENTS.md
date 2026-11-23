@@ -32,7 +32,7 @@ If the `Dockerfile` or dependencies changed, you must also run `make docker`.
 ## 4. Repository-Specific Traps
 - **Environment Variables**: Read verbatim by `Config::from_env()`. A near-miss like `ORDER_HANDLER_CONTRACT_ID` is silently ignored and the process exits.
 - **Tokens Config**: `config/tokens.json` is embedded via `include_str!` at compile time and must exist in the Docker builder stage before `cargo build`.
-- **Panics**: `[profile.release]` sets `panic = "abort"`. The keeper loop must never panic—errors are recorded and the loop continues.
+- **Panics**: `[profile.release]` sets `panic = "unwind"` so `CatchPanicLayer` and the main task recovery paths can contain panics. The keeper loop must still never panic—errors are recorded and the loop continues.
 - **MSRV**: The workspace's `[workspace.package] rust-version` field (and the `env.MSRV` variable in CI) encode the real MSRV. The Dockerfile is a consumer of that version, not the source of truth. Do not bump dependencies without checking it.
 - **Admin Routes**: Admin endpoints authenticate via the `AdminAuth` extractor (`oracle/src/api/mod.rs`). New admin routes must take it.
 - **Single Instance Only**: Double-submission prevention and failure/blacklist counters (`oracle/src/state.rs`) are plain in-process `Mutex`-guarded maps, not shared across processes. This service must never be scaled to 2+ replicas — a second instance races the first on the same pending work with no coordination. See the "Deployment" section of README.md.

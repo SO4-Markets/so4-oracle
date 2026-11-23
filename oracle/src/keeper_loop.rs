@@ -1624,7 +1624,7 @@ const BPS_DENOMINATOR: i128 = 10_000;
 ///
 /// Overflow means the move is astronomically large, so the safe answer is to
 /// submit; every arithmetic step is checked to avoid panicking in the keeper
-/// loop (`panic = "abort"` in release).
+/// loop (see [profile.release] in Cargo.toml).
 fn move_exceeds_bps(last: i128, median: i128, threshold_bps: u32) -> bool {
     let change = match median.checked_sub(last).and_then(i128::checked_abs) {
         Some(change) => change,

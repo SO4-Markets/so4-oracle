@@ -57,10 +57,12 @@ where
     Fut: std::future::Future<Output = Result<T, E>>,
     E: std::fmt::Debug + Retryable,
 {
-    assert!(
-        max_attempts > 0,
-        "retry_with_backoff requires max_attempts >= 1"
-    );
+    let max_attempts = if max_attempts == 0 {
+        tracing::warn!("retry_with_backoff called with max_attempts == 0; clamping to 1");
+        1
+    } else {
+        max_attempts
+    };
     let mut delay_ms = base_delay_ms.min(max_delay_ms);
     let mut last_err: Option<E> = None;
 
@@ -273,19 +275,26 @@ mod tests {
     }
 
     #[test]
-    fn panics_when_max_attempts_is_zero() {
-        let result = std::panic::catch_unwind(|| {
-            block_on(async {
-                retry_with_backoff(
-                    || async { Ok::<u32, &'static str>(1) },
-                    0,
-                    100,
-                    MAX_BACKOFF_DELAY_MS,
-                )
-                .await
-            })
+    fn returns_error_when_max_attempts_is_zero() {
+        let call_count = Rc::new(Cell::new(0u32));
+        let result: Result<u32, &'static str> = block_on(async {
+            let count = Rc::clone(&call_count);
+            retry_with_backoff(
+                || {
+                    let count = Rc::clone(&count);
+                    async move {
+                        count.set(count.get() + 1);
+                        Err("always fails")
+                    }
+                },
+                0,
+                0,
+                MAX_BACKOFF_DELAY_MS,
+            )
+            .await
         });
-        assert!(result.is_err());
+        assert_eq!(result, Err("always fails"));
+        assert_eq!(call_count.get(), 1);
     }
 
     #[test]

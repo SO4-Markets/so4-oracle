@@ -332,10 +332,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(limited)
         .with_state(state)
         // #1044 — CatchPanicLayer must be the OUTERMOST layer so it wraps
-        // every handler. With `panic = "abort"` in the release profile a
-        // panicking handler would otherwise abort the entire process; this
-        // layer converts panics into 500 responses instead, isolating faults
-        // to the offending request.
+        // every handler. With `panic = "unwind"` in the release profile (see
+        // [profile.release] in Cargo.toml), this layer converts panics into 500
+        // responses instead, isolating faults to the offending request.
         .layer(CatchPanicLayer::new())
         // Layer ordering: `.layer()` calls chained directly on a `Router` make
         // the LAST-added layer the OUTERMOST — it sees the request first. So
