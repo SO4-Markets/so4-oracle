@@ -12,12 +12,13 @@ use stellar_xdr::{
 use super::scval::{encode_prices_vec, strkey_to_sc_address};
 use super::tx_builder::{
     build_invoke_tx, sign_transaction_with_key, signing_key_from_secret, TxParams,
+    build_invoke_tx, sign_transaction_with_key, signing_key_from_secret, InvokeTxOptions,
 };
 
 use crate::network_config::TESTNET_PASSPHRASE;
 use crate::state::CachedPrice;
 
-const KEEPER_ACCOUNT: &str = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+const KEEPER_ACCOUNT: &str = "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7";
 const ORACLE_CONTRACT: &str = "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY";
 const TOKEN_CONTRACT: &str = "CBAN5YU3KRDKPTQ2H76D6S7HQFPRBGUD524F65BUM2RQCITPTRLKWKES";
 
@@ -68,6 +69,12 @@ fn set_prices_survives_build_sign_encode_decode() {
         "set_prices",
         vec![prices.clone()],
         TxParams::new(100, 7, 0),
+        100,
+        7,
+        InvokeTxOptions {
+            soroban_data: None,
+            max_time: 0,
+        },
     )
     .unwrap();
     let key = signing_key_from_secret(&"11".repeat(32)).unwrap();

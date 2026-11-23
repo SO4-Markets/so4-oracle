@@ -140,6 +140,14 @@ pub async fn oracle_status(
     let submission_states = token_submission_states(&state, &cache);
     let last_full_submission = cache.last_full_submission.and_then(system_time_secs);
     drop(cache);
+    let prices = state
+        .price_cache
+        .read()
+        .await
+        .prices
+        .values()
+        .cloned()
+        .collect();
     let preflight = state.preflight_result.read().await.clone();
     let recent_errors: Vec<_> = state
         .failures
@@ -268,7 +276,7 @@ pub async fn clear_blacklisted_key(
 }
 
 pub async fn metrics(_auth: AdminAuth, State(state): State<Arc<AppState>>) -> Response {
-    let mut prometheus = state.metrics.to_prometheus();
+    let mut prometheus = state.metrics.to_prometheus(state.config.network.as_str());
 
     // ── Gauges from AppState not tracked by Metrics (#1267) ─────────────────
 
@@ -522,7 +530,7 @@ mod tests {
     }
 
     fn failure(operation: String) -> FailedSubmission {
-        FailedSubmission {
+        FailedSubmission::Price {
             at: SystemTime::now(),
             operation,
             network: "testnet".to_string(),
@@ -564,8 +572,8 @@ mod tests {
         let Json(body) = oracle_status(AdminAuth, State(Arc::clone(&state))).await;
 
         assert_eq!(body.recent_errors.len(), 20);
-        assert_eq!(body.recent_errors[0].operation, "op-24");
-        assert_eq!(body.recent_errors[19].operation, "op-5");
+        assert_eq!(body.recent_errors[0].operation(), "op-24");
+        assert_eq!(body.recent_errors[19].operation(), "op-5");
         assert_eq!(body.price_cycle_count, 1);
         assert_eq!(body.submit_failures, 1);
         assert_eq!(body.keeper_balance, None, "Horizon is unreachable");

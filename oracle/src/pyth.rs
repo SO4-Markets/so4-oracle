@@ -4,6 +4,14 @@ use std::collections::HashMap;
 /// Provider endpoint recommended by Pyth for authenticated production traffic.
 pub const PYTH_HERMES_URL: &str = "https://pyth.dourolabs.app/hermes/api/latest_price_feeds";
 
+/// Maximum tolerated clock skew (in seconds) on a Pyth `publish_time`.
+///
+/// A publish time ahead of our clock is treated as age 0, so a publisher or
+/// Hermes endpoint running fast could otherwise make the token's
+/// `stale_after_seconds` unenforceable. Anything beyond this small tolerance is
+/// rejected outright; anything within it is accepted but logged loudly.
+pub const MAX_FUTURE_SKEW_SECONDS: u64 = 5;
+
 /// Re-exported from the crate root so existing `crate::pyth::FLOAT_PRECISION`
 /// callers keep working; the precision invariant has one source of truth now
 /// (#709) rather than a separate copy per module.
@@ -184,15 +192,25 @@ pub fn validate_pyth_price(
     // Reject future-dated publish times — a price claiming to originate from
     // the future (malformed Hermes response, misbehaving publisher, or clock
     // skew) must not silently pass the staleness check via saturating_sub's
-    // clamping to 0, which would treat it as maximally fresh.
-    const MAX_FUTURE_SKEW_SECONDS: u64 = 30;
+    // clamping to 0, which would treat it as maximally fresh. Only a small,
+    // explicitly bounded skew is tolerated, and even that is logged.
     if publish_time > now_seconds {
         let skew = publish_time - now_seconds;
         if skew > MAX_FUTURE_SKEW_SECONDS {
             return Err(PythPriceError::InvalidPublishTime(publish_time as i64));
         }
+        tracing::warn!(
+            skew_seconds = skew,
+            publish_time,
+            now_seconds,
+            max_tolerated_skew_seconds = MAX_FUTURE_SKEW_SECONDS,
+            "pyth price has a future publish_time within tolerance; treating age as zero"
+        );
     }
 
+    // Only the tolerated-skew case reaches here with publish_time in the
+    // future; clamping its age to zero is deliberate and was warned about
+    // above. Beyond that tolerance the price was already rejected.
     let age_seconds = now_seconds.saturating_sub(publish_time);
     if age_seconds > stale_after_seconds {
         return Err(PythPriceError::StalePrice {
@@ -273,12 +291,17 @@ pub(crate) async fn fetch_pyth_price_with_url(
         max_confidence_bps,
     )
     .map(|validated| validated.price)
+    .map(|priced| priced.price)
 }
 
-/// Fetches all requested feeds in a single Hermes request. The bearer token is
-/// optional during the migration period, but production deployments should set
-/// `PYTH_API_KEY` before authentication becomes mandatory.
+/// Fetches all requested feeds in a single Hermes request. `base_url` comes
+/// from `Config::pyth_hermes_url`, so the live path never hard-codes a
+/// production host and tests can redirect it to a mock server (#1264).
+///
+/// The bearer token is optional during the migration period, but production
+/// deployments should set `PYTH_API_KEY` before authentication becomes mandatory.
 pub async fn fetch_pyth_prices(
+    base_url: &str,
     feed_ids: &[&str],
     api_key: Option<&str>,
 ) -> Result<HashMap<String, PythPriceFeed>, PythPriceError> {
@@ -290,7 +313,7 @@ pub async fn fetch_pyth_prices(
         .map(|id| format!("ids[]={id}"))
         .collect::<Vec<_>>()
         .join("&");
-    let url_string = format!("{PYTH_HERMES_URL}?{query}");
+    let url_string = format!("{base_url}?{query}");
 
     let mut request = crate::http::with_correlation(crate::http::client().get(&url_string));
     if let Some(key) = api_key {
@@ -998,7 +1021,46 @@ mod tests {
         );
     }
 
-    // #1032 — future-dated publish_time must be rejected, not treated as fresh
+    /// #1264 — the public batched entry point must use the caller's base URL
+    /// rather than the compile-time production constant, so tests driving a
+    /// real `AppState` never reach Hermes.
+    #[tokio::test]
+    async fn fetch_pyth_prices_uses_caller_supplied_base_url() {
+        use wiremock::matchers::{method, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let publish = recent_publish_time();
+        let body = format!(
+            r#"[{{"id":"feed-1","price":{{"price":"4500000000","expo":-8,"conf":"100000","publish_time":{}}}}}]"#,
+            publish
+        );
+        Mock::given(method("GET"))
+            .and(query_param("ids[]", "feed-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let feeds = super::fetch_pyth_prices(&server.uri(), &["feed-1"], None)
+            .await
+            .unwrap();
+        assert!(feeds.contains_key("feed-1"));
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "request must go to the configured URL");
+    }
+
+    // #1032 — future-dated publish_time must not silently pass as fresh
+
+    #[test]
+    fn future_skew_tolerance_is_a_named_small_constant() {
+        // It must stay well below the 60s staleness budget every configured
+        // token uses; otherwise it silently overrides that budget.
+        const {
+            assert!(MAX_FUTURE_SKEW_SECONDS > 0);
+            assert!(MAX_FUTURE_SKEW_SECONDS < 60);
+        }
+    }
 
     #[test]
     fn validate_pyth_price_rejects_future_publish_time_beyond_skew_tolerance() {
@@ -1006,7 +1068,7 @@ mod tests {
             price: "100000000".to_string(),
             conf: None,
             expo: -8,
-            // publish_time 60 seconds in the future, beyond the 30s tolerance
+            // 60 seconds in the future — well beyond the small tolerance
             publish_time: Some(1_060),
         };
         let err = validate_pyth_price(&data, 1_000, 60, 100).unwrap_err();
@@ -1018,15 +1080,32 @@ mod tests {
     }
 
     #[test]
+    fn validate_pyth_price_rejects_one_second_past_tolerance() {
+        let publish_time = 1_000 + MAX_FUTURE_SKEW_SECONDS + 1;
+        let data = PythPriceData {
+            price: "100000000".to_string(),
+            conf: None,
+            expo: -8,
+            publish_time: Some(publish_time as i64),
+        };
+        let err = validate_pyth_price(&data, 1_000, 60, 100).unwrap_err();
+        assert!(
+            matches!(err, PythPriceError::InvalidPublishTime(t) if t == publish_time as i64),
+            "expected InvalidPublishTime past the tolerance, got {:?}",
+            err
+        );
+    }
+
+    #[test]
     fn validate_pyth_price_accepts_future_publish_time_within_skew_tolerance() {
         let data = PythPriceData {
             price: "100000000".to_string(),
             conf: None,
             expo: -8,
-            // publish_time 10 seconds in the future, within the 30s tolerance
-            publish_time: Some(1_010),
+            // A tiny skew is tolerated, but the age is explicitly zero and a
+            // warning is emitted by validate_pyth_price.
+            publish_time: Some(1_000 + MAX_FUTURE_SKEW_SECONDS as i64),
         };
-        // Should be accepted (minor clock skew is tolerated)
         let result = validate_pyth_price(&data, 1_000, 60, 100);
         assert!(result.is_ok());
     }

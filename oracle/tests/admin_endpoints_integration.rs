@@ -224,7 +224,7 @@ async fn failed_submissions_returns_total_count() {
 
     {
         let mut failures = state.failures.lock().await;
-        failures.push(FailedSubmission {
+        failures.push(FailedSubmission::Price {
             at: SystemTime::now(),
             operation: "execute_order".to_string(),
             network: "testnet".to_string(),
@@ -261,7 +261,9 @@ async fn failed_submissions_returns_total_count() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json.get("failures").is_some());
     assert!(json.get("total_count").is_some());
+    assert_eq!(json["matched_count"], 1);
     assert_eq!(json["total_count"], 1);
+    assert_eq!(json["failures"][0]["kind"], "price");
 }
 
 #[tokio::test]
@@ -271,29 +273,21 @@ async fn failed_submissions_filters_by_operation() {
 
     {
         let mut failures = state.failures.lock().await;
-        failures.push(FailedSubmission {
+        failures.push(FailedSubmission::Keeper {
             at: SystemTime::now(),
             operation: "execute_order".to_string(),
             network: "testnet".to_string(),
-            token: String::new(),
-            symbol: String::new(),
-            source: None,
-            min: 0,
-            max: 0,
+            key: None,
             tx_hash: None,
             error: "err1".to_string(),
             timestamp: 0,
             ledger_seq: 0,
         });
-        failures.push(FailedSubmission {
+        failures.push(FailedSubmission::Keeper {
             at: SystemTime::now(),
             operation: "execute_deposit".to_string(),
             network: "testnet".to_string(),
-            token: String::new(),
-            symbol: String::new(),
-            source: None,
-            min: 0,
-            max: 0,
+            key: None,
             tx_hash: None,
             error: "err2".to_string(),
             timestamp: 0,
@@ -320,8 +314,10 @@ async fn failed_submissions_filters_by_operation() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["total_count"], 1);
+    assert_eq!(json["matched_count"], 1);
+    assert_eq!(json["total_count"], 2);
     assert_eq!(json["failures"][0]["operation"], "execute_order");
+    assert_eq!(json["failures"][0]["kind"], "keeper");
 }
 
 #[tokio::test]
@@ -332,15 +328,11 @@ async fn failed_submissions_respects_limit() {
     {
         let mut failures = state.failures.lock().await;
         for i in 0..5 {
-            failures.push(FailedSubmission {
+            failures.push(FailedSubmission::Keeper {
                 at: SystemTime::now(),
                 operation: format!("op_{i}"),
                 network: "testnet".to_string(),
-                token: String::new(),
-                symbol: String::new(),
-                source: None,
-                min: 0,
-                max: 0,
+                key: None,
                 tx_hash: None,
                 error: "err".to_string(),
                 timestamp: 0,
@@ -369,7 +361,105 @@ async fn failed_submissions_respects_limit() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["failures"].as_array().unwrap().len(), 2);
+    assert_eq!(json["matched_count"], 5);
     assert_eq!(json["total_count"], 5);
+}
+
+// `?operation=` is a documented prefix match, not an equality filter.
+#[tokio::test]
+async fn failed_submissions_operation_is_a_prefix_match() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    {
+        let mut failures = state.failures.lock().await;
+        for operation in ["execute_order", "execute_deposit", "execute_withdrawal"] {
+            failures.push(FailedSubmission::Keeper {
+                at: SystemTime::now(),
+                operation: operation.to_string(),
+                network: "testnet".to_string(),
+                key: None,
+                tx_hash: None,
+                error: "err".to_string(),
+                timestamp: 0,
+                ledger_seq: 0,
+            });
+        }
+    }
+
+    let app = build_router(state);
+
+    async fn get_json(app: &axum::Router, uri: &str) -> serde_json::Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("Authorization", auth_header())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+    }
+
+    let all_execute = get_json(&app, "/oracle/failed-submissions?operation=execute").await;
+    assert_eq!(all_execute["matched_count"], 3);
+    assert_eq!(all_execute["total_count"], 3);
+
+    // "order" is a suffix, not a prefix — it must not match anything.
+    let none = get_json(&app, "/oracle/failed-submissions?operation=order").await;
+    assert_eq!(none["matched_count"], 0);
+    // The buffer-wide total is still reported even when nothing matched.
+    assert_eq!(none["total_count"], 3);
+}
+
+// `total_count` is buffer-wide; `matched_count` is after filtering but before
+// `?limit=`, so a paginated caller sees the full picture.
+#[tokio::test]
+async fn failed_submissions_reports_both_matched_and_total_counts() {
+    let config = test_config("http://127.0.0.1:9", "http://127.0.0.1:9");
+    let state = Arc::new(AppState::new(config));
+
+    {
+        let mut failures = state.failures.lock().await;
+        for operation in ["execute_order", "execute_deposit", "keeper_cycle"] {
+            failures.push(FailedSubmission::Keeper {
+                at: SystemTime::now(),
+                operation: operation.to_string(),
+                network: "testnet".to_string(),
+                key: None,
+                tx_hash: None,
+                error: "err".to_string(),
+                timestamp: 0,
+                ledger_seq: 0,
+            });
+        }
+    }
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/oracle/failed-submissions?operation=execute&limit=1")
+                .header("Authorization", auth_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["failures"].as_array().unwrap().len(), 1);
+    assert_eq!(json["matched_count"], 2);
+    assert_eq!(json["total_count"], 3);
 }
 
 // #602 — a malformed `limit` must still come back as the API's JSON error
@@ -454,7 +544,7 @@ async fn keeper_balance_returns_200_when_horizon_healthy() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.5000000"}]
         })))
         .mount(&horizon_mock)
@@ -499,7 +589,7 @@ async fn keeper_balance_reports_unfunded_when_below_minimum() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "3.0000000"}]
         })))
         .mount(&horizon_mock)

@@ -99,7 +99,7 @@ async fn failed_token_error_is_recorded_in_failures() {
     assert!(
         entries
             .iter()
-            .any(|f| f.operation.contains("BADTOK") || f.operation.contains("price:")),
+            .any(|f| f.operation().contains("BADTOK") || f.operation().contains("price:")),
         "failure entry should reference the failed token"
     );
 }
@@ -371,11 +371,11 @@ async fn failure_operation_field_contains_token_symbol() {
     let failures = state.failures.lock().await;
     let entries: Vec<_> = failures.iter().collect();
     assert!(!entries.is_empty(), "at least one failure must be recorded");
-    let has_symbol = entries.iter().any(|f| f.operation.contains("XLM"));
+    let has_symbol = entries.iter().any(|f| f.operation().contains("XLM"));
     assert!(
         has_symbol,
         "failure operation field must contain the token symbol; got: {:?}",
-        entries.iter().map(|f| &f.operation).collect::<Vec<_>>()
+        entries.iter().map(|f| f.operation()).collect::<Vec<_>>()
     );
 }
 
@@ -413,7 +413,7 @@ async fn token_failure_count_reflected_in_metrics_after_partial_cycle() {
         "exactly one token succeeded in this cycle"
     );
 
-    let prometheus = state.metrics.to_prometheus();
+    let prometheus = state.metrics.to_prometheus(state.config.network.as_str());
     assert!(prometheus.contains(
         "oracle_token_source_fetch_failures_total{symbol=\"FAIL1\",token=\"CFAIL111111111111111111111111111111111111111111111111111111\",source=\"unsupported_source\"} 1"
     ));

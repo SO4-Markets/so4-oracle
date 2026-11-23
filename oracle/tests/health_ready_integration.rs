@@ -74,7 +74,7 @@ async fn get_ready_returns_200_when_healthy() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -138,7 +138,7 @@ async fn get_ready_retries_transient_keeper_balance_failure() {
                 ResponseTemplate::new(500).set_body_string("transient horizon error")
             } else {
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+                    "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
                     "balances": [{"asset_type": "native", "balance": "100.0000000"}]
                 }))
             }
@@ -200,7 +200,7 @@ async fn get_ready_retries_transient_rpc_failure() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -301,7 +301,7 @@ async fn get_ready_returns_503_when_keeper_loop_stale() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -357,7 +357,7 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -466,10 +466,13 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
             )
             .unwrap(),
         )),
-        keeper_account_id: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+        keeper_account_id: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
         keeper_index: 0,
         admin_api_token: Some(SecretString::new("test-admin-token".to_string())),
         pyth_api_key: None,
+        coinbase_base_url: oracle::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+        binance_base_url: oracle::binance::BINANCE_TICKER_PRICE_URL.to_string(),
+        pyth_hermes_url: oracle::pyth::PYTH_HERMES_URL.to_string(),
         min_keeper_balance_xlm: 10.0,
         set_prices_tx_fee: oracle::config::DEFAULT_SET_PRICES_TX_FEE,
         keeper_tx_fee: oracle::config::DEFAULT_KEEPER_TX_FEE,
@@ -482,8 +485,6 @@ async fn cold_start_reads_ready_after_price_and_keeper_loops() {
                 "1000000000000000000000000000000",
             )],
         },
-        coinbase_base_url: oracle::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
-        binance_base_url: oracle::binance::BINANCE_TICKER_PRICE_URL.to_string(),
     });
 
     let state = Arc::new(AppState::new(config));
@@ -577,7 +578,7 @@ async fn get_ready_returns_503_when_price_cache_empty() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -627,7 +628,7 @@ async fn get_ready_returns_503_when_price_loop_stale() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.0000000"}]
         })))
         .mount(&horizon_mock)
@@ -687,7 +688,7 @@ async fn get_ready_returns_503_when_keeper_balance_low() {
     // 5 XLM is below the 10 XLM minimum configured by test_config
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "5.0000000"}]
         })))
         .mount(&horizon_mock)

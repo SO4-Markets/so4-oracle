@@ -9,7 +9,7 @@ mod common;
 
 fn test_cached_price() -> CachedPrice {
     CachedPrice {
-        token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+        token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
         symbol: "TUSDC".to_string(),
         display_symbol: "USDC".to_string(),
         min: 1_000_000_000_000_000_000_000_000_000_000,

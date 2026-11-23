@@ -4,21 +4,17 @@ use serde::Deserialize;
 use crate::stellar_rpc::{rpc_post, JsonRpcRequest, JsonRpcResponse, RpcError};
 
 const MAX_POLL_ATTEMPTS: u32 = 6;
-const MAX_BACKOFF_MS: u64 = 16_000;
-#[cfg(not(test))]
 const INITIAL_BACKOFF_MS: u64 = 1_000;
-#[cfg(test)]
-const INITIAL_BACKOFF_MS: u64 = 1;
+/// Upper bound on a single poll sleep. The resulting total budget
+/// (1 + 2 + 4 + 8 + 16 = 31 s) fits inside the 50 s keeper-cycle timeout.
+const MAX_BACKOFF_MS: u64 = 16_000;
 
 // Matches the retry budget used at every other RPC call site
 // (get_account_sequence, simulate_contract_call, get_latest_ledger_sequence)
 // — a transient network blip reaching the RPC endpoint during submission
 // should be retried the same way, rather than aborting immediately (#1023).
 const SEND_TRANSACTION_RETRY_ATTEMPTS: u32 = 3;
-#[cfg(not(test))]
 const SEND_TRANSACTION_RETRY_BASE_DELAY_MS: u64 = 100;
-#[cfg(test)]
-const SEND_TRANSACTION_RETRY_BASE_DELAY_MS: u64 = 1;
 
 /// Maximum number of diagnostic-event XDR entries logged at warn/error level.
 /// Full payload capture is already available in the admin-gated failure ring
@@ -265,8 +261,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                         attempt,
                         "transient RPC/network error; will retry"
                     );
-                    sleep_ms(crate::retry::jitter(backoff_ms)).await;
-                    backoff_ms = (backoff_ms * 2).min(crate::retry::MAX_BACKOFF_DELAY_MS);
+                    sleep_before_next_poll(attempt, &mut backoff_ms).await;
                     continue;
                 } else {
                     return Err(SubmitError::Rpc(rpc_err));
@@ -312,8 +307,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                     next_backoff_ms = backoff_ms,
                     "transaction still pending"
                 );
-                sleep_ms(backoff_ms).await;
-                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                sleep_before_next_poll(attempt, &mut backoff_ms).await;
             }
             _ => {
                 tracing::warn!(
@@ -322,8 +316,7 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
                     attempt,
                     "unexpected transaction status; continuing poll"
                 );
-                sleep_ms(backoff_ms).await;
-                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                sleep_before_next_poll(attempt, &mut backoff_ms).await;
             }
         }
     }
@@ -337,8 +330,43 @@ async fn poll_until_confirmed(rpc_url: &str, hash: &str) -> Result<u32, SubmitEr
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// In unit tests, sleeps are recorded instead of actually awaited so the
+    /// shipped (multi-second) schedule can be asserted without slowing the
+    /// suite down or relying on a paused clock around real HTTP I/O.
+    static TEST_SLEEPS: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 async fn sleep_ms(ms: u64) {
+    #[cfg(test)]
+    {
+        TEST_SLEEPS.with(|recorded| recorded.borrow_mut().push(ms));
+    }
+    #[cfg(not(test))]
     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
+
+/// Sleep before the next poll attempt. There is deliberately no sleep after
+/// the final attempt: it only delays the PollTimeout and burns a keeper cycle.
+async fn sleep_before_next_poll(attempt: u32, backoff_ms: &mut u64) {
+    if attempt + 1 < MAX_POLL_ATTEMPTS {
+        sleep_ms(crate::retry::jitter(*backoff_ms)).await;
+        *backoff_ms = (*backoff_ms * 2).min(MAX_BACKOFF_MS);
+    }
+}
+
+/// Sleep sequence for a full polling schedule, used by the timing tests to
+/// check the shipped (not a `cfg(test)`-overridden) constants.
+#[cfg(test)]
+fn poll_backoff_schedule() -> Vec<u64> {
+    let mut backoff = INITIAL_BACKOFF_MS;
+    let mut schedule = Vec::new();
+    for _ in 0..MAX_POLL_ATTEMPTS.saturating_sub(1) {
+        schedule.push(backoff);
+        backoff = (backoff * 2).min(MAX_BACKOFF_MS);
+    }
+    schedule
 }
 
 /// Submit a signed transaction XDR and poll for the result with exponential backoff.
@@ -662,6 +690,50 @@ mod tests {
         } else {
             panic!("expected PollTimeout error with hash");
         }
+    }
+
+    /// The shipped backoff constants must be the ones exercised by tests, and
+    /// the whole poll budget must fit inside the keeper-cycle timeout. The
+    /// sleep recorder captures the exact (jittered) delays without waiting.
+    #[tokio::test]
+    async fn poll_backoff_uses_shipped_schedule_and_bounded_total() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer};
+
+        let schedule = poll_backoff_schedule();
+        assert_eq!(schedule, vec![1_000, 2_000, 4_000, 8_000, 16_000]);
+
+        let mock = MockServer::start().await;
+        let pending = serde_json::json!({ "status": "PENDING" });
+        Mock::given(method("POST"))
+            .respond_with(rpc_responder(vec![pending; MAX_POLL_ATTEMPTS as usize]))
+            .mount(&mock)
+            .await;
+
+        TEST_SLEEPS.with(|recorded| recorded.borrow_mut().clear());
+        let err = poll_until_confirmed(&mock.uri(), "abc123def456")
+            .await
+            .unwrap_err();
+        let sleeps = TEST_SLEEPS.with(|recorded| recorded.borrow().clone());
+
+        assert!(matches!(err, SubmitError::PollTimeout { .. }));
+
+        // Each sleep is jittered by [0.5, 1) of its scheduled base, and there
+        // is deliberately no sleep after the final attempt.
+        assert_eq!(sleeps.len(), schedule.len(), "unexpected sleep count");
+        for (sleep, base) in sleeps.iter().zip(&schedule) {
+            assert!(
+                (*sleep >= base / 2) && (*sleep <= *base),
+                "sleep {sleep}ms outside jittered range [{}, {base}]",
+                base / 2
+            );
+        }
+
+        let total: u64 = sleeps.iter().sum();
+        assert!(
+            total <= crate::keeper_loop::KEEPER_CYCLE_TIMEOUT_SECS * 1_000,
+            "poll budget {total}ms exceeds the keeper-cycle timeout"
+        );
     }
 
     #[tokio::test]

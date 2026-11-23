@@ -5,6 +5,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+/// Compile-time build identity injected by `build.rs`.
+///
+/// The version from `Cargo.toml` alone identifies nothing while the workspace
+/// has no release tags, so the commit and compiler are included as well.
+pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const BUILD_COMMIT: &str = env!("GIT_SHA");
+pub const BUILD_RUSTC: &str = env!("RUSTC_VERSION");
+
 /// Cumulative latency bucket upper bounds, in seconds, matching the `if`
 /// ladder in `record_http_request`. The trailing `+Inf` slot counts every
 /// request for the route, so its length is `Counters::http_request_duration_buckets`'s
@@ -72,7 +80,9 @@ struct Counters {
     submit_failures: u64,
     keeper_balance_low_count: u64,
     prices_stale_count: u64,
-    last_metrics_update: u64,
+    /// Mirrors the `oracle_last_cycle_metrics_update` Prometheus gauge: only
+    /// price/keeper cycle (and cycle-adjacent source) events advance it.
+    last_cycle_metrics_update: u64,
     http_requests_in_flight: u64,
     http_requests_total: BTreeMap<HttpRouteLabels, u64>,
     http_request_duration_buckets: BTreeMap<String, [u64; 7]>,
@@ -114,7 +124,10 @@ pub struct MetricsResponse {
     pub submit_failures: u64,
     pub keeper_balance_low_count: u64,
     pub prices_stale_count: u64,
-    pub last_metrics_update: u64,
+    /// Timestamp of the last price/keeper cycle metrics update. Named to match
+    /// the `oracle_last_cycle_metrics_update` Prometheus gauge; HTTP request
+    /// and auth metrics deliberately do not advance it.
+    pub last_cycle_metrics_update: u64,
 }
 
 /// What a single keeper cycle did, as reported by the keeper loop.
@@ -316,7 +329,7 @@ impl Metrics {
     /// section as the counters it accompanies, instead of a separate
     /// unsynchronized atomic store.
     fn stamp(c: &mut Counters) {
-        c.last_metrics_update = SystemTime::now()
+        c.last_cycle_metrics_update = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
@@ -337,13 +350,27 @@ impl Metrics {
             submit_failures: c.submit_failures,
             keeper_balance_low_count: c.keeper_balance_low_count,
             prices_stale_count: c.prices_stale_count,
-            last_metrics_update: c.last_metrics_update,
+            last_cycle_metrics_update: c.last_cycle_metrics_update,
         }
     }
 
-    pub fn to_prometheus(&self) -> String {
+    /// Render the Prometheus exposition, including the build identity.
+    ///
+    /// `network` comes from `Config`, so two accidentally co-located instances
+    /// on different networks (or commits) are distinguishable from a scrape.
+    pub fn to_prometheus(&self, network: &str) -> String {
         let c = self.counters.lock().unwrap_or_else(|p| p.into_inner());
         let mut output = String::new();
+
+        output.push_str("# HELP oracle_build_info Build identity of this oracle process\n");
+        output.push_str("# TYPE oracle_build_info gauge\n");
+        output.push_str(&format!(
+            "oracle_build_info{{version=\"{}\",commit=\"{}\",rustc=\"{}\",network=\"{}\"}} 1\n",
+            escape_label_value(BUILD_VERSION),
+            escape_label_value(BUILD_COMMIT),
+            escape_label_value(BUILD_RUSTC),
+            escape_label_value(network),
+        ));
 
         output.push_str("# HELP oracle_price_cycles_total Total number of price cycles\n");
         output.push_str("# TYPE oracle_price_cycles_total counter\n");
@@ -584,7 +611,7 @@ impl Metrics {
         output.push_str("# TYPE oracle_last_cycle_metrics_update gauge\n");
         output.push_str(&format!(
             "oracle_last_cycle_metrics_update {}\n",
-            c.last_metrics_update
+            c.last_cycle_metrics_update
         ));
 
         output.push_str("# HELP oracle_keeper_balance_low_count Total number of cycles with keeper balance below minimum\n");
@@ -716,7 +743,7 @@ mod tests {
         let metrics = Metrics::new();
         metrics.record_price_cycle(100, 3, 1);
 
-        let prometheus = metrics.to_prometheus();
+        let prometheus = metrics.to_prometheus("testnet");
         assert!(prometheus.contains("oracle_price_cycles_total 1"));
         assert!(prometheus.contains("oracle_price_cycle_duration_seconds 0.1"));
     }
@@ -816,13 +843,24 @@ mod tests {
     }
 
     #[test]
+    fn prometheus_exposes_build_identity() {
+        let metrics = Metrics::new();
+        let output = metrics.to_prometheus("testnet");
+
+        assert!(output.contains("# TYPE oracle_build_info gauge"));
+        assert!(output.contains(&format!(
+            "oracle_build_info{{version=\"{BUILD_VERSION}\",commit=\"{BUILD_COMMIT}\",rustc=\"{BUILD_RUSTC}\",network=\"testnet\"}} 1"
+        )));
+    }
+
+    #[test]
     fn token_source_failures_are_exported_with_bounded_labels() {
         let metrics = Metrics::new();
         metrics.record_token_source_fetch_failure("XLM", "CXLM", "pyth");
         metrics.record_token_source_fetch_failure("XLM", "CXLM", "pyth");
         metrics.record_token_source_fetch_failure("BTC", "CBTC", "binance");
 
-        let prometheus = metrics.to_prometheus();
+        let prometheus = metrics.to_prometheus("testnet");
         assert!(prometheus.contains(
             "oracle_token_source_fetch_failures_total{symbol=\"XLM\",token=\"CXLM\",source=\"pyth\"} 2"
         ));
@@ -836,10 +874,25 @@ mod tests {
         let metrics = Metrics::new();
         metrics.record_token_source_fetch_failure("A\"B", "C\\D", "line\nfeed");
 
-        let prometheus = metrics.to_prometheus();
+        let prometheus = metrics.to_prometheus("testnet");
         assert!(prometheus.contains(
             "oracle_token_source_fetch_failures_total{symbol=\"A\\\"B\",token=\"C\\\\D\",source=\"line\\nfeed\"} 1"
         ));
+    }
+
+    /// The exposed timestamp is cycle-scoped (it matches the
+    /// `oracle_last_cycle_metrics_update` gauge), so HTTP instrumentation must
+    /// not make it look like a price/keeper cycle ran.
+    #[test]
+    fn http_metrics_do_not_advance_last_cycle_metrics_update() {
+        let metrics = Metrics::new();
+
+        metrics.record_http_request("/oracle/status", "GET", 200, 5);
+        metrics.record_http_auth_failure("/admin/status");
+        assert_eq!(metrics.to_response().last_cycle_metrics_update, 0);
+
+        metrics.record_price_cycle(10, 1, 0);
+        assert!(metrics.to_response().last_cycle_metrics_update > 0);
     }
 
     #[test]
@@ -850,7 +903,7 @@ mod tests {
         metrics.record_http_request("/unmatched", "GET", 404, 15);
         metrics.record_http_request("/unmatched", "GET", 404, 25);
 
-        let output = metrics.to_prometheus();
+        let output = metrics.to_prometheus("testnet");
         let matches = output.matches("oracle_http_requests_total").count();
         // 2 matches: one for the HELP/TYPE header, one for the actual metric.
         assert_eq!(matches, 3);
@@ -864,7 +917,7 @@ mod tests {
         metrics.set_token_sources_available("TBTC", 3);
         metrics.set_token_sources_available("TBTC", 2);
 
-        let output = metrics.to_prometheus();
+        let output = metrics.to_prometheus("testnet");
         assert!(output.contains("# TYPE oracle_token_sources_available gauge"));
         assert!(output.contains("oracle_token_sources_available{symbol=\"TBTC\"} 2"));
         assert!(!output.contains("oracle_token_sources_available{symbol=\"TBTC\"} 3"));

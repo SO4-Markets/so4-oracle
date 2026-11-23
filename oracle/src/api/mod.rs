@@ -375,6 +375,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // reachable even under load. 512 is well above a single Fly machine's
         // realistic per-instance concurrency while still bounding memory.
         .layer(ConcurrencyLimitLayer::new(512))
+        // Request timeout: return 408 if a handler takes longer than
+        // REQUEST_TIMEOUT (#1259, #1452). Applied outside the trace layer so
+        // the span captures the timeout as a 408, not as an internal error.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
 }
 
 #[cfg(test)]
@@ -477,7 +485,7 @@ mod tests {
             app.clone().oneshot(request).await.unwrap();
         }
 
-        let metrics = state.metrics.to_prometheus();
+        let metrics = state.metrics.to_prometheus(state.config.network.as_str());
         assert!(metrics.contains("route=\"/prices\""), "{metrics}");
         assert!(!metrics.contains("route=\"/health\""), "{metrics}");
         assert!(!metrics.contains("route=\"/ready\""), "{metrics}");
@@ -565,6 +573,7 @@ mod tests {
     async fn test_secrets_redacted_from_logs_and_metrics() {
         let mut config = Config::default_for_tests();
         let test_secret = "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV";
+        let test_secret = "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT";
         let test_admin_token = "admin_super_secret_token_123";
         // #1472 — only the decoded key is kept; the raw strkey is dropped at
         // config load and must never resurface in logs or metrics.
@@ -595,7 +604,7 @@ mod tests {
         let _ = app.clone().oneshot(successful_request).await;
         let _ = app.clone().oneshot(failing_request).await;
 
-        let metrics_out = state.metrics.to_prometheus();
+        let metrics_out = state.metrics.to_prometheus(state.config.network.as_str());
 
         assert!(
             !metrics_out.contains(test_secret),
@@ -633,6 +642,9 @@ mod tests {
             !routes.is_empty(),
             "no route literals found in build_router"
         );
+        // `/unmatched` is the synthetic matched-path label used by the
+        // telemetry middleware, not a registered route.
+        routes.retain(|route| *route != "/unmatched");
 
         let table_start = readme
             .find("## Endpoints")

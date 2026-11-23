@@ -112,6 +112,10 @@ silently ignored and the process exits with a "required env var not set"
 error (#499). `NETWORK_PASSPHRASE` is not read — the passphrase follows
 `STELLAR_NETWORK`.
 
+An idle keeper (no pending orders, deposits or withdrawals) backs off for
+`4 × KEEPER_LOOP_MS` after each cycle. `/ready` accounts for that backoff and
+only reports `keeper_loop_stale` after `10 × KEEPER_LOOP_MS`.
+
 ## Development
 
 ```bash
@@ -267,6 +271,13 @@ to `railway.json`, which is committed to the repo.
 | `/keeper/blacklist/{key}`    | DELETE | Admin | Clears a permanently-blacklisted order/deposit/withdrawal key |
 | `/oracle/failed-submissions` | GET    | Admin | Failed submission history                                     |
 | `/metrics`                   | GET    | Admin | Prometheus metrics                                            |
+
+`/oracle/failed-submissions` accepts `?operation=<prefix>` (a **prefix** match,
+not equality — `execute` matches all `execute_*` labels, `order` matches none)
+and `?limit=<n>` (default 100, capped at 256). Its response reports
+`matched_count` (after filtering, before limiting) and `total_count` (the whole
+in-process buffer). Records are tagged `"kind": "price"` or `"kind": "keeper"`;
+keeper records carry an optional `key` and no price-only fields.
 
 ## Observability
 

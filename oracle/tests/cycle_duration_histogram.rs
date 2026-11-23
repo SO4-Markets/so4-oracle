@@ -16,7 +16,7 @@ fn price_cycle_histogram_buckets_are_cumulative() {
     // that fits is 0.5 (index 1). All buckets from 0.5 onwards must be 1.
     m.record_price_cycle(300, 2, 0);
 
-    let prom = m.to_prometheus();
+    let prom = m.to_prometheus("testnet");
 
     // le="0.25" must be 0 (300 ms > 250 ms)
     assert!(
@@ -42,7 +42,7 @@ fn price_cycle_histogram_sum_and_count() {
     m.record_price_cycle(500, 1, 0); // 0.5 s
     m.record_price_cycle(2000, 1, 0); // 2.0 s
 
-    let prom = m.to_prometheus();
+    let prom = m.to_prometheus("testnet");
 
     // sum = 0.5 + 2.0 = 2.5
     assert!(
@@ -63,7 +63,7 @@ fn price_cycle_histogram_slow_cycle_in_tail_buckets() {
     // 45 s — lands in the 60-bucket but not 30-bucket.
     m.record_price_cycle(45_000, 1, 0);
 
-    let prom = m.to_prometheus();
+    let prom = m.to_prometheus("testnet");
 
     assert!(
         prom.contains("oracle_price_cycle_duration_seconds_histogram_bucket{le=\"30\"} 0"),
@@ -82,7 +82,7 @@ fn keeper_cycle_histogram_buckets_are_cumulative() {
     // 3 s — first bucket that fits is 5.0 (3 > 2.5).
     m.record_keeper_cycle(3_000, KeeperCycleTally::default());
 
-    let prom = m.to_prometheus();
+    let prom = m.to_prometheus("testnet");
 
     assert!(
         prom.contains("oracle_keeper_cycle_duration_seconds_histogram_bucket{le=\"2.5\"} 0"),
@@ -105,7 +105,7 @@ fn keeper_cycle_histogram_sum_and_count() {
     m.record_keeper_cycle(1_000, KeeperCycleTally::default()); // 1 s
     m.record_keeper_cycle(10_000, KeeperCycleTally::default()); // 10 s
 
-    let prom = m.to_prometheus();
+    let prom = m.to_prometheus("testnet");
 
     assert!(
         prom.contains("oracle_keeper_cycle_duration_seconds_histogram_sum 11"),
@@ -123,7 +123,7 @@ fn legacy_gauges_still_present() {
     m.record_price_cycle(800, 1, 0);
     m.record_keeper_cycle(3_000, KeeperCycleTally::default());
 
-    let prom = m.to_prometheus();
+    let prom = m.to_prometheus("testnet");
 
     assert!(
         prom.contains("oracle_price_cycle_duration_seconds "),
@@ -138,7 +138,7 @@ fn legacy_gauges_still_present() {
 #[test]
 fn prometheus_output_declares_histogram_type() {
     let m = Metrics::new();
-    let prom = m.to_prometheus();
+    let prom = m.to_prometheus("testnet");
 
     assert!(
         prom.contains("# TYPE oracle_price_cycle_duration_seconds_histogram histogram"),
