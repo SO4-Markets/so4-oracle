@@ -34,6 +34,7 @@ are throttled with `429`. Query parameters and response shapes:
 | `/keeper/blacklist/{key}`    | DELETE | admin  | —                                         | `{"key":"<key>","cleared":true}`                                          |
 | `/oracle/failed-submissions` | GET    | admin  | `operation=<prefix>`, `limit=<n>`         | `{"failures":[FailedSubmission],"matched_count":<n>,"total_count":<n>}`   |
 | `/metrics`                   | GET    | admin  | —                                         | Prometheus text exposition                                                |
+| `/unmatched`                 | *      | public | —                                         | internal fallback route used to normalise `404`/`405` into the JSON error envelope |
 
 `/oracle/failed-submissions` returns the most recent failures first,
 filtered by operation-name prefix when `?operation=` is given, at most

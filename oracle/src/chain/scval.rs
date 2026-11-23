@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn test_strkey_to_sc_address_account() {
-        let addr = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let addr = "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7";
         let sc_addr = strkey_to_sc_address(addr).unwrap();
         assert!(matches!(sc_addr, stellar_xdr::ScAddress::Account(_)));
     }
@@ -175,7 +175,7 @@ mod tests {
     fn test_strkey_to_sc_address_rejects_unsupported_strkey_type() {
         // Create a muxed strkey (M... type) which is unsupported
         let pk = stellar_strkey::ed25519::PublicKey::from_string(
-            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
         )
         .unwrap();
         let muxed_strkey = stellar_strkey::ed25519::MuxedAccount {
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn test_encode_signed_price_produces_sorted_map() {
         let price = CachedPrice {
-            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 0,
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_account_strkey_to_muxed_valid_account() {
-        let addr = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let addr = "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7";
         let muxed = account_strkey_to_muxed(addr).unwrap();
         match muxed {
             stellar_xdr::MuxedAccount::Ed25519(stellar_xdr::Uint256(bytes)) => {
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn test_account_strkey_to_muxed_rejects_muxed_strkey() {
         let pk = stellar_strkey::ed25519::PublicKey::from_string(
-            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
         )
         .unwrap();
         let muxed_strkey = stellar_strkey::ed25519::MuxedAccount {
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn test_encode_signed_price_non_hex_signature() {
         let price = CachedPrice {
-            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 0,
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn test_encode_signed_price_wrong_length_signature() {
         let price = CachedPrice {
-            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 0,
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn test_encode_prices_vec() {
         let price = CachedPrice {
-            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 0,
@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn test_encode_signed_price_uses_configured_keeper_index() {
         let price = CachedPrice {
-            token_address: "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI".to_string(),
+            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 7,

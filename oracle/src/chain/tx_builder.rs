@@ -15,6 +15,9 @@ use crate::chain::scval::{account_strkey_to_muxed, strkey_to_sc_address};
 /// guaranteed `tx_too_late` before the key is retried.
 pub const TX_MAX_TIME_SECS: u64 = 60;
 
+/// `max_time`: Unix timestamp of the transaction's hard deadline.
+/// Pass `0` to omit time bounds (e.g. for simulation calls where sequence is 0).
+#[allow(clippy::too_many_arguments)]
 /// Soroban-specific options for [`build_invoke_tx`], grouped to keep the
 /// constructor's argument count within clippy's limit.
 pub struct InvokeTxOptions {
@@ -205,7 +208,7 @@ mod tests {
     #[test]
     fn test_build_invoke_tx_produces_valid_transaction() {
         let tx = build_invoke_tx(
-            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY",
             "set_prices",
             vec![ScVal::Void],
@@ -228,7 +231,7 @@ mod tests {
     fn test_build_invoke_tx_sets_time_bounds_when_max_time_nonzero() {
         let max_time = 9_999_999_999u64;
         let tx = build_invoke_tx(
-            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY",
             "set_prices",
             vec![ScVal::Void],
@@ -255,7 +258,7 @@ mod tests {
         use base64::Engine;
 
         let tx = build_invoke_tx(
-            "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY",
             "set_prices",
             vec![ScVal::Void],

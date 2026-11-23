@@ -64,6 +64,9 @@ Startup rejects the same contract ID in two of these variables, naming both.
 | ------------------- | -------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `ADMIN_API_TOKEN`   |          | unset (admin routes `503`)    | Bearer token for admin routes. At least 32 characters; the `.env.example` placeholder is rejected. Secret.           |
 | `PYTH_API_KEY`      |          | unset                         | API key for the production Hermes (Pyth) endpoint. Secret. At least 16 chars, no whitespace; a startup warning names pyth tokens when unset. |
+| `COINBASE_BASE_URL` |          | Coinbase exchange-rates URL   | Coinbase base URL. Override in tests to point a real `AppState` at a mock server (#1264). |
+| `BINANCE_BASE_URL`  |          | Binance ticker-price URL      | Binance base URL. Override in tests to point a real `AppState` at a mock server (#1264). |
+| `PYTH_HERMES_URL`   |          | Hermes latest-price-feeds URL | Pyth Hermes base URL. Override in tests to point a real `AppState` at a mock server (#1264). |
 | `PRICE_FEED_CONFIG` |          | embedded `config/tokens.json` | Inline JSON array of `TokenConfig` entries — not a file path. Use `PRICE_FEED_CONFIG="$(cat tokens.json)"` for a file. |
 | `PRICE_LOOP_MS`     |          | `1000`                        | Interval between price cycles (ms), 250–60000, and shorter than every token's `stale_after_seconds`.                    |
 | `KEEPER_LOOP_MS`    |          | `1500`                        | Interval between keeper cycles (ms), 250–60000.                                                                       |

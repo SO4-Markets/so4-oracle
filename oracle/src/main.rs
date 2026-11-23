@@ -289,6 +289,8 @@ async fn health_check() -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use super::health_check_url;
+    use super::{drain_background_tasks, drain_timeout, use_pretty_logs, BackgroundTask};
     use super::{
         drain_background_tasks, drain_timeout, health_check_url, use_pretty_logs, BackgroundTask,
     };

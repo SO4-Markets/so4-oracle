@@ -112,6 +112,10 @@ silently ignored and the process exits with a "required env var not set"
 error (#499). `NETWORK_PASSPHRASE` is not read — the passphrase follows
 `STELLAR_NETWORK`.
 
+An idle keeper (no pending orders, deposits or withdrawals) backs off for
+`4 × KEEPER_LOOP_MS` after each cycle. `/ready` accounts for that backoff and
+only reports `keeper_loop_stale` after `10 × KEEPER_LOOP_MS`.
+
 ## Development
 
 ```bash

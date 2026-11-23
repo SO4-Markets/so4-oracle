@@ -12,7 +12,7 @@ use oracle::stellar_rpc::{
 };
 use oracle::submit::{parse_get_transaction_response, parse_send_response};
 
-const KEEPER: &str = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+const KEEPER: &str = "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7";
 
 const LATEST_LEDGER: &str = include_str!("fixtures/rpc/getLatestLedger.json");
 const SEND_PENDING: &str = include_str!("fixtures/rpc/sendTransaction_PENDING.json");

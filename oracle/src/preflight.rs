@@ -60,6 +60,24 @@ pub async fn preflight(config: &Config) -> PreflightResult {
 
 fn check_keeper_key(config: &Config) -> PreflightCheck {
     const NAME: &str = "keeper_account_matches_secret_key";
+    // `KEEPER_SECRET_KEY` is decoded once at config load (#1472/1473), so a
+    // missing key is already a boot failure — report it as a hard check here
+    // rather than parsing the strkey again.
+    let Some(signing_key) = config.keeper_secret_key.as_deref() else {
+        return PreflightCheck {
+            name: NAME,
+            ok: false,
+            hard: true,
+            detail: "KEEPER_SECRET_KEY is not configured".to_string(),
+        };
+    };
+    let raw = signing_key.verifying_key().to_bytes();
+    let public_bytes: [u8; 32] = core::array::from_fn(|i| raw[i]);
+    // `PublicKey::to_string()` returns strkey's fixed-capacity string type;
+    // format! gives us a plain String comparable with Config's field.
+    let account_id = format!("{}", stellar_strkey::ed25519::PublicKey(public_bytes));
+    if account_id == config.keeper_account_id {
+        PreflightCheck {
     let derived = config
         .keeper_secret_key
         .as_ref()
@@ -70,6 +88,9 @@ fn check_keeper_key(config: &Config) -> PreflightCheck {
             ok: true,
             hard: true,
             detail: format!("KEEPER_ACCOUNT_ID matches derived key {account_id}"),
+        }
+    } else {
+        PreflightCheck {
         },
         Some(Ok(account_id)) => PreflightCheck {
             name: NAME,
@@ -79,6 +100,8 @@ fn check_keeper_key(config: &Config) -> PreflightCheck {
                 "KEEPER_ACCOUNT_ID {} does not match KEEPER_SECRET_KEY-derived account {}",
                 config.keeper_account_id, account_id
             ),
+        }
+    }
         },
         Some(Err(error)) => PreflightCheck {
             name: NAME,

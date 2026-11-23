@@ -605,7 +605,7 @@ mod tests {
     /// for the requested account (#1241).
     #[test]
     fn account_ledger_key_encodes_as_account_key() {
-        let account = "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI";
+        let account = "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7";
         let encoded = account_ledger_key_xdr(account).unwrap();
         let decoded = LedgerKey::from_xdr_base64(&encoded, Limits::none()).unwrap();
 

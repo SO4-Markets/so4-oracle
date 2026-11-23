@@ -544,7 +544,7 @@ async fn keeper_balance_returns_200_when_horizon_healthy() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "100.5000000"}]
         })))
         .mount(&horizon_mock)
@@ -589,7 +589,7 @@ async fn keeper_balance_reports_unfunded_when_below_minimum() {
 
     wiremock::Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "GAUHMCMUP5FZO5675W3ISZ6E6CNYJGXBUW5WANE2JR4TGAARYCTSCBKI",
+            "id": "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7",
             "balances": [{"asset_type": "native", "balance": "3.0000000"}]
         })))
         .mount(&horizon_mock)
