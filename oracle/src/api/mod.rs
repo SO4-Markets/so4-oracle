@@ -363,12 +363,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             HeaderValue::from_static("no-store"),
         ))
         .layer(axum::middleware::from_fn(map_method_not_allowed))
-        // Request timeout: return 408 if a handler takes longer than 30 s
-        // (#1259). Applied outside the trace layer so the span captures the
-        // timeout as a 408, not as an internal server error.
+        // Request timeout: return 408 if a handler takes longer than
+        // REQUEST_TIMEOUT (#1259, #1452). Applied outside the trace layer so
+        // the span captures the timeout as a 408, not as an internal server error.
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(30),
+            REQUEST_TIMEOUT,
         ))
         // Hard cap on concurrent requests (#1259). Excess requests receive
         // 503 immediately rather than queuing, keeping /health and /ready
@@ -572,6 +572,7 @@ mod tests {
     #[tokio::test]
     async fn test_secrets_redacted_from_logs_and_metrics() {
         let mut config = Config::default_for_tests();
+        let test_secret = "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV";
         let test_secret = "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT";
         let test_admin_token = "admin_super_secret_token_123";
         // #1472 — only the decoded key is kept; the raw strkey is dropped at
@@ -650,6 +651,11 @@ mod tests {
             .expect("oracle/README.md has an Endpoints section");
         let table = &readme[table_start..];
         for route in routes {
+            // `/unmatched` is a metrics label for requests that matched no
+            // registered route, not an endpoint the router serves.
+            if route == "/unmatched" {
+                continue;
+            }
             assert!(
                 table.contains(route),
                 "route {route} from build_router is missing from the endpoint table in oracle/README.md"

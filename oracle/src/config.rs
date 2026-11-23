@@ -1576,6 +1576,7 @@ mod tests {
             ),
             (
                 "KEEPER_SECRET_KEY",
+                "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV".to_string(),
                 "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT".to_string(),
             ),
             (
@@ -1748,6 +1749,7 @@ mod tests {
 
     #[test]
     fn validate_strkey_accepts_s_prefixed() {
+        let value = "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV";
         let value = "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT";
         let result = validate_strkey("KEEPER_SECRET_KEY", value.to_string(), 'S');
         assert!(result.is_ok());
@@ -1785,6 +1787,7 @@ mod tests {
 
     #[test]
     fn validate_strkey_rejects_s_prefixed_for_account() {
+        let value = "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV";
         let value = "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT";
         let result = validate_strkey("KEEPER_ACCOUNT_ID", value.to_string(), 'G');
         assert!(result.is_err());
@@ -1833,6 +1836,7 @@ mod tests {
         let mut env = valid_env();
         env.insert(
             "KEEPER_ACCOUNT_ID",
+            "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV".to_string(),
             "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT".to_string(),
         );
 

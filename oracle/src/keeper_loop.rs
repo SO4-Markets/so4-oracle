@@ -223,6 +223,9 @@ async fn run_keeper_cycle_inner(state: Arc<AppState>) -> Result<CycleSummary, St
                 orders = summary.orders_executed,
                 deposits = summary.deposits_executed,
                 withdrawals = summary.withdrawals_executed,
+                pending_orders = summary.pending_orders,
+                pending_deposits = summary.pending_deposits,
+                pending_withdrawals = summary.pending_withdrawals,
                 errors = summary.errors,
                 prices_stale = summary.prices_stale,
                 keeper_balance_low = summary.keeper_balance_low,
@@ -234,6 +237,9 @@ async fn run_keeper_cycle_inner(state: Arc<AppState>) -> Result<CycleSummary, St
                     orders: summary.orders_executed,
                     deposits: summary.deposits_executed,
                     withdrawals: summary.withdrawals_executed,
+                    pending_orders: summary.pending_orders,
+                    pending_deposits: summary.pending_deposits,
+                    pending_withdrawals: summary.pending_withdrawals,
                     errors: summary.errors,
                     keeper_balance_low: summary.keeper_balance_low,
                     prices_stale: summary.prices_stale,
@@ -265,6 +271,12 @@ pub struct CycleSummary {
     pub orders_executed: usize,
     pub deposits_executed: usize,
     pub withdrawals_executed: usize,
+    /// Pending work discovered at the start of the cycle, before any gating or
+    /// execution. Returning it lets callers distinguish "nothing was pending"
+    /// from "work was pending but none of it succeeded" (#1267).
+    pub pending_orders: usize,
+    pub pending_deposits: usize,
+    pub pending_withdrawals: usize,
     pub errors: usize,
     /// Pending keys found at the start of the cycle, before any execution was
     /// attempted. These are what distinguish "nothing to do" from "tried and
@@ -284,6 +296,16 @@ pub struct CycleSummary {
 }
 
 impl CycleSummary {
+    /// A cycle that executed nothing because there was no work or submissions
+    /// were gated. The pending counts are still recorded so a gated cycle is
+    /// not mistaken for an idle one by metrics or logs.
+    fn skipped(
+        pending_orders: usize,
+        pending_deposits: usize,
+        pending_withdrawals: usize,
+        prices_stale: bool,
+        keeper_balance_low: bool,
+    ) -> Self {
     /// A zero-work summary with the two gates set; used by the pure-logic tests
     /// below. Production paths construct `CycleSummary` explicitly so the
     /// pending-key counts survive gating decisions.
@@ -293,6 +315,9 @@ impl CycleSummary {
             orders_executed: 0,
             deposits_executed: 0,
             withdrawals_executed: 0,
+            pending_orders,
+            pending_deposits,
+            pending_withdrawals,
             errors: 0,
             pending_orders: 0,
             pending_deposits: 0,
@@ -474,6 +499,13 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
 
     if order_keys.is_empty() && deposit_keys.is_empty() && withdrawal_keys.is_empty() {
         info!("no_pending_work");
+        return Ok(CycleSummary::skipped(
+            order_keys.len(),
+            deposit_keys.len(),
+            withdrawal_keys.len(),
+            prices_stale,
+            keeper_balance_low,
+        ));
         return Ok(summary);
     }
 
@@ -489,6 +521,23 @@ async fn execute_keeper_cycle(state: Arc<AppState>) -> Result<CycleSummary, Stri
 
     if keeper_balance_low {
         warn!("keeper_balance_below_min; skipping all on-chain submissions this cycle");
+        return Ok(CycleSummary::skipped(
+            order_keys.len(),
+            deposit_keys.len(),
+            withdrawal_keys.len(),
+            prices_stale,
+            keeper_balance_low,
+        ));
+    }
+
+    let mut summary = CycleSummary::skipped(
+        order_keys.len(),
+        deposit_keys.len(),
+        withdrawal_keys.len(),
+        prices_stale,
+        keeper_balance_low,
+    );
+
         return Ok(summary);
     }
 
@@ -1257,6 +1306,22 @@ fn is_poll_timeout(error: &str) -> bool {
     error.contains("(hash: ")
 }
 
+/// Recover the transaction hash embedded in a rendered poll-timeout error
+/// (#721). The hash is the one piece of an ambiguous outcome an operator can
+/// look up on a block explorer, so it is parsed from the typed
+/// `SubmitError::PollTimeout` before the error is flattened to a string.
+#[cfg(test)]
+fn poll_timeout_hash(error: &str) -> Option<String> {
+    const MARKER: &str = "(hash: ";
+    let start = error.find(MARKER)? + MARKER.len();
+    let rest = &error[start..];
+    let end = rest.find(')')?;
+    let hash = &rest[..end];
+    if hash.is_empty() {
+        None
+    } else {
+        Some(hash.to_string())
+    }
 /// Recover the transaction hash from a poll-timeout error string.
 #[cfg(test)]
 fn poll_timeout_hash(error: &str) -> Option<String> {
@@ -1471,6 +1536,7 @@ async fn set_price_batch_on_chain(
         &state.config.oracle_contract_id,
         "set_prices",
         vec![prices_scval],
+        tx_builder::TxParams::new(state.config.set_prices_tx_fee, sequence, max_time),
         state.config.set_prices_tx_fee,
         sequence,
         tx_builder::InvokeTxOptions {
@@ -1684,6 +1750,7 @@ async fn execute_handler(
             )?),
             key_scval,
         ],
+        tx_builder::TxParams::new(state.config.keeper_tx_fee, sequence, max_time),
         state.config.keeper_tx_fee,
         sequence,
         tx_builder::InvokeTxOptions {
@@ -1863,6 +1930,8 @@ async fn simulate_contract_call_once(
         contract_id,
         method,
         scval_args,
+        // No sequence and no time bound for simulation calls.
+        tx_builder::TxParams::new(100, 0, 0),
         100,
         0, // sequence number is irrelevant for simulation
         tx_builder::InvokeTxOptions {
@@ -2116,6 +2185,9 @@ mod tests {
             orders_executed: orders,
             deposits_executed: deposits,
             withdrawals_executed: withdrawals,
+            pending_orders: 0,
+            pending_deposits: 0,
+            pending_withdrawals: 0,
             errors: 0,
             pending_orders: 0,
             pending_deposits: 0,
@@ -2128,6 +2200,16 @@ mod tests {
 
     #[test]
     fn idle_cycle_classification() {
+        assert!(is_idle_cycle(&Ok(summary(0, 0, 0))));
+        assert!(!is_idle_cycle(&Ok(summary(1, 0, 0))));
+        assert!(!is_idle_cycle(&Ok(summary(0, 1, 0))));
+        assert!(!is_idle_cycle(&Ok(summary(0, 0, 1))));
+        // A gated cycle executed nothing, so it backs off like any idle one.
+        assert!(is_idle_cycle(&Ok(CycleSummary::skipped(
+            0, 0, 0, true, true
+        ))));
+        // A failed cycle is not idle: it must not add the backoff.
+        assert!(!is_idle_cycle(&Err("rpc down".to_string())));
         assert!(summary(0, 0, 0).was_idle());
         assert!(!summary(1, 0, 0).was_idle());
         assert!(!summary(0, 1, 0).was_idle());
@@ -2146,12 +2228,18 @@ mod tests {
     fn skipped_summary_records_both_gates_and_no_work() {
         for stale in [false, true] {
             for low in [false, true] {
-                let s = CycleSummary::skipped(stale, low);
+                let s = CycleSummary::skipped(3, 2, 1, stale, low);
                 assert_eq!(s.prices_stale, stale);
                 assert_eq!(s.keeper_balance_low, low);
                 let work = s.orders_executed + s.deposits_executed + s.withdrawals_executed;
                 assert_eq!(work, 0);
                 assert_eq!(s.errors, 0);
+                // Pending work must survive a gated cycle so metrics can tell
+                // "nothing to do" from "work available, none executed".
+                assert_eq!(
+                    (s.pending_orders, s.pending_deposits, s.pending_withdrawals),
+                    (3, 2, 1)
+                );
             }
         }
     }
@@ -2168,6 +2256,7 @@ mod tests {
     #[test]
     fn post_set_prices_settle_stays_small_fraction_of_cycle_budget() {
         // #956 — the settle delay must not eat a meaningful share of the cycle timeout.
+        const { assert!(POST_SET_PRICES_SETTLE_MS * 10 <= KEEPER_CYCLE_TIMEOUT_SECS * 1_000) };
         const {
             assert!(POST_SET_PRICES_SETTLE_MS * 10 <= KEEPER_CYCLE_TIMEOUT_SECS * 1_000);
         };
@@ -2443,6 +2532,7 @@ mod tests {
             )),
             keeper_secret_key: Some(std::sync::Arc::new(
                 crate::chain::tx_builder::signing_key_from_secret(
+                    "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV",
                     "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT",
                 )
                 .unwrap(),
@@ -2575,6 +2665,7 @@ mod tests {
             )),
             keeper_secret_key: Some(std::sync::Arc::new(
                 crate::chain::tx_builder::signing_key_from_secret(
+                    "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV",
                     "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT",
                 )
                 .unwrap(),
@@ -2730,6 +2821,7 @@ mod tests {
             )),
             keeper_secret_key: Some(std::sync::Arc::new(
                 crate::chain::tx_builder::signing_key_from_secret(
+                    "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV",
                     "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT",
                 )
                 .unwrap(),
@@ -2847,6 +2939,22 @@ mod keeper_tx_tests {
         }
     }
 
+    fn batch_price(median: i128) -> CachedPrice {
+        CachedPrice {
+            token_address: "GAFRESH".to_string(),
+            symbol: "FRESH".to_string(),
+            display_symbol: "FRESH".to_string(),
+            keeper_index: 0,
+            min: median,
+            max: median,
+            median,
+            timestamp: 0,
+            ledger_seq: 1,
+            sources_used: vec!["test".to_string()],
+            signature: "sig".to_string(),
+        }
+    }
+
     fn dummy_tx() -> stellar_xdr::Transaction {
         stellar_xdr::Transaction {
             source_account: stellar_xdr::MuxedAccount::Ed25519(stellar_xdr::Uint256([7u8; 32])),
@@ -2864,6 +2972,12 @@ mod keeper_tx_tests {
     fn sign_keeper_tx_uses_cached_key_when_present() {
         const SECRET: &str = "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT";
         let mut config = Config::default_for_tests();
+        config.keeper_secret_key = Some(Arc::new(
+            crate::chain::tx_builder::signing_key_from_secret(
+                "SBTINLKVKI6TNGJB3WC34ILDIKSJM5RVLZDCQJ4KLMXENSWCADKVM6CV",
+            )
+            .expect("valid test secret key"),
+        ));
         let key = crate::chain::tx_builder::signing_key_from_secret(
             "SAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRDBNT",
         )
@@ -2881,6 +2995,10 @@ mod keeper_tx_tests {
         let got = sign_keeper_tx(&state, &tx).expect("cached-key signing succeeds");
         let expected = crate::chain::tx_builder::sign_transaction_with_key(
             &tx,
+            state.tx_signing_key.as_deref().expect("cached key"),
+            &state.config.network_passphrase,
+        )
+        .expect("key signing succeeds");
             &key,
             &state.config.network_passphrase,
         )
@@ -2911,6 +3029,7 @@ mod keeper_tx_tests {
     fn price_batches_split_at_max_price_batch_size() {
         let cache = |n: usize| -> BTreeMap<String, CachedPrice> {
             (0..n)
+                .map(|i| (format!("k{i:03}"), batch_price(i as i128)))
                 .map(|i| {
                     (
                         format!("k{i:03}"),

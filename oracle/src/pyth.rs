@@ -290,6 +290,7 @@ pub(crate) async fn fetch_pyth_price_with_url(
         stale_after_seconds,
         max_confidence_bps,
     )
+    .map(|validated| validated.price)
     .map(|priced| priced.price)
 }
 

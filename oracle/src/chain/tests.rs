@@ -11,6 +11,7 @@ use stellar_xdr::{
 
 use super::scval::{encode_prices_vec, strkey_to_sc_address};
 use super::tx_builder::{
+    build_invoke_tx, sign_transaction_with_key, signing_key_from_secret, TxParams,
     build_invoke_tx, sign_transaction_with_key, signing_key_from_secret, InvokeTxOptions,
 };
 
@@ -67,6 +68,7 @@ fn set_prices_survives_build_sign_encode_decode() {
         ORACLE_CONTRACT,
         "set_prices",
         vec![prices.clone()],
+        TxParams::new(100, 7, 0),
         100,
         7,
         InvokeTxOptions {

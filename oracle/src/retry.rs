@@ -145,6 +145,19 @@ mod tests {
             true
         }
     }
+
+    /// #1227 — the opposite classification: a deterministic failure that
+    /// must abort on the first attempt.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TerminalError(u32);
+
+    impl Retryable for TerminalError {
+        fn is_retryable(&self) -> bool {
+            false
+        }
+    }
+
+    use std::cell::Cell;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
@@ -218,6 +231,45 @@ mod tests {
 
         assert_eq!(result, Err("always fails"));
         assert_eq!(call_count.get(), 3);
+    }
+
+    /// The `!retryable` branch decides whether a deterministic contract revert
+    /// is retried forever or dropped at once. Without this test every case in
+    /// this module uses `&str`, which is retryable, so the branch is uncovered.
+    #[test]
+    fn non_retryable_error_calls_once_and_returns_the_original_error() {
+        let call_count = Rc::new(Cell::new(0u32));
+        let original = TerminalError(42);
+
+        let result: Result<(), TerminalError> = block_on(async {
+            let count = Rc::clone(&call_count);
+            let error = original.clone();
+            retry_with_backoff(
+                || {
+                    let count = Rc::clone(&count);
+                    let error = error.clone();
+                    async move {
+                        count.set(count.get() + 1);
+                        Err(error)
+                    }
+                },
+                5, // the budget would be consumed if the flag were ignored
+                0,
+                MAX_BACKOFF_DELAY_MS,
+            )
+            .await
+        });
+
+        assert_eq!(
+            result,
+            Err(original),
+            "the original error value must be returned"
+        );
+        assert_eq!(
+            call_count.get(),
+            1,
+            "a non-retryable error must abort immediately"
+        );
     }
 
     #[test]
