@@ -120,15 +120,9 @@ pub fn aggregate_prices(
 
     // Compute the minimum observation time from the sources used in the final aggregation
     let min_observation_time = filter_result
-        .filtered_sources
+        .filtered_indices
         .iter()
-        .filter_map(|source| {
-            // Find the index of this source in the original sources array
-            sources
-                .iter()
-                .position(|s| s == source)
-                .map(|orig_idx| observation_times[orig_idx])
-        })
+        .map(|&orig_idx| observation_times[orig_idx])
         .min()
         .ok_or_else(|| "no observation times available".to_string())?;
 
@@ -178,7 +172,12 @@ fn find_largest_consistent_cluster(
         let (len, best_len) = (end - start, best.1 - best.0);
         let spread = hi - sorted[start].0;
         let best_spread = sorted[best.1 - 1].0 - sorted[best.0].0;
-        if len > best_len || (len == best_len && spread < best_spread) {
+        if len > best_len
+            || (len == best_len && spread < best_spread)
+            || (len == best_len
+                && spread == best_spread
+                && sorted[start].0 < sorted[best.0].0)
+        {
             best = (start, end);
         }
     }
@@ -252,6 +251,7 @@ pub fn percentile(sorted: &[i128], p: u8) -> i128 {
 pub struct OutlierFilterResult {
     pub filtered_prices: Vec<i128>,
     pub filtered_sources: Vec<String>,
+    pub filtered_indices: Vec<usize>,
     pub rejected: Vec<(String, i128, f64)>, // source, price, deviation_bps
 }
 
@@ -277,6 +277,7 @@ pub fn filter_outliers(
         return OutlierFilterResult {
             filtered_prices: vec![],
             filtered_sources: vec![],
+            filtered_indices: vec![],
             rejected: vec![],
         };
     }
@@ -292,6 +293,7 @@ pub fn filter_outliers(
             return OutlierFilterResult {
                 filtered_prices: prices.to_vec(),
                 filtered_sources: sources.to_vec(),
+                filtered_indices: vec![0, 1],
                 rejected: vec![],
             };
         }
@@ -301,6 +303,7 @@ pub fn filter_outliers(
             return OutlierFilterResult {
                 filtered_prices: prices.to_vec(),
                 filtered_sources: sources.to_vec(),
+                filtered_indices: vec![0, 1],
                 rejected: vec![],
             };
         }
@@ -312,6 +315,7 @@ pub fn filter_outliers(
             return OutlierFilterResult {
                 filtered_prices: vec![prices[0]],
                 filtered_sources: vec![sources[0].clone()],
+                filtered_indices: vec![0],
                 rejected: vec![(sources[1].clone(), prices[1], deviation_bps)],
             };
         } else {
@@ -319,6 +323,7 @@ pub fn filter_outliers(
             return OutlierFilterResult {
                 filtered_prices: vec![prices[1]],
                 filtered_sources: vec![sources[1].clone()],
+                filtered_indices: vec![1],
                 rejected: vec![(sources[0].clone(), prices[0], deviation_bps)],
             };
         }
@@ -358,6 +363,7 @@ pub fn filter_outliers(
 
     let mut filtered_prices = Vec::new();
     let mut filtered_sources = Vec::new();
+    let mut filtered_indices = Vec::new();
     let mut rejected = Vec::new();
 
     let max_dev = max_deviation_bps as f64;
@@ -378,12 +384,14 @@ pub fn filter_outliers(
         } else {
             filtered_prices.push(p);
             filtered_sources.push(sources[i].clone());
+            filtered_indices.push(i);
         }
     }
 
     OutlierFilterResult {
         filtered_prices,
         filtered_sources,
+        filtered_indices,
         rejected,
     }
 }
@@ -1073,5 +1081,23 @@ mod tests {
         let backward = find_largest_consistent_cluster(&rev_p, &rev_s, 500).unwrap();
         assert_eq!(forward.filtered_prices, backward.filtered_prices);
         assert_eq!(forward.sources, backward.sources);
+    }
+
+    #[test]
+    fn cluster_tiebreak_prefers_lower_prices_when_size_and_spread_equal() {
+        // Two equal-size (2), equal-spread (2) clusters at different price levels.
+        let prices = [100i128, 102, 200, 202];
+        let sources = names(4);
+        let cluster = find_largest_consistent_cluster(&prices, &sources, 500).unwrap();
+        assert_eq!(cluster.filtered_prices, vec![100, 102]);
+    }
+
+    #[test]
+    fn min_observation_time_uses_original_indices_for_duplicate_source_names() {
+        let prices = vec![100i128, 100, 100];
+        let sources = vec!["a".to_string(), "b".to_string(), "a".to_string()];
+        let obs_times = vec![30u64, 20, 10];
+        let agg = aggregate_prices(&prices, &sources, &obs_times, 1, 500).unwrap();
+        assert_eq!(agg.min_observation_time, 10);
     }
 }
