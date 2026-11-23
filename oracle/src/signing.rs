@@ -210,7 +210,9 @@ mod tests {
         assert_eq!(hex::encode(&msg), hex::encode(&expected));
     }
 
-    /// #388 — "not hex" input must return InvalidHexKey.
+    /// Golden byte-layout vector for the `build_price_message` format introduced
+    /// in #387. Pins the exact on-the-wire signing payload that the on-chain
+    /// verifier in SO4-Markets/contracts must mirror byte for byte.
     #[test]
     fn price_message_layout_regression_vector() {
         let bytes = build_price_message(
