@@ -1261,12 +1261,17 @@ fn is_poll_timeout(error: &str) -> bool {
 ///
 /// `SubmitError::PollTimeout` renders it as `(hash: <64 hex chars>)`; an
 /// absent, empty or malformed hash yields `None` (#721).
+/// Recover the transaction hash embedded in a poll-timeout error message, if
+/// any. Used so `/oracle/failed-submissions` can hand operators a hash to look
+/// up for ambiguous outcomes (#721).
 #[cfg(test)]
 fn poll_timeout_hash(error: &str) -> Option<String> {
     const MARKER: &str = "(hash: ";
     let rest = &error[error.find(MARKER)? + MARKER.len()..];
     let hash: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
     (hash.len() == 64).then_some(hash)
+    let hash = &rest[..rest.find(')')?];
+    (!hash.is_empty()).then(|| hash.to_string())
 }
 
 /// Detect whether a `SubmitError::TransactionFailed` was caused by a Soroban
@@ -1459,8 +1464,10 @@ async fn set_price_batch_on_chain(
         vec![prices_scval],
         state.config.set_prices_tx_fee,
         sequence,
-        None,
-        max_time,
+        tx_builder::InvokeTxOptions {
+            soroban_data: None,
+            max_time,
+        },
     )?;
 
     let signed_xdr = sign_keeper_tx(state, &tx)?;
@@ -1670,8 +1677,10 @@ async fn execute_handler(
         ],
         state.config.keeper_tx_fee,
         sequence,
-        None,
-        max_time,
+        tx_builder::InvokeTxOptions {
+            soroban_data: None,
+            max_time,
+        },
     )?;
 
     let signed_xdr = sign_keeper_tx(state, &tx)?;
@@ -1847,8 +1856,10 @@ async fn simulate_contract_call_once(
         scval_args,
         100,
         0, // sequence number is irrelevant for simulation
-        None,
-        0, // no time bound for simulation
+        tx_builder::InvokeTxOptions {
+            soroban_data: None,
+            max_time: 0, // no time bound for simulation
+        },
     )
     .map_err(SimulateError::Build)?;
 
@@ -1945,15 +1956,18 @@ async fn record_error(
     error: &str,
     tx_hash: Option<String>,
 ) {
-    state.failures.lock().await.push(FailedSubmission {
+    // Handler callers pass `execute_order:<key>` (and the deposit/withdrawal
+    // equivalents). Split the key out of the label instead of hiding it there;
+    // whole-cycle failures such as `keeper_cycle` have no key at all.
+    let (operation, key) = match operation.split_once(':') {
+        Some((operation, key)) => (operation.to_string(), Some(key.to_string())),
+        None => (operation.to_string(), None),
+    };
+    state.failures.lock().await.push(FailedSubmission::Keeper {
         at: SystemTime::now(),
-        operation: operation.to_string(),
+        operation,
         network: state.config.network.as_str().to_string(),
-        token: String::new(),
-        symbol: String::new(),
-        source: None,
-        min: 0,
-        max: 0,
+        key,
         // Carry the hash whenever the failure happened *after* submission
         // (a poll timeout), so `/oracle/failed-submissions` hands an operator
         // something to look up on a block explorer for exactly the ambiguous
@@ -2148,6 +2162,9 @@ mod tests {
         const {
             assert!(POST_SET_PRICES_SETTLE_MS * 10 <= KEEPER_CYCLE_TIMEOUT_SECS * 1_000);
         }
+        let settle_ms = POST_SET_PRICES_SETTLE_MS;
+        let cycle_ms = KEEPER_CYCLE_TIMEOUT_SECS.saturating_mul(1_000);
+        assert!(settle_ms.saturating_mul(10) <= cycle_ms);
     }
 
     // ── #719: the in-flight-key decision must not depend on message text ─────
@@ -2461,8 +2478,9 @@ mod tests {
         let failures = state.failures.lock().await;
         let recorded: Vec<_> = failures.iter().collect();
         assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].tx_hash.as_deref(), Some(hash.as_str()));
-        assert_eq!(recorded[0].operation, "execute_deposit:abcd");
+        assert_eq!(recorded[0].tx_hash(), Some(hash.as_str()));
+        assert_eq!(recorded[0].operation(), "execute_deposit");
+        assert_eq!(recorded[0].key(), Some("abcd"));
     }
 
     #[tokio::test]
@@ -2480,7 +2498,7 @@ mod tests {
         let failures = state.failures.lock().await;
         let recorded: Vec<_> = failures.iter().collect();
         assert_eq!(recorded.len(), 1);
-        assert!(recorded[0].tx_hash.is_none());
+        assert!(recorded[0].tx_hash().is_none());
     }
 
     #[tokio::test]
@@ -2727,6 +2745,8 @@ mod tests {
                     ..Default::default()
                 }],
             },
+            coinbase_base_url: crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string(),
+            binance_base_url: crate::binance::BINANCE_TICKER_PRICE_URL.to_string(),
         };
         Arc::new(AppState::new(Arc::new(config)))
     }
@@ -2835,17 +2855,20 @@ mod keeper_tx_tests {
         config.keeper_secret_key = Some(std::sync::Arc::new(
             crate::chain::tx_builder::signing_key_from_secret(SECRET).unwrap(),
         ));
+        let key = Arc::new(ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]));
+        config.keeper_secret_key = Some(Arc::clone(&key));
         let state = AppState::new(Arc::new(config));
         assert!(state.tx_signing_key.is_some());
 
         let tx = dummy_tx();
         let got = sign_keeper_tx(&state, &tx).expect("cached-key signing succeeds");
-        let expected = crate::chain::tx_builder::sign_transaction(
+        let expected = crate::chain::tx_builder::sign_transaction_with_key(
             &tx,
             SECRET,
+            &key,
             &state.config.network_passphrase,
         )
-        .expect("string-key signing succeeds");
+        .expect("cached-key signing succeeds");
         assert_eq!(got, expected, "signature must be byte-identical");
     }
 
@@ -2867,7 +2890,12 @@ mod keeper_tx_tests {
     fn price_batches_split_at_max_price_batch_size() {
         let cache = |n: usize| -> BTreeMap<String, CachedPrice> {
             (0..n)
-                .map(|i| (format!("k{i:03}"), threshold_price(i as i128)))
+                .map(|i| {
+                    (
+                        format!("k{i:03}"),
+                        crate::keeper_loop::tests::threshold_price(i as i128),
+                    )
+                })
                 .collect()
         };
 

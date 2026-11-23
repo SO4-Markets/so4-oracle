@@ -129,6 +129,11 @@ fn build_spot_price_url_for(base_url: &str, symbols: &[String]) -> String {
 ///
 /// As with Coinbase, the base URL comes from `Config::binance_base_url`; no
 /// production endpoint is baked into the live call path (#1264).
+/// Fetches spot prices from the configured Binance base URL.
+///
+/// Callers pass `Config::binance_base_url` (production constant by default,
+/// overridable with `BINANCE_BASE_URL` for tests) — the fetch path never uses
+/// the production constant directly (#1264).
 pub async fn fetch_spot_prices(
     base_url: &str,
     symbols: &[String],

@@ -272,6 +272,13 @@ to `railway.json`, which is committed to the repo.
 | `/oracle/failed-submissions` | GET    | Admin | Failed submission history                                     |
 | `/metrics`                   | GET    | Admin | Prometheus metrics                                            |
 
+`/oracle/failed-submissions` accepts `?operation=<prefix>` (a **prefix** match,
+not equality — `execute` matches all `execute_*` labels, `order` matches none)
+and `?limit=<n>` (default 100, capped at 256). Its response reports
+`matched_count` (after filtering, before limiting) and `total_count` (the whole
+in-process buffer). Records are tagged `"kind": "price"` or `"kind": "keeper"`;
+keeper records carry an optional `key` and no price-only fields.
+
 ## Observability
 
 Every request emits a structured JSON log carrying: `timestamp`, `level`, `method`, `route` (matched path, not raw URI), `status`, `latency_ms`, and `request_id`. An `x-request-id` header is accepted on inbound requests; if absent, a UUIDv4 is generated. The request ID is echoed in the response headers and included in all handler-internal log events.

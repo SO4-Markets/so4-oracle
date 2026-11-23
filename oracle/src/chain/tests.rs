@@ -10,7 +10,9 @@ use stellar_xdr::{
 };
 
 use super::scval::{encode_prices_vec, strkey_to_sc_address};
-use super::tx_builder::{build_invoke_tx, sign_transaction_with_key, signing_key_from_secret};
+use super::tx_builder::{
+    build_invoke_tx, sign_transaction_with_key, signing_key_from_secret, InvokeTxOptions,
+};
 
 use crate::network_config::TESTNET_PASSPHRASE;
 use crate::state::CachedPrice;
@@ -67,8 +69,10 @@ fn set_prices_survives_build_sign_encode_decode() {
         vec![prices.clone()],
         100,
         7,
-        None,
-        0,
+        InvokeTxOptions {
+            soroban_data: None,
+            max_time: 0,
+        },
     )
     .unwrap();
     let key = signing_key_from_secret(&"11".repeat(32)).unwrap();

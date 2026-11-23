@@ -212,6 +212,14 @@ pub struct Config {
     pub keeper_loop_interval: Duration,
     /// Token feed configuration (symbols, sources, addresses).
     pub price_feed: PriceFeedConfig,
+    /// Base URL for Coinbase exchange-rate requests. Defaults to the production
+    /// endpoint; `COINBASE_BASE_URL` overrides it. Test-only override for
+    /// pointing price fetches at a local mock server (#1264).
+    pub coinbase_base_url: String,
+    /// Base URL for Binance spot-price requests. Defaults to the production
+    /// endpoint; `BINANCE_BASE_URL` overrides it. Test-only override for
+    /// pointing price fetches at a local mock server (#1264).
+    pub binance_base_url: String,
 }
 
 /// Minimum length of `ADMIN_API_TOKEN`; shorter tokens are brute-forceable (#1214).
@@ -657,6 +665,17 @@ impl Config {
             }
         }
 
+        // Test-only overrides so integration tests that build a Config from the
+        // environment can redirect price sources at a local mock server (#1264).
+        // Blank values fall back to the production constants, as with other
+        // optional variables.
+        let coinbase_base_url = lookup("COINBASE_BASE_URL")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| crate::coinbase::COINBASE_EXCHANGE_RATES_URL.to_string());
+        let binance_base_url = lookup("BINANCE_BASE_URL")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| crate::binance::BINANCE_TICKER_PRICE_URL.to_string());
+
         if !errors.is_empty() {
             return Err(EnvErrors(errors));
         }
@@ -700,6 +719,8 @@ impl Config {
             price_loop_interval,
             keeper_loop_interval,
             price_feed,
+            coinbase_base_url,
+            binance_base_url,
         })
     }
 }
@@ -1135,6 +1156,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.port(), 3000);
+    }
+
+    #[test]
+    fn config_from_lookup_uses_production_price_base_urls_by_default() {
+        let env = valid_env();
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(
+            cfg.coinbase_base_url,
+            crate::coinbase::COINBASE_EXCHANGE_RATES_URL
+        );
+        assert_eq!(
+            cfg.binance_base_url,
+            crate::binance::BINANCE_TICKER_PRICE_URL
+        );
+    }
+
+    #[test]
+    fn config_from_lookup_overrides_price_base_urls_from_env() {
+        let mut env = valid_env();
+        env.insert(
+            "COINBASE_BASE_URL",
+            "http://127.0.0.1:9001/coinbase".to_string(),
+        );
+        env.insert(
+            "BINANCE_BASE_URL",
+            "http://127.0.0.1:9002/binance".to_string(),
+        );
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(cfg.coinbase_base_url, "http://127.0.0.1:9001/coinbase");
+        assert_eq!(cfg.binance_base_url, "http://127.0.0.1:9002/binance");
+    }
+
+    #[test]
+    fn config_from_lookup_ignores_blank_price_base_url_overrides() {
+        let mut env = valid_env();
+        env.insert("COINBASE_BASE_URL", "   ".to_string());
+        env.insert("BINANCE_BASE_URL", String::new());
+
+        let cfg = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(
+            cfg.coinbase_base_url,
+            crate::coinbase::COINBASE_EXCHANGE_RATES_URL
+        );
+        assert_eq!(
+            cfg.binance_base_url,
+            crate::binance::BINANCE_TICKER_PRICE_URL
+        );
     }
 
     #[test]

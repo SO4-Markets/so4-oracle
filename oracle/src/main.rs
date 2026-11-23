@@ -291,6 +291,9 @@ async fn health_check() -> i32 {
 mod tests {
     use super::health_check_url;
     use super::{drain_background_tasks, drain_timeout, use_pretty_logs, BackgroundTask};
+    use super::{
+        drain_background_tasks, drain_timeout, health_check_url, use_pretty_logs, BackgroundTask,
+    };
 
     #[test]
     fn health_check_targets_loopback_on_the_bind_port() {

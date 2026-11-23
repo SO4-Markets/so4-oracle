@@ -78,6 +78,12 @@ fn check_keeper_key(config: &Config) -> PreflightCheck {
     let account_id = format!("{}", stellar_strkey::ed25519::PublicKey(public_bytes));
     if account_id == config.keeper_account_id {
         PreflightCheck {
+    let derived = config
+        .keeper_secret_key
+        .as_ref()
+        .map(|key| derive_keeper_account_id(key));
+    match derived {
+        Some(Ok(account_id)) if account_id == config.keeper_account_id => PreflightCheck {
             name: NAME,
             ok: true,
             hard: true,
@@ -85,6 +91,8 @@ fn check_keeper_key(config: &Config) -> PreflightCheck {
         }
     } else {
         PreflightCheck {
+        },
+        Some(Ok(account_id)) => PreflightCheck {
             name: NAME,
             ok: false,
             hard: true,
@@ -94,6 +102,25 @@ fn check_keeper_key(config: &Config) -> PreflightCheck {
             ),
         }
     }
+        },
+        Some(Err(error)) => PreflightCheck {
+            name: NAME,
+            ok: false,
+            hard: true,
+            detail: error,
+        },
+        None => PreflightCheck {
+            name: NAME,
+            ok: false,
+            hard: true,
+            detail: "KEEPER_SECRET_KEY is not configured".to_string(),
+        },
+    }
+}
+
+fn derive_keeper_account_id(signing_key: &ed25519_dalek::SigningKey) -> Result<String, String> {
+    let strkey = stellar_strkey::ed25519::PublicKey(signing_key.verifying_key().to_bytes());
+    Ok(strkey.to_string().as_str().to_string())
 }
 
 async fn check_keeper_balance(config: &Config) -> PreflightCheck {

@@ -173,7 +173,7 @@ async fn multi_source_coinbase_failure_recorded_separately() {
     let failures = state.failures.lock().await;
     let coinbase_failures: Vec<_> = failures
         .iter()
-        .filter(|f| f.operation.contains("coinbase") || f.operation.contains("TMSRC"))
+        .filter(|f| f.operation().contains("coinbase") || f.operation().contains("TMSRC"))
         .collect();
     assert!(
         !coinbase_failures.is_empty(),

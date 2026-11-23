@@ -96,6 +96,10 @@ Once running, the oracle exposes:
 | `DELETE /keeper/blacklist/{key}` | Bearer | Clears a permanently-blacklisted order/deposit/withdrawal key     |
 | `GET /oracle/failed-submissions` | Bearer | Ring buffer of failed on-chain submissions                        |
 
+`?operation=` is a **prefix** filter (e.g. `execute` matches every `execute_*`
+label); `?limit=` caps the page. The response includes `matched_count` and a
+buffer-wide `total_count`.
+
 ---
 
 ## Finding Work

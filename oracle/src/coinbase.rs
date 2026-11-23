@@ -138,6 +138,11 @@ pub fn parse_coinbase_http_result(
 /// There is deliberately no parameterless variant: the price loop always
 /// passes `Config::coinbase_base_url`, so tests can point a real `AppState` at
 /// a mock server instead of silently reaching production (#1264).
+/// Fetches a spot price from the configured Coinbase base URL.
+///
+/// Callers pass `Config::coinbase_base_url` (production constant by default,
+/// overridable with `COINBASE_BASE_URL` for tests) — the fetch path never uses
+/// the production constant directly (#1264).
 pub async fn fetch_spot_price(base_url: &str, symbol: &str) -> Result<i128, CoinbasePriceError> {
     fetch_spot_price_with_url(base_url, symbol).await
 }
