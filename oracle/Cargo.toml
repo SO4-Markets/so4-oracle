@@ -21,7 +21,6 @@ path = "src/main.rs"
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "matched-path", "original-uri", "query", "tokio", "tower-log", "tracing"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "test-util"] }
-futures = "0.3"
 tokio-util = "0.7"
 # request-id/catch-panic/set-header gate the modules api/mod.rs builds its
 # middleware stack from; `query` on reqwest gates `RequestBuilder::query`,
@@ -65,6 +64,6 @@ stellar-xdr = { version = "27", features = ["std", "base64"] }
 stellar-strkey = "0.0.18"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
-openssl = { version = "0.10", features = ["vendored"] }
+futures = "0.3"
 predicates = "3"
 tower = { version = "0.5", features = ["util"] }
