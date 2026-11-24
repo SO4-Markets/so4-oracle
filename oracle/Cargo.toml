@@ -50,7 +50,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 shared-config = { path = "../shared/config" }
-stellar-xdr = { version = "27", features = ["std", "base64"] }
+stellar-xdr = { version = "28", features = ["std", "base64"] }
 stellar-strkey = "0.0.18"
 base64 = "0.22"
 sha2 = "0.10"
@@ -60,7 +60,7 @@ subtle = "2.6"
 
 [dev-dependencies]
 base64 = "0.22"
-stellar-xdr = { version = "27", features = ["std", "base64"] }
+stellar-xdr = { version = "28", features = ["std", "base64"] }
 stellar-strkey = "0.0.18"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
