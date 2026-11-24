@@ -47,8 +47,7 @@ spawns two tokio tasks that share it.
   withdrawals; refreshes prices for the tokens that pending work touches
   (again via `set_prices`); then executes — or freezes — each item on its
   handler contract. Every error is recorded and the loop continues; it never
-  panics (`panic = "abort"` in the release profile would take the process
-  down).
+  panics (see `[profile.release]` in `Cargo.toml` for the panic strategy).
 
 `PriceCache` is the bridge between the loops and the API: the price loop
 writes signed prices into it, `GET /prices` serves it to the frontend, and
