@@ -139,6 +139,17 @@ impl TokenConfig {
 
 // ── Loading helpers ──────────────────────────────────────────────────────────
 
+fn is_valid_token_symbol(symbol: &str) -> bool {
+    let bytes = symbol.as_bytes();
+    if bytes.is_empty() || bytes.len() > 16 {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(i, b)| {
+        matches!(b, b'A'..=b'Z' | b'0'..=b'9')
+            || (i > 0 && matches!(b, b'_' | b'.' | b'-'))
+    })
+}
+
 /// Error type for configuration loading.
 ///
 /// Derives `Clone`/`Eq` so it can be embedded in `oracle::config::EnvError`,
@@ -197,12 +208,28 @@ pub fn parse_token_configs(raw: &str) -> Result<Vec<TokenConfig>, ConfigError> {
                 reason: "symbol must not be empty".to_string(),
             });
         }
+        if !is_valid_token_symbol(&token.symbol) {
+            return Err(ConfigError::InvalidToken {
+                symbol: token.symbol.clone(),
+                reason: "symbol must match ^[A-Z0-9][A-Z0-9_.-]{0,15}$".to_string(),
+            });
+        }
         let lower_symbol = token.symbol.to_lowercase();
         if !symbols_seen.insert(lower_symbol) {
             return Err(ConfigError::InvalidToken {
                 symbol: token.symbol.clone(),
                 reason: "duplicate symbol (case-insensitive)".to_string(),
             });
+        }
+        if let Some(display) = token.display_symbol.as_deref() {
+            if !display.is_empty() && !is_valid_token_symbol(display) {
+                return Err(ConfigError::InvalidToken {
+                    symbol: token.symbol.clone(),
+                    reason: format!(
+                        "display_symbol '{display}' must match ^[A-Z0-9][A-Z0-9_.-]{0,15}$"
+                    ),
+                });
+            }
         }
         // Validate stellar_address uniqueness (#872).
         if !token.stellar_address.is_empty() {
@@ -383,16 +410,26 @@ mod tests {
     }
 
     #[test]
-    fn reject_case_colliding_symbols() {
-        let json = r#"[
-            {"symbol":"BTC","stellar_address":"CBTCADDR","sources":["binance"]},
-            {"symbol":"btc","stellar_address":"CETHADDR","sources":["binance"]}
-        ]"#;
+    fn reject_invalid_symbol_format() {
+        let json = r#"[{"symbol":"btc","stellar_address":"CBTCADDR","sources":["binance"]}]"#;
         let err = parse_token_configs(json).unwrap_err();
         match err {
             ConfigError::InvalidToken { symbol, reason } => {
                 assert_eq!(symbol, "btc");
-                assert_eq!(reason, "duplicate symbol (case-insensitive)");
+                assert!(reason.contains("symbol must match"));
+            }
+            _ => panic!("expected ConfigError::InvalidToken"),
+        }
+    }
+
+    #[test]
+    fn reject_invalid_display_symbol_format() {
+        let json = r#"[{"symbol":"BTC","display_symbol":"bad symbol","stellar_address":"CBTCADDR","sources":["binance"]}]"#;
+        let err = parse_token_configs(json).unwrap_err();
+        match err {
+            ConfigError::InvalidToken { symbol, reason } => {
+                assert_eq!(symbol, "BTC");
+                assert!(reason.contains("display_symbol"));
             }
             _ => panic!("expected ConfigError::InvalidToken"),
         }

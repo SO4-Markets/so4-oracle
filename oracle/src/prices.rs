@@ -333,7 +333,9 @@ pub fn filter_outliers(
     let mut sorted = prices.to_vec();
     sorted.sort_unstable();
     let median = if sorted.len().is_multiple_of(2) {
-        (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2
+        let hi = sorted[sorted.len() / 2];
+        let lo = sorted[sorted.len() / 2 - 1];
+        lo + (hi - lo) / 2
     } else {
         sorted[sorted.len() / 2]
     };
@@ -343,7 +345,9 @@ pub fn filter_outliers(
     let mut deviations: Vec<i128> = prices.iter().map(|&p| (p - median).abs()).collect();
     deviations.sort_unstable();
     let mad = if deviations.len().is_multiple_of(2) {
-        (deviations[deviations.len() / 2 - 1] + deviations[deviations.len() / 2]) / 2
+        let hi = deviations[deviations.len() / 2];
+        let lo = deviations[deviations.len() / 2 - 1];
+        lo + (hi - lo) / 2
     } else {
         deviations[deviations.len() / 2]
     };
@@ -412,7 +416,9 @@ pub fn compute_median_allow_single(prices: &[i128]) -> Option<i128> {
     let mut sorted = prices.to_vec();
     sorted.sort_unstable();
     if sorted.len().is_multiple_of(2) {
-        Some((sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2)
+        let hi = sorted[sorted.len() / 2];
+        let lo = sorted[sorted.len() / 2 - 1];
+        Some(lo + (hi - lo) / 2)
     } else {
         Some(sorted[sorted.len() / 2])
     }

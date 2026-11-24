@@ -10,7 +10,10 @@ impl std::fmt::Display for FixedPriceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingFixedPrice => f.write_str("fixed price is not configured"),
-            Self::InvalidFixedPrice(price) => write!(f, "invalid fixed price: {price}"),
+            Self::InvalidFixedPrice(price) => write!(
+                f,
+                "invalid fixed price '{price}': expected 1e30-scaled integer between {MIN_FIXED_PRICE} and {MAX_FIXED_PRICE}"
+            ),
         }
     }
 }
@@ -24,6 +27,9 @@ impl crate::retry::Retryable for FixedPriceError {
     }
 }
 
+pub const MIN_FIXED_PRICE: i128 = 1_000_000_000_000_000_000_000_000; // 1e-6 at 1e30 scale
+pub const MAX_FIXED_PRICE: i128 = 10_000_000_000_000_000_000_000_000_000_000_000_000_000; // 1e10 at 1e30 scale
+
 pub fn fixed_price(token: &TokenConfig) -> Result<i128, FixedPriceError> {
     let raw = token
         .fixed_price
@@ -32,7 +38,7 @@ pub fn fixed_price(token: &TokenConfig) -> Result<i128, FixedPriceError> {
     let price = raw
         .parse::<i128>()
         .map_err(|_| FixedPriceError::InvalidFixedPrice(raw.to_string()))?;
-    if price <= 0 {
+    if !(MIN_FIXED_PRICE..=MAX_FIXED_PRICE).contains(&price) {
         return Err(FixedPriceError::InvalidFixedPrice(raw.to_string()));
     }
     Ok(price)
@@ -139,9 +145,37 @@ mod tests {
     }
 
     #[test]
-    fn accepts_smallest_valid_fixed_price() {
-        let token = token_with_fixed_price(Some("1"));
-        assert_eq!(fixed_price(&token).unwrap(), 1);
+    fn accepts_minimum_valid_fixed_price() {
+        let token = token_with_fixed_price(Some("1000000000000000000000000"));
+        assert_eq!(fixed_price(&token).unwrap(), MIN_FIXED_PRICE);
+    }
+
+    #[test]
+    fn accepts_maximum_valid_fixed_price() {
+        let token = token_with_fixed_price(Some(
+            "10000000000000000000000000000000000000000",
+        ));
+        assert_eq!(fixed_price(&token).unwrap(), MAX_FIXED_PRICE);
+    }
+
+    #[test]
+    fn rejects_fixed_price_below_minimum() {
+        let token = token_with_fixed_price(Some("999999999999999999999999"));
+        assert!(matches!(
+            fixed_price(&token).unwrap_err(),
+            FixedPriceError::InvalidFixedPrice(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_fixed_price_above_maximum() {
+        let token = token_with_fixed_price(Some(
+            "10000000000000000000000000000000000000001",
+        ));
+        assert!(matches!(
+            fixed_price(&token).unwrap_err(),
+            FixedPriceError::InvalidFixedPrice(_)
+        ));
     }
 
     #[test]
@@ -151,6 +185,14 @@ mod tests {
             fixed_price(&token).unwrap_err(),
             FixedPriceError::InvalidFixedPrice("abc".to_string()),
         );
+    }
+
+    #[test]
+    fn rejects_out_of_range_with_reason_in_message() {
+        let token = token_with_fixed_price(Some("1"));
+        let err = fixed_price(&token).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid fixed price"), "{msg}");
     }
 
     // #571 — non-numeric parse failure must surface the raw input in the error
