@@ -12,16 +12,16 @@ pub fn encode_signed_price(price: &CachedPrice) -> Result<ScVal, String> {
         ));
     }
 
-    let contract_addr = strkey_to_sc_address(&price.token_address)?;
+    let contract_addr = contract_strkey_to_sc_address(&price.token_address)?;
 
     let min_parts = i128_to_int128_parts(price.min);
     let max_parts = i128_to_int128_parts(price.max);
 
     let entries = vec![
-        sc_map_entry("keeper_index", ScVal::U32(price.keeper_index)),
-        sc_map_entry("ledger_seq", ScVal::U32(price.ledger_seq)),
-        sc_map_entry("max_price", ScVal::I128(max_parts)),
-        sc_map_entry("min_price", ScVal::I128(min_parts)),
+        sc_map_entry("keeper_index", ScVal::U32(price.keeper_index))?,
+        sc_map_entry("ledger_seq", ScVal::U32(price.ledger_seq))?,
+        sc_map_entry("max_price", ScVal::I128(max_parts))?,
+        sc_map_entry("min_price", ScVal::I128(min_parts))?,
         sc_map_entry(
             "signature",
             ScVal::Bytes(stellar_xdr::ScBytes(
@@ -29,9 +29,9 @@ pub fn encode_signed_price(price: &CachedPrice) -> Result<ScVal, String> {
                     .try_into()
                     .map_err(|_| "failed to convert sig bytes".to_string())?,
             )),
-        ),
-        sc_map_entry("timestamp", ScVal::U64(price.timestamp)),
-        sc_map_entry("token", ScVal::Address(contract_addr)),
+        )?,
+        sc_map_entry("timestamp", ScVal::U64(price.timestamp))?,
+        sc_map_entry("token", ScVal::Address(contract_addr))?,
     ];
 
     let sc_map = stellar_xdr::ScMap(
@@ -62,15 +62,15 @@ pub fn encode_prices_vec(prices: &[&CachedPrice]) -> Result<ScVal, String> {
     Ok(ScVal::Vec(Some(sc_vec)))
 }
 
-fn sc_map_entry(key: &str, val: ScVal) -> stellar_xdr::ScMapEntry {
+fn sc_map_entry(key: &str, val: ScVal) -> Result<stellar_xdr::ScMapEntry, String> {
     let sym: stellar_xdr::ScSymbol = key
         .to_string()
         .try_into()
-        .expect("sc_map_entry key too long");
-    stellar_xdr::ScMapEntry {
+        .map_err(|_| format!("sc_map_entry key too long: {key}"))?;
+    Ok(stellar_xdr::ScMapEntry {
         key: ScVal::Symbol(sym),
         val,
-    }
+    })
 }
 
 fn i128_to_int128_parts(value: i128) -> stellar_xdr::Int128Parts {
@@ -100,6 +100,16 @@ pub fn strkey_to_sc_address(strkey: &str) -> Result<stellar_xdr::ScAddress, Stri
         }
         other => Err(format!("unsupported strkey type: {other:?}")),
     }
+}
+
+fn contract_strkey_to_sc_address(strkey: &str) -> Result<stellar_xdr::ScAddress, String> {
+    let contract = stellar_strkey::Contract::from_string(strkey)
+        .map_err(|e| format!("invalid contract strkey '{strkey}': {e}"))?;
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(contract.0.as_ref());
+    Ok(stellar_xdr::ScAddress::Contract(stellar_xdr::ContractId(
+        stellar_xdr::Hash(bytes),
+    )))
 }
 
 pub fn account_strkey_to_muxed(strkey: &str) -> Result<stellar_xdr::MuxedAccount, String> {
@@ -208,7 +218,7 @@ mod tests {
     #[test]
     fn test_encode_signed_price_produces_sorted_map() {
         let price = CachedPrice {
-            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
+            token_address: "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 0,
@@ -295,7 +305,7 @@ mod tests {
     #[test]
     fn test_encode_signed_price_non_hex_signature() {
         let price = CachedPrice {
-            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
+            token_address: "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 0,
@@ -318,7 +328,7 @@ mod tests {
     #[test]
     fn test_encode_signed_price_wrong_length_signature() {
         let price = CachedPrice {
-            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
+            token_address: "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 0,
@@ -343,7 +353,7 @@ mod tests {
     #[test]
     fn test_encode_prices_vec() {
         let price = CachedPrice {
-            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
+            token_address: "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 0,
@@ -379,7 +389,7 @@ mod tests {
     #[test]
     fn test_encode_signed_price_uses_configured_keeper_index() {
         let price = CachedPrice {
-            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
+            token_address: "CBEMTV23SIJJBIST3V5HTMWHR4MHYGHNBIG4M26U4LGUJTWZXTFSVQEY".to_string(),
             symbol: "TUSDC".to_string(),
             display_symbol: "USDC".to_string(),
             keeper_index: 7,
@@ -407,5 +417,25 @@ mod tests {
             }
             _ => panic!("expected ScVal::Map"),
         }
+    }
+
+    #[test]
+    fn test_encode_signed_price_rejects_account_token_address() {
+        let price = CachedPrice {
+            token_address: "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7".to_string(),
+            symbol: "TUSDC".to_string(),
+            display_symbol: "USDC".to_string(),
+            keeper_index: 0,
+            min: 1_000_000_000_000_000_000_000_000_000_000,
+            max: 1_000_000_000_000_000_000_000_000_000_000,
+            median: 1_000_000_000_000_000_000_000_000_000_000,
+            timestamp: 1718400000,
+            ledger_seq: 12345,
+            sources_used: vec!["fixed".to_string()],
+            signature: "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        };
+
+        let err = encode_signed_price(&price).unwrap_err();
+        assert!(err.contains("contract strkey"), "unexpected error: {err}");
     }
 }
